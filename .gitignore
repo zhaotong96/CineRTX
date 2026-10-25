@@ -1,0 +1,52 @@
+# Build trees
+/build/
+/out/
+/artifacts/
+CMakeUserPresets.json
+
+# Compiler and linker outputs
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# IDE state
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.suo
+
+# Test and audit products
+/tests/artifacts/
+*.p010
+*.sidecar.json
+SHA256SUMS.txt
+
+# Stray tool output (compiler preprocessor dumps land in the repo root when a
+# probe redirect is mistyped; a file literally named "-" has happened before)
+/-
+*.nsys-rep
+*.sqlite
+gate1*.p010
+gate1*.nv12
+
+# NVIDIA Proprietary SDKs, Reference Samples and Ephemeral Packages
+/RTX_Video_SDK*/
+/DLSS_Sample_App*/
+/nvngx_dll*/
+/third_party/rtx_video_sdk/
+*.zip
+*.tar.gz
+*.7z
+
+# AI agent local cache
+/.workbuddy-ai/

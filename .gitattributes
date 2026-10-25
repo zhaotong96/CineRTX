@@ -1,0 +1,13 @@
+# Auto-normalize line endings to LF in repository; checkout as platform native
+* text=auto
+
+# Binary files
+*.png binary
+*.jpg binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.lib binary
+
+# Generated PTX text files participate in normalization
+*.ptx text

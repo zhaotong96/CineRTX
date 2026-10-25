@@ -1,0 +1,80 @@
+CINERTX PLUGIN-EXCEPTION TO GNU GENERAL PUBLIC LICENSE v3.0
+Version 1.0, 21 October 2026
+
+This exception is an additional permission under section 7 of the GNU General
+Public License, version 3 ("GPLv3").  It applies to every file in the RTX
+Transcode Engine distribution that carries the SPDX license expression
+
+    GPL-3.0-or-later WITH Plugin-Exception
+
+(collectively, the "Covered Work").  The name "Plugin-Exception" refers to
+this document.
+
+0. DEFINITIONS
+
+"Plugin Interface" means the pure C application binary interface declared in
+include/shim/rtx_shim_abi.h and include/shim/ngx_bridge_abi.h, together with
+the loader-facing backend interface declared in include/rtx/backend.h and
+include/shim/i_engine_backend.h, as distributed with the Covered Work.
+
+"Independent Module" means a software component that
+
+  (a) is not derived from the Covered Work;
+  (b) is distributed under license terms other than the GPLv3, including
+      proprietary end-user license terms; and
+  (c) is combined with the Covered Work only at run time by dynamic loading
+      through the Plugin Interface, without being statically linked into, or
+      compiled together with, the Covered Work.
+
+NVIDIA CUDA, the Video Codec SDK (NVDEC/NVENC), the Optical Flow SDK
+(NvOFFRUC), TensorRT, and the RTX Video SDK (NGX, including standalone plugin
+bridge modules such as rtx_ngx_bridge.dll that may internally link vendor
+static stub libraries such as nvsdk_ngx_s.lib) are examples of Independent
+Modules.
+
+1. ADDITIONAL PERMISSION
+
+You may convey the Covered Work, in source or object form, combined with
+Independent Modules, and distribute the resulting combination, without the
+Independent Modules being treated as part of, or as derivative works of, the
+Covered Work, provided that:
+
+  (a) the Covered Work remains licensed under the GPLv3 as modified by this
+      exception;
+
+  (b) every Independent Module is combined only at run time through the
+      Plugin Interface and is not statically linked into the Covered Work;
+
+  (c) the distribution does not include NVIDIA SDK headers, import libraries,
+      static libraries, or other proprietary SDK material as part of the
+      Covered Work's source code; and
+
+  (d) recipients are informed that the Independent Modules are governed by
+      their own license terms and are not covered by this exception.
+
+2. NO EFFECT ON OTHER TERMS
+
+This exception does not grant any license or other right to any Independent
+Module, and it does not alter the terms under which any Independent Module is
+distributed.  It does not permit combining the Covered Work with any component
+in a way that would make the Covered Work, or any portion of it, subject to
+the terms of a proprietary license.
+
+3. TERMINATION
+
+If you modify the Covered Work so that it statically links, or is otherwise
+combined at build time with, an Independent Module, this exception does not
+apply to that modified work, and the GPLv3 applies to the combination without
+this additional permission.
+
+4. DISCLAIMER
+
+THIS EXCEPTION IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THIS EXCEPTION OR THE USE OR OTHER DEALINGS IN
+THE COVERED WORK.
+
+Copyright (C) 2026 RTX Transcode Engine contributors.
