@@ -65,6 +65,8 @@
 | **26** | [`phase2/CineRTX 代码库深度静态审计.md`](phase2/CineRTX%20代码库深度静态审计.md) | 开源前深度静态代码审计（发现并闭环 12 项系统级缺陷） | `audit`, `defect-analysis`, `system-hardening` |
 | **27** | [`phase2/CineRTX_领域专家终审与开源就绪请求书.md`](phase2/CineRTX_领域专家终审与开源就绪请求书.md) | 领域专家终审与开源就绪呈报请求书（DOSSIER-FINAL-SIGNOFF-20261025） | `signoff-request`, `dossier`, `readiness` |
 | **28** | [`phase2/CineRTX 开源终审与验收评估.md`](phase2/CineRTX%20开源终审与验收评估.md) | 领域专家委员会全票签署之开源发布令与 A 级工业级就绪裁定 | `final-verdict`, `a-grade`, `open-source-ready` |
+| **29** | [`phase2/CineRTX_GitHub开源协议识别异常协助调查文档.md`](phase2/CineRTX_GitHub开源协议识别异常协助调查文档.md) | GitHub 开源许可证识别异常 (License: Other) 深度调查与专家咨询请求书 | `licensee`, `gpl-exception`, `license-other` |
+| **30** | [`phase2/CineRTX 开源协议异常解决方案.md`](phase2/CineRTX%20开源协议异常解决方案.md) | 领域专家委员会全票签署之开源协议异常终审裁定与 P0 级标准化施工规程 | `license-solution`, `verbatim-gpl`, `normative-conflict` |
 
 ---
 
@@ -72,7 +74,7 @@
 
 | 序号 | 交付文档 | 核心内容 | 索引关键字 |
 | :---: | :--- | :--- | :--- |
-| **29** | [`handover/交接文档.md`](handover/交接文档.md) | 跨机环境同步、开发机-测试机映射关系、环境变量配置与日常维护排障手册 | `handover`, `maintenance`, `troubleshooting` |
+| **31** | [`handover/交接文档.md`](handover/交接文档.md) | 跨机环境同步、开发机-测试机映射关系、环境变量配置与日常维护排障手册 | `handover`, `maintenance`, `troubleshooting` |
 
 ---
 
@@ -82,7 +84,7 @@
 
 | 序号 | 待办规范 | 核心内容 | 索引关键字 |
 | :---: | :--- | :--- | :--- |
-| **30** | [`TODO/ui_refactor_and_plugin_status.md`](TODO/ui_refactor_and_plugin_status.md) | Win32 原生 GDI 底部状态栏设计、NGX 插件运行态健康诊断探针与模式联动交互体系 | `status-bar`, `diagnostics`, `plugin-health`, `ui-refactor` |
-| **31** | [`TODO/i18n_architecture_and_localization.md`](TODO/i18n_architecture_and_localization.md) | 零依赖、零堆内存分配的 $O(1)$ 强类型枚举国际化 (i18n) 架构与中英双语自适应规范 | `i18n`, `localization`, `zero-allocation`, `bilingual` |
+| **32** | [`TODO/ui_refactor_and_plugin_status.md`](TODO/ui_refactor_and_plugin_status.md) | Win32 原生 GDI 底部状态栏设计、NGX 插件运行态健康诊断探针与模式联动交互体系 | `status-bar`, `diagnostics`, `plugin-health`, `ui-refactor` |
+| **33** | [`TODO/i18n_architecture_and_localization.md`](TODO/i18n_architecture_and_localization.md) | 零依赖、零堆内存分配的 $O(1)$ 强类型枚举国际化 (i18n) 架构与中英双语自适应规范 | `i18n`, `localization`, `zero-allocation`, `bilingual` |
 
 

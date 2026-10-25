@@ -1,14 +1,14 @@
 CINERTX PLUGIN-EXCEPTION TO GNU GENERAL PUBLIC LICENSE v3.0
-Version 1.0, 21 October 2026
+Version 1.1, 25 October 2026
 
 This exception is an additional permission under section 7 of the GNU General
-Public License, version 3 ("GPLv3").  It applies to every file in the RTX
-Transcode Engine distribution that carries the SPDX license expression
+Public License, version 3 ("GPLv3").  It applies to every file in the CineRTX
+(formerly RTX Transcode Engine) distribution that carries the SPDX license expression
 
     GPL-3.0-or-later WITH Plugin-Exception
 
-(collectively, the "Covered Work").  The name "Plugin-Exception" refers to
-this document.
+(collectively, the "Covered Work").  The name "Plugin-Exception" (also referred
+to as "CineRTX Plugin-Exception") refers to this document.
 
 0. DEFINITIONS
 
@@ -77,4 +77,4 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THIS EXCEPTION OR THE USE OR OTHER DEALINGS IN
 THE COVERED WORK.
 
-Copyright (C) 2026 RTX Transcode Engine contributors.
+Copyright (C) 2026 CineRTX contributors.

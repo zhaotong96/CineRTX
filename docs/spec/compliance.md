@@ -172,14 +172,16 @@ A failing audit blocks the build; packaging depends on all three build jobs.
   changing the headers.
 - The D3D12/CUDA interop layer loads `d3d12.dll` and `dxgi.dll` through
   `LoadLibraryExW`, so it carries no static Direct3D import either. The NGX
-  evaluation path still requires the RTX Video SDK (`nvsdk_ngx_d.dll`,
-  `nvngx_vsr.dll`, `nvngx_truehdr.dll`), which is not distributed here; without
-  it the bridge reports `RTX_ERR_NGX` and never pretends a texture exists.
+  evaluation path requires the RTX Video SDK runtime (`_nvngx.dll`,
+  `nvngx_vsr.dll`, `nvngx_truehdr.dll`, resolved via the internal bridge
+  stub `nvsdk_ngx_s.lib`), which is not distributed here; without it the bridge
+  reports `RTX_ERR_NGX` and never pretends a texture exists.
 - SPDX exception identifiers are not registered with the SPDX License List.
   `Plugin-Exception` is defined by `COPYING.EXCEPTION` in this repository.
   Distributors who require a registered identifier can use
-  `GPL-3.0-or-later WITH LicenseRef-Plugin-Exception` and point
-  `LicenseRef-Plugin-Exception` at the same text.
+  `GPL-3.0-or-later WITH LicenseRef-Plugin-Exception` or the modern SPDX 3.0
+  syntax `GPL-3.0-or-later WITH AdditionRef-Plugin-Exception` and point
+  the reference identifier at `COPYING.EXCEPTION`.
 
 ---
 

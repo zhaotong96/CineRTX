@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
-# Copyright (C) 2026 RTX Transcode Engine contributors
+# Copyright (C) 2026 CineRTX contributors
 #
 # Audits SPDX headers, the GPL/MIT directory boundary, forbidden NVIDIA
 # includes, and accidental binary blobs.  Uses only PowerShell so it runs on
@@ -200,6 +200,12 @@ foreach ($license in $requiredLicenses) {
     $content = Get-Content -LiteralPath $path -Raw
     if (-not $content.Contains($license.Needle)) {
         Add-Violation "$($license.Path): does not contain '$($license.Needle)'"
+    }
+    if ($license.Path -eq 'LICENSE') {
+        $firstNonEmpty = (Get-Content -LiteralPath $path | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -First 1).Trim()
+        if ($firstNonEmpty -ne 'GNU GENERAL PUBLIC LICENSE') {
+            Add-Violation "LICENSE: must be a verbatim FSF GPLv3 text starting with 'GNU GENERAL PUBLIC LICENSE' (found '$firstNonEmpty'); keep custom exceptions strictly in COPYING.EXCEPTION"
+        }
     }
 }
 
