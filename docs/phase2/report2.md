@@ -1,3 +1,9 @@
+> **历史施工日志（已过时）。** 文中出现的 `--remaster` 开关、
+> `rtx-transcode*.exe` 目标与容器透传行为均已移除。`CineRTX.exe` 现在只有
+> 一条产品转码路径：NVDEC → RTX VSR + TrueHDR → NVENC HEVC Main10；
+> CPU、raw 与容器透传入口仅用于验证。当前契约见 `README.md`、
+> `docs/spec/architecture.md` 和 `include/rtx/hw_transcode.h`。
+
 先读取这两份文档，了解核准的施工计划和前序工程师的交接内容。
 
 已核验两份文档。现在开始勘察本地代码库的实际状态，确认哪些文件存在、构建目录是否可用。

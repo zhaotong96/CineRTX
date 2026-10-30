@@ -1514,16 +1514,28 @@ bool interopPrerequisitesAvailable() {
 
 std::wstring plugin_directory() {
 #if defined(_WIN32)
-    // Explicit override wins (CI and commercial deployments).
+    // Explicit override wins (CI and commercial deployments), but only when it
+    // actually contains a feature DLL.  A stale RTX_NGX_PLUGIN_DIR left over
+    // from an older deployment must not hide the copies sitting beside the
+    // bridge.
     wchar_t override_dir[32768] = {};
     const DWORD override_length =
         GetEnvironmentVariableW(L"RTX_NGX_PLUGIN_DIR", override_dir, 32768);
     if (override_length > 0 && override_length < 32768) {
-        return std::wstring(override_dir, override_length);
+        const std::wstring override_path(override_dir, override_length);
+        for (const wchar_t* name : {L"nvngx_vsr.dll", L"nvngx_truehdr.dll"}) {
+            const std::wstring candidate = override_path + L"\\" + name;
+            const DWORD attributes = GetFileAttributesW(candidate.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                return override_path;
+            }
+        }
     }
-    // Otherwise <directory of this bridge DLL>/plugins/nvidia_rtx.  The module
-    // handle comes from the address of a function in this translation unit,
-    // which is the documented way for a DLL to locate itself.
+    // Otherwise the bridge's own directory when the feature DLLs sit beside
+    // it, or <bridge dir>/plugins/nvidia_rtx for a bridge at the app root.  The
+    // module handle comes from the address of a function in this translation
+    // unit, which is the documented way for a DLL to locate itself.
     HMODULE module = nullptr;
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -1537,9 +1549,21 @@ std::wstring plugin_directory() {
                           : std::wstring());
     const size_t slash = path.find_last_of(L"\\/");
     if (slash != std::wstring::npos) {
-        path.resize(slash + 1);
+        path.resize(slash);
     }
-    return path + L"plugins\\nvidia_rtx";
+    // Canonical staging, install and <app>/plugins/nvidia_rtx layouts keep the
+    // feature DLLs in the bridge's own directory; only a bridge placed at the
+    // app root uses the nested plugins/nvidia_rtx directory.
+    auto present = [&path](const wchar_t* name) {
+        const std::wstring candidate = path + L"\\" + name;
+        const DWORD attributes = GetFileAttributesW(candidate.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+               (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    };
+    if (present(L"nvngx_vsr.dll") || present(L"nvngx_truehdr.dll")) {
+        return path;
+    }
+    return path + L"\\plugins\\nvidia_rtx";
 #else
     return std::wstring();
 #endif

@@ -193,9 +193,11 @@ scale: contrast 125, saturation 75, middle grey 44, peak 1000.
 
 ## 6. NGX bridge ABI
 
-The bridge is a separate shared library (`rtx_ngx_bridge.dll` /
-`librtx_ngx_bridge.so`) because only this component needs D3D12, DXGI, CUDA
-external memory, and NGX. It remains MIT/Apache-2.0.
+On Windows the bridge is a separate shared library (`rtx_ngx_bridge.dll`)
+because only this component needs D3D12, DXGI, CUDA external memory, and NGX.
+On non-Windows hosts the same C ABI is compiled into a static archive and
+linked into the image — no `librtx_ngx_bridge.so` is produced. It remains
+MIT/Apache-2.0.
 
 Lifecycle:
 
@@ -214,14 +216,20 @@ Lifecycle:
 6. `rtx_ngx_bridge_flush()` drains queued work; `destroy()` releases
    everything.
 
-In this source drop the CLI and shim do not load the bridge: `test_shim.cpp`
-loads the built library through `DynLibrary` and exercises every exported
-entry point. The SDK-enabled NVIDIA backend is the intended production caller.
+On Windows `NgxRemasterBridge` loads `rtx_ngx_bridge.dll` from
+`RTX_NGX_BRIDGE_PATH`, then `<exe_dir>/plugins/nvidia_rtx/`, then the
+executable directory. Every Windows build stages the bridge there (the
+canonical copy lives under `build/external/plugins/nvidia_rtx`), and
+`test_shim.cpp` links the SDK-free stub archive to exercise the same exported
+entry points in-process. The SDK-enabled NVIDIA backend is the intended
+production caller.
 
 The stub validates arguments, reports `RTX_ERR_NOT_IMPLEMENTED` for execution,
-and never pretends a texture exists. Compiling the real implementation requires
-`RTX_WITH_NGX_SDK=ON` and the proprietary headers; the build fails with an
-explanatory message if the implementation translation unit is absent.
+and never pretends a texture exists. Every Windows build compiles the real
+implementation against the proprietary RTX Video SDK headers — there is no
+opt-in switch — and the build fails with an explanatory message if the
+implementation translation unit is absent. Non-Windows hosts, which have no
+NGX/D3D12, compile the SDK-free stub instead.
 
 ## 7. Loader security
 
@@ -235,6 +243,12 @@ explanatory message if the implementation translation unit is absent.
 It never calls `LoadLibraryW(name)` with a bare name, never searches the
 current directory, and never uses `PATH` for SDK components. A failure includes
 the attempted path and the OS error.
+
+The FRUC bridge (`offruc_bridge.cpp`) and the Zone C bridge
+(`rtx_ngx_bridge.dll` / `rife_builder.cpp`) follow the same order independently, because neither module
+is loaded through `DynLibrary`: `RTX_NVIDIA_DIR`, then the executable directory,
+then the bare name (System32 only). `NvOFFRUC.dll` and `nvinfer_10.dll` have no
+System32 fallback in practice — they are SDK redistributables, not drivers.
 
 ## 8. Minimal consumer example
 
@@ -304,3 +318,8 @@ stays `2u` because the addition is purely additive):
 Consumers must keep the destruction order: destroy the NVENC session
 **before** the bridge (the ring buffers are freed in `~BridgeImpl` while the
 CUDA context binding is still alive).
+
+The only consumer is `rtx::runNvidiaRemasterTranscode`
+(`src/core/hw_transcode.cpp`); both the CLI and the GUI call it for container
+input, and no other path invokes this export. The verification-only entries
+(`runNvidiaContainerTranscode`, `runNvidiaRawTranscode`) never call the bridge.

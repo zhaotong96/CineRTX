@@ -1,5 +1,10 @@
 # 二阶段 W5/W6 + GUI 最终验收报告
 
+> **历史验收记录（已过时）。** 本报告中的 `--remaster` 开关与
+> `rtx-transcode*.exe` 目标已被单一产品契约取代：`CineRTX.exe` 的容器输入
+> 现在无条件执行 VSR + TrueHDR 重制，CPU/透传/raw 路径仅用于验证。
+> 当前状态以根目录 `README.md` 与 `docs/spec/architecture.md` 为准。
+
 * **报告编号**:`RTX-ACCEPT-20261025-W5W6-GUI`
 * **验收日期**:2026-10-25
 * **施工依据**:`RTX-PLAN-20261024-W5W6-GUI-UNIFIED`(项目负责人终审令)及
@@ -72,7 +77,7 @@ ffmpeg -stream_loop 4 -i 10秒IMAX水乐园女子镜头序列.mp4 ^
 
 | 二进制 | SHA-256 |
 | --- | --- |
-| `rtx_ngx_bridge.dll`(zig-ngx,SDK ON) | `06755c7666b4f0c783062cd192698d4b01b149b4f9af2f115d0857a4cab38267` |
+| `rtx_ngx_bridge.dll`(zig-ngx,SDK-enabled Windows bridge) | `06755c7666b4f0c783062cd192698d4b01b149b4f9af2f115d0857a4cab38267` |
 | `rtx-transcode.exe`(gcc-gui) | `fb60efee38620b2876bb6c15c59ae63b36bd7ba2b3e62129599ff74b1a613f2a` |
 | `rtx_shim.dll`(gcc-gui) | `1e4c78b495b987b2cf1697b1230d14b184a9d50cde1d6cf4d282fedf211ba409` |
 | `rtx-transcode-gui.exe`(gcc-gui) | `f596208b317ff07e21529225c5ae78fe131c88951edc52cee749e5cc10d989f8` |

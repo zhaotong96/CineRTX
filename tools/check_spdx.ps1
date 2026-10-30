@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
+﻿# SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 # Copyright (C) 2026 CineRTX contributors
 #
 # Audits SPDX headers, the GPL/MIT directory boundary, forbidden NVIDIA
@@ -129,7 +129,7 @@ function Test-BuildFile([string]$Path, [string]$Expected) {
 # ---------------------------------------------------------------------------
 
 $sourceExtensions = @('.h', '.hpp', '.c', '.cc', '.cpp', '.cxx', '.cu', '.cuh')
-foreach ($directory in @('include', 'src', 'tests', 'third_party')) {
+foreach ($directory in @('include', 'src', 'tests')) {
     $path = Join-Path $repo $directory
     if (-not (Test-Path -LiteralPath $path)) {
         Add-Violation "$directory/: directory is missing"
@@ -139,11 +139,37 @@ foreach ($directory in @('include', 'src', 'tests', 'third_party')) {
         $sourceExtensions -contains $_.Extension.ToLowerInvariant()
     }
     foreach ($file in $files) {
-        if ($directory -eq 'third_party') {
-            Test-ThirdPartyFile $file.FullName
-        } else {
-            Test-SourceFile $file.FullName
-        }
+        Test-SourceFile $file.FullName
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Official Git submodules (exempt from the hard directory gate)
+#
+# third_party/ffmpeg and third_party/nv-codec-headers are upstream submodules,
+# not vendored copies: their content is pinned by gitlink SHA and policed by its
+# own project.  An uninitialised submodule leaves an empty directory, which must
+# not fail the audit -- so the check is soft.  When the tree *is* present the
+# MIT rule is still enforced, because a submodule swap that dragged in a
+# non-MIT header would otherwise pass unnoticed.
+# ---------------------------------------------------------------------------
+
+$submoduleHeaders = @(
+    @{ Path = 'third_party/nv-codec-headers/include/ffnvcodec'; Name = 'nv-codec-headers' }
+)
+$submoduleAudited = 0
+foreach ($entry in $submoduleHeaders) {
+    $path = Join-Path $repo $entry.Path
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Host "  notice   : $($entry.Name) submodule not initialised; licence audit skipped"
+        continue
+    }
+    $files = Get-ChildItem -LiteralPath $path -Recurse -File | Where-Object {
+        $sourceExtensions -contains $_.Extension.ToLowerInvariant()
+    }
+    foreach ($file in $files) {
+        Test-ThirdPartyFile $file.FullName
+        $submoduleAudited++
     }
 }
 
@@ -226,10 +252,33 @@ foreach ($directory in @('include', 'src', 'tests', 'tools', 'cmake')) {
     }
 }
 
+# ---------------------------------------------------------------------------
+# AI model weights and serialised inference engines (TASK-001)
+#
+# TensorRT .engine blobs and ONNX/RIFE weights are either proprietary or
+# multi-gigabyte; they must be generated locally with --build-rife.  A committed
+# blob would also make the GPL source distribution unverifiable.
+# ---------------------------------------------------------------------------
+
+$modelExtensions = @('.engine', '.plan', '.onnx', '.trt', '.safetensors', '.pth', '.pt')
+$modelCount = 0
+foreach ($directory in @('include', 'src', 'tests', 'tools', 'cmake', 'docs')) {
+    $path = Join-Path $repo $directory
+    if (-not (Test-Path -LiteralPath $path)) { continue }
+    foreach ($file in Get-ChildItem -LiteralPath $path -Recurse -File -ErrorAction SilentlyContinue) {
+        if ($modelExtensions -contains $file.Extension.ToLowerInvariant()) {
+            Add-Violation "$(Get-RelativePath $file.FullName): AI model weights or TensorRT engine blobs MUST NOT be committed to Git. Use --build-rife to generate locally."
+            $modelCount++
+        }
+    }
+}
+
 Write-Host 'SPDX and boundary audit'
 Write-Host "  root     : $repo"
 Write-Host "  licenses : GPL=$gplCount MIT=$mitCount"
+Write-Host "  submodule: $submoduleAudited header(s) MIT-verified"
 Write-Host "  binaries : $binaryCount"
+Write-Host "  models   : $modelCount"
 
 if ($violations.Count -gt 0) {
     Write-Host ''

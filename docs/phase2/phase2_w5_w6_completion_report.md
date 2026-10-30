@@ -140,8 +140,10 @@ RTX Video SDK 的宿主库与特征库在本地与验收机均不存在：
 
 - `nvsdk_ngx_d.dll`、`nvngx_vsr.dll`、`nvngx_truehdr.dll`：对 `C:\Program Files`、
   `C:\Program Files (x86)`、`C:\Windows\System32`、`C:\Users\[REDACTED_USER]` 递归检索，零命中；
-- SDK 头文件与导入库不在本源码 drop 中，CMake 在 `RTX_WITH_NGX_SDK=ON` 时按设计直接报错
-  （`CMakeLists.txt:45`），因为 `src/shim/ngx_bridge/ngx_d3d12_bridge.cpp` 属于未随附的专有源码；
+- SDK 头文件与导入库不在本源码 drop 中；当时 CMake 在 `RTX_WITH_NGX_SDK=ON` 时按设计直接报错
+  （`CMakeLists.txt:45`），因为 `src/shim/ngx_bridge/ngx_d3d12_bridge.cpp` 属于未随附的专有源码。
+  2026-10-29 更新：该开关已删除，Windows configure 始终自动下载 SHA-256 锁定的 RTX Video SDK
+  并编译 `ngx_d3d12_bridge.cpp`；
 - 公开的 NVIDIA DLSS SDK 头文件仅定义 `NVSDK_NGX_Feature_VideoSuperResolution = 5`
   （已核对 `nvsdk_ngx_defs.h`），**没有** TrueHDR 特性/参数定义；且公开仓库不含
   `nvngx_vsr.dll` / `nvngx_truehdr.dll` 运行时；

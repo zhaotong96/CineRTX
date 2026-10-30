@@ -47,9 +47,9 @@ struct HwTranscodeOptions {
     Rational fps{0, 1};
     bool hdr = true;
 
-    // VSR-remaster path (P0-1.5): route decoded NV12/P010 frames through the
-    // NGX bridge (preprocess -> VSR -> TrueHDR -> pack v2) before NVENC.
-    bool remaster = false;
+    // Product remaster geometry. The product has no passthrough mode: decoded
+    // NV12/P010 frames always traverse the NGX bridge (preprocess -> VSR ->
+    // TrueHDR -> pack v2) before NVENC.
     int target_width = 0;   // 0 = 3840 default, resolved by the transcode path
     int target_height = 0;  // 0 = 2160 default
     int vsr_quality = 2;    // 1..4, NGX VSR quality level
@@ -113,19 +113,20 @@ struct HwTranscodeReport {
     std::string toJson() const;
 };
 
-// Container transcode.  The pixel path is demux -> NVDEC slot -> NVENC;
-// no host pixel copy is performed by this function.
+// Verification-only container passthrough (NVDEC -> NVENC).  This is not a
+// product path: CineRTX.exe always remasters, and this entry point exists for
+// the codec/zero-copy regression harness.
 Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& options);
 
-// Production VSR-remaster container transcode (P0-1.5): NVDEC NV12/P010 ->
-// rtx_ngx_bridge remaster (VSR + TrueHDR + pack v2, all device memory) ->
-// NVENC HEVC Main10 with HDR10 VUI/SEI.  Requires options.remaster and the
-// HEVC codec; reports path = "vsr-remaster" with zero host pixel copies.
+// The only product transcode: NVDEC NV12/P010 -> rtx_ngx_bridge remaster
+// (VSR + TrueHDR + pack v2, all device memory) -> NVENC HEVC Main10 with HDR10
+// VUI/SEI.  Both GUI and CLI call this function; it reports path =
+// "vsr-remaster" with zero host pixel copies.
 Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& options);
 
-// Raw NV12 -> NVENC -> Annex-B -> NVDEC -> host P010 artefact.  Both hardware
-// codecs are exercised, but the host staging counters are reported separately
-// and zero_copy_main_loop is false for this diagnostic path.
+// Verification-only raw NV12 -> NVENC -> Annex-B -> NVDEC -> host P010
+// artefact.  Both hardware codecs are exercised, but the host staging counters
+// are reported separately and zero_copy_main_loop is false.
 Result<HwTranscodeReport> runNvidiaRawTranscode(const HwTranscodeOptions& options);
 
 }  // namespace rtx

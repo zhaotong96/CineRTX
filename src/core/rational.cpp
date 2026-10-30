@@ -10,6 +10,10 @@
 #include <numeric>
 #include <sstream>
 
+#if defined(_MSC_VER) && defined(_M_X64)
+#include <intrin.h>  // _umul128 / _udiv128
+#endif
+
 namespace rtx {
 namespace {
 
@@ -273,6 +277,156 @@ int64_t FrameTimestampMapper::outputPts(int64_t input_index, int k) const {
 int64_t FrameTimestampMapper::totalOutputFrames(int64_t input_frames) const {
     return rescaleQ(std::max<int64_t>(0, input_frames), input_fps_.inverse(),
                     output_fps_.inverse(), Rounding::Down);
+}
+
+// ---------------------------------------------------------------------------
+// Flicks timeline
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 128-bit by 64-bit unsigned divide with remainder.  MSVC has no __int128, so
+// the x64 intrinsic pair is used; both paths guard against a quotient that
+// would not fit, which would otherwise trap (_udiv128 raises #DE).
+struct Div128 {
+    uint64_t quotient = 0;
+    uint64_t remainder = 0;
+};
+
+Div128 divide128(uint64_t high, uint64_t low, uint64_t divisor) noexcept {
+    Div128 result;
+    if (divisor == 0) {
+        return result;
+    }
+#if defined(_MSC_VER) && defined(_M_X64)
+    if (high >= divisor) {
+        // Saturated: the true quotient exceeds 2^64.  Only reachable for
+        // absurd PTS values, so clamping keeps the timeline monotonic instead
+        // of faulting.
+        result.quotient = UINT64_MAX;
+        return result;
+    }
+    unsigned __int64 remainder = 0;
+    result.quotient = _udiv128(high, low, divisor, &remainder);
+    result.remainder = remainder;
+    return result;
+#elif defined(__SIZEOF_INT128__)
+    const unsigned __int128 total =
+        (static_cast<unsigned __int128>(high) << 64) | static_cast<unsigned __int128>(low);
+    const unsigned __int128 divisor128 = divisor;
+    const unsigned __int128 quotient = total / divisor128;
+    result.quotient = static_cast<uint64_t>(quotient > UINT64_MAX ? UINT64_MAX : quotient);
+    result.remainder = static_cast<uint64_t>(total % divisor128);
+    return result;
+#else
+    // Portable shift-subtract long division.  Only used by compilers without a
+    // 128-bit type and without the MSVC intrinsics; the hot path is never here.
+    if (high >= divisor) {
+        result.quotient = UINT64_MAX;
+        return result;
+    }
+    uint64_t quotient = 0;
+    uint64_t remainder = high;
+    for (int bit = 63; bit >= 0; --bit) {
+        const uint64_t carry = remainder >> 63;
+        remainder = (remainder << 1) | ((low >> bit) & 1ULL);
+        quotient <<= 1;
+        if (carry != 0 || remainder >= divisor) {
+            remainder -= divisor;
+            quotient |= 1ULL;
+        }
+    }
+    result.quotient = quotient;
+    result.remainder = remainder;
+    return result;
+#endif
+}
+
+struct Mul128 {
+    uint64_t high = 0;
+    uint64_t low = 0;
+};
+
+Mul128 multiply128(uint64_t a, uint64_t b) noexcept {
+    Mul128 result;
+#if defined(_MSC_VER) && defined(_M_X64)
+    unsigned __int64 high = 0;
+    result.low = _umul128(a, b, &high);
+    result.high = high;
+#elif defined(__SIZEOF_INT128__)
+    const unsigned __int128 product =
+        static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
+    result.low = static_cast<uint64_t>(product);
+    result.high = static_cast<uint64_t>(product >> 64);
+#else
+    const uint64_t a_low = a & 0xFFFFFFFFULL;
+    const uint64_t a_high = a >> 32;
+    const uint64_t b_low = b & 0xFFFFFFFFULL;
+    const uint64_t b_high = b >> 32;
+    const uint64_t low_low = a_low * b_low;
+    const uint64_t cross = a_high * b_low + a_low * b_high;
+    result.low = low_low + (cross << 32);
+    result.high = a_high * b_high + (cross >> 32) +
+                  (result.low < low_low ? 1ULL : 0ULL);
+#endif
+    return result;
+}
+
+}  // namespace
+
+int64_t rescaleToFlicks(int64_t stream_pts, Rational time_base) {
+    if (time_base.num <= 0 || time_base.den <= 0) {
+        return 0;
+    }
+    const uint64_t numerator = static_cast<uint64_t>(time_base.num);
+    const uint64_t denominator = static_cast<uint64_t>(time_base.den);
+    const bool negative = stream_pts < 0;
+    const uint64_t magnitude = negative ? (0ULL - static_cast<uint64_t>(stream_pts))
+                                        : static_cast<uint64_t>(stream_pts);
+    const Mul128 scaled = multiply128(magnitude, numerator * kFlicksPerSecond);
+    const Div128 divided = divide128(scaled.high, scaled.low, denominator);
+    return negative ? -static_cast<int64_t>(divided.quotient)
+                    : static_cast<int64_t>(divided.quotient);
+}
+
+int64_t FlicksDriftCompensator::rescaleToFlicks(int64_t stream_pts, uint32_t timebase_num,
+                                                uint32_t timebase_den) {
+    if (timebase_num == 0 || timebase_den == 0) {
+        return 0;
+    }
+    const bool negative = stream_pts < 0;
+    const uint64_t magnitude = negative ? (0ULL - static_cast<uint64_t>(stream_pts))
+                                        : static_cast<uint64_t>(stream_pts);
+
+    // u_pts * (timebase_num * kFlicksPerSecond) + accumulated_remainder, in 128
+    // bits, then divided by timebase_den with the remainder carried forward.
+    const uint64_t factor = static_cast<uint64_t>(timebase_num) * kFlicksPerSecond;
+    Mul128 scaled = multiply128(magnitude, factor);
+    const uint64_t low_before = scaled.low;
+    scaled.low += accumulated_remainder_;
+    if (scaled.low < low_before) {
+        ++scaled.high;
+    }
+    const Div128 divided = divide128(scaled.high, scaled.low, timebase_den);
+    accumulated_remainder_ = divided.remainder;
+    return negative ? -static_cast<int64_t>(divided.quotient)
+                    : static_cast<int64_t>(divided.quotient);
+}
+
+int64_t FlicksMonotonicGuard::apply(int64_t candidate) noexcept {
+    if (!primed_) {
+        primed_ = true;
+        last_ = candidate;
+        return last_;
+    }
+    if (candidate <= last_) {
+        // Force strict monotonicity.  One Flicks tick is 1.4 ns, far below the
+        // 1.0 ms Gate 3.4 A/V budget, so the repair is inaudible.
+        ++repairs_;
+        candidate = last_ + 1;
+    }
+    last_ = candidate;
+    return last_;
 }
 
 }  // namespace rtx

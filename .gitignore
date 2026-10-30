@@ -1,5 +1,5 @@
 # Build trees
-/build/
+/build*/
 /out/
 /artifacts/
 CMakeUserPresets.json

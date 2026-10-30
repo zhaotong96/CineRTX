@@ -1,5 +1,5 @@
 CINERTX PLUGIN-EXCEPTION TO GNU GENERAL PUBLIC LICENSE v3.0
-Version 1.1, 25 October 2026
+Version 1.2, 25 October 2026
 
 This exception is an additional permission under section 7 of the GNU General
 Public License, version 3 ("GPLv3").  It applies to every file in the CineRTX
@@ -13,9 +13,10 @@ to as "CineRTX Plugin-Exception") refers to this document.
 0. DEFINITIONS
 
 "Plugin Interface" means the pure C application binary interface declared in
-include/shim/rtx_shim_abi.h and include/shim/ngx_bridge_abi.h, together with
-the loader-facing backend interface declared in include/rtx/backend.h and
-include/shim/i_engine_backend.h, as distributed with the Covered Work.
+include/shim/rtx_shim_abi.h, include/shim/ngx_bridge_abi.h and
+include/shim/fruc_bridge_abi.h, together with the loader-facing backend
+interface declared in include/rtx/backend.h and include/shim/i_engine_backend.h,
+as distributed with the Covered Work.
 
 "Independent Module" means a software component that
 
@@ -30,7 +31,17 @@ NVIDIA CUDA, the Video Codec SDK (NVDEC/NVENC), the Optical Flow SDK
 (NvOFFRUC), TensorRT, and the RTX Video SDK (NGX, including standalone plugin
 bridge modules such as rtx_ngx_bridge.dll that may internally link vendor
 static stub libraries such as nvsdk_ngx_s.lib) are examples of Independent
-Modules.
+Modules.  The same applies to optical flow frame rate up-conversion bridge
+modules such as rtx_fruc_bridge.dll that may internally link vendor stub
+libraries (NvOFFRUC, nvinfer, nvonnxparser) while exporting only the pure C
+ABI of include/shim/fruc_bridge_abi.h to the Covered Work.
+
+The statically linked, surgically trimmed FFmpeg archives
+(libavformat/libavcodec/libavutil/libswresample, built without --enable-gpl and
+without --enable-nonfree and therefore under LGPLv2.1-or-later) are NOT
+Independent Modules: they are combined into the Covered Work at build time
+under LGPLv2.1 section 3, which permits the relicensing of the combined work
+under the GPLv3 as modified by this exception.
 
 1. ADDITIONAL PERMISSION
 

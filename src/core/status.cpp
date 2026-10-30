@@ -31,8 +31,6 @@ const char* errorCodeName(ErrorCode code) noexcept {
             return "NGX_FAILURE";
         case ErrorCode::TensorRtVersion:
             return "TENSORRT_VERSION";
-        case ErrorCode::FfmpegMissing:
-            return "FFMPEG_MISSING";
         case ErrorCode::Config:
             return "CONFIG_ERROR";
         case ErrorCode::State:

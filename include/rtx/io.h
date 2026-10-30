@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// I/O abstractions.  FFmpeg-backed demux/mux is compiled only when the build
-// enables RTX_WITH_FFMPEG; raw NV12/P010 paths are always available and are
-// what the hermetic CI suite exercises.
+// I/O abstractions.  The FFmpeg container layer is an unconditional statically
+// linked core component (Gate 3.0): every build of rtx_core carries
+// libavformat/libavcodec/libavutil/libswresample machine code, and there is no
+// configuration switch that can remove it.  Raw NV12/P010 paths remain
+// available for hermetic verification artefacts.
 
 #pragma once
 
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -51,6 +54,9 @@ public:
     virtual Result<MediaInfo> open(const std::string& path) = 0;
     virtual Result<Packet> readPacket() = 0;
     virtual std::vector<std::string> warnings() const { return {}; }
+    // Index of the best audio stream, or -1 when the container has none.  The
+    // phase-3 multi-track audio pipeline routes on this before it attaches.
+    virtual int audioStreamIndex() const noexcept { return -1; }
 };
 
 class IMuxer {
@@ -64,7 +70,23 @@ public:
 
 std::unique_ptr<IDemuxer> makeFfmpegDemuxer();
 std::unique_ptr<IMuxer> makeFfmpegMuxer();
-bool ffmpegAvailable();
+
+// Compile-time invariant: the media container layer is always present.  The
+// symbol survives so that long-lived call sites keep a single, documented
+// capability query instead of reintroducing a conditional macro.
+constexpr bool ffmpegAvailable() noexcept { return true; }
+
+// ---------------------------------------------------------------------------
+// Zero-disk container I/O (ACT-STATIC-03)
+//
+// The demuxer/muxer above take a filesystem path.  The memory variants wrap the
+// same libavformat objects around an avio_alloc_context() buffer so the
+// container layer can be exercised end to end without touching a disk file.
+// Both are unconditional: they compile into rtx_core in every configuration.
+// ---------------------------------------------------------------------------
+std::unique_ptr<IDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes);
+std::unique_ptr<IMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
+                                        std::string container_format = "matroska");
 
 // Deterministic synthetic source used by tests and `--simulate`.  Produces
 // BT.709 limited-range NV12 with a moving high-contrast edge and an optional

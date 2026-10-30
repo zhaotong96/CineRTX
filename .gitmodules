@@ -1,0 +1,12 @@
+[submodule "third_party/ffmpeg"]
+	path = third_party/ffmpeg
+	url = https://github.com/zhaotong96/FFmpeg.git
+	branch = release/7.1
+# Pinned to tag n13.0.19.1 (commit 88fee5c37318c991a8762d423530f91681e32e3a).
+# A tag is recorded by the gitlink SHA rather than by `branch =`, which git only
+# resolves against real branches and would break `submodule update --remote`.
+# n13.0.19.1 targets the Video Codec SDK 13.0 ABI supported by the R580 driver
+# branch; newer nv-codec-headers drops require driver 610 or newer.
+[submodule "third_party/nv-codec-headers"]
+	path = third_party/nv-codec-headers
+	url = https://github.com/zhaotong96/nv-codec-headers.git

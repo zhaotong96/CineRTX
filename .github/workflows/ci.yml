@@ -48,8 +48,14 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Install Ninja and FFmpeg development packages
+        # The media container layer is unconditional, and on Linux it is
+        # resolved through pkg-config, so the four -dev packages are a hard
+        # configure-time dependency rather than an optional extra.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config \
+            libavformat-dev libavcodec-dev libswresample-dev libavutil-dev
 
       - name: Configure
         run: >-
@@ -72,8 +78,8 @@ jobs:
       - name: Probe and simulate smoke test
         run: |
           set -euo pipefail
-          ./build/cmake/linux-release/rtx-transcode --self-test
-          ./build/cmake/linux-release/rtx-transcode \
+          ./build/cmake/linux-release/CineRTX --self-test
+          ./build/cmake/linux-release/CineRTX \
             --simulate 2 --width 64 --height 64 \
             --target-width 128 --target-height 128 --json > build/simulate.json
           python3 - <<'PY'
@@ -84,7 +90,7 @@ jobs:
           assert report["hdr"]["enabled"] is True
           print("simulate JSON ok:", report["output"])
           PY
-          ./build/cmake/linux-release/rtx-transcode --probe --json > build/probe.json
+          ./build/cmake/linux-release/CineRTX --probe --json > build/probe.json
           python3 - <<'PY'
           import json
           probe = json.load(open("build/probe.json", encoding="utf-8"))
@@ -118,7 +124,7 @@ jobs:
       - name: Probe and simulate smoke test
         shell: pwsh
         run: |
-          $exe = "build/cmake/windows-msvc/Release/rtx-transcode.exe"
+          $exe = "build/cmake/windows-msvc/Release/CineRTX.exe"
           & $exe --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$exe`" --simulate 2 --width 64 --height 64 --target-width 128 --target-height 128 --json > build\simulate.json"
@@ -167,7 +173,7 @@ jobs:
       - name: Probe and simulate smoke test
         shell: pwsh
         run: |
-          $exe = "build/cmake/zig-windows/rtx-transcode.exe"
+          $exe = "build/cmake/zig-windows/CineRTX.exe"
           & $exe --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$exe`" --simulate 2 --width 64 --height 64 --target-width 128 --target-height 128 --json > build\simulate.json"
@@ -185,11 +191,7 @@ jobs:
           name: zig-windows
           if-no-files-found: error
           path: |
-            build/cmake/zig-windows/rtx-transcode.exe
-            build/cmake/zig-windows/rtx-transcode-base.exe
-            build/cmake/zig-windows/rtx-transcode-gui.exe
-            build/cmake/zig-windows/rtx_shim.dll
-            build/cmake/zig-windows/rtx_ngx_bridge.dll
+            build/cmake/zig-windows/CineRTX.exe
 
   package:
     name: Package release archive
@@ -236,7 +238,7 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @files --clobber
           } else {
-            gh release create $tag @files --title "rtx-transcode $tag" --generate-notes
+            gh release create $tag @files --title "CineRTX $tag" --generate-notes
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

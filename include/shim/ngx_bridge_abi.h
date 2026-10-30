@@ -205,6 +205,41 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_remaster_stats(
  * than the remaster contract before resolving rtx_ngx_bridge_remaster. */
 RTX_SHIM_API uint32_t RTX_SHIM_CALL rtx_ngx_bridge_abi_version(void);
 
+/* ------------------------------------------------------------------------- */
+/* TensorRT RIFE v4.25 engine construction (Zone C pure C ABI).              */
+/*                                                                           */
+/* Resolves nvinfer_10 and nvonnxparser_10 inside the bridge DLL, so the      */
+/* GPLv3 main executable never touches <NvInfer.h> / <NvOnnxParser.h>.       */
+/* ------------------------------------------------------------------------- */
+
+typedef struct RtxNgxRifeBuildParams {
+    const char* onnx_path;       /* UTF-8 ONNX model path */
+    const char* engine_path;     /* UTF-8 destination engine path */
+    int32_t width;
+    int32_t height;
+    int32_t fp16;                /* 1 to enable FP16 */
+    int32_t verbose;             /* 1 to log TensorRT build info */
+    int32_t reserved[4];
+} RtxNgxRifeBuildParams;
+
+typedef struct RtxNgxRifeBuildResult {
+    int32_t built_in_process;    /* 1 if built via TensorRT in-process */
+    uint64_t engine_bytes;
+    char onnx_sha256[65];        /* Hex SHA-256 */
+    char trtexec_command[1024];  /* External trtexec command fallback */
+    char tensorrt_version[32];   /* Version of the loaded runtime */
+    char error_message[512];     /* Diagnostics or runtime note */
+    int32_t reserved[4];
+} RtxNgxRifeBuildResult;
+
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_build_rife_engine(
+    const RtxNgxRifeBuildParams* params,
+    RtxNgxRifeBuildResult* result);
+
+typedef RtxResult (RTX_SHIM_CALL *RtxNgxBuildRifeEngineFn)(
+    const RtxNgxRifeBuildParams* params,
+    RtxNgxRifeBuildResult* result);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

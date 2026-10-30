@@ -129,6 +129,17 @@ inline void checkNear(Context& context, const char* file, int line, const char* 
                                 #expected, rtx_actual, rtx_expected);               \
     } while (false)
 
+#define RTX_REQUIRE_EQ(actual, expected)                                            \
+    do {                                                                            \
+        const auto& rtx_actual = (actual);                                          \
+        const auto& rtx_expected = (expected);                                      \
+        if (!(rtx_actual == rtx_expected)) {                                        \
+            ::rtx::test::checkEqual(rtx_test_context, __FILE__, __LINE__, #actual,  \
+                                    #expected, rtx_actual, rtx_expected);           \
+            return;                                                                 \
+        }                                                                           \
+    } while (false)
+
 #define RTX_CHECK_NE(actual, expected)                                              \
     do {                                                                            \
         const auto& rtx_actual = (actual);                                          \

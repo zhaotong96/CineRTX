@@ -52,12 +52,23 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // A trailing '*' turns the filter into a prefix match, which is what the
+    // CTest contract gates (`--filter=fruc_abi_*`) rely on.
+    const bool prefix_filter = !filter.empty() && filter.back() == '*';
+    const std::string filter_text =
+        prefix_filter ? filter.substr(0, filter.size() - 1) : filter;
+
     size_t run = 0;
     size_t failed = 0;
     const auto start = std::chrono::steady_clock::now();
     for (const auto& test : cases) {
-        if (!filter.empty() && test.name.find(filter) == std::string::npos) {
-            continue;
+        if (!filter_text.empty()) {
+            const bool match = prefix_filter
+                                   ? test.name.rfind(filter_text, 0) == 0
+                                   : test.name.find(filter_text) != std::string::npos;
+            if (!match) {
+                continue;
+            }
         }
         ++run;
         rtx::test::Context context;

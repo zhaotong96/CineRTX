@@ -3,7 +3,7 @@
  *
  * VSR -> TrueHDR evaluator on the interop-owned D3D12 queue.  See
  * ngx_d3d12_bridge.h.  The proprietary headers are reached only through the
- * RTX_WITH_NGX_SDK build, which links NVIDIA's nvsdk_ngx_s.lib stub.
+ * Windows bridge build, which links NVIDIA's nvsdk_ngx_s.lib stub.
  */
 
 #include "ngx_d3d12_bridge.h"
@@ -16,8 +16,20 @@
 #include <d3d12.h>
 
 #include "nvsdk_ngx.h"
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
 #include "nvsdk_ngx_helpers_truehdr.h"
 #include "nvsdk_ngx_helpers_vsr.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #include <algorithm>
 #include <chrono>

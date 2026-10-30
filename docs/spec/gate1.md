@@ -1,4 +1,12 @@
-# Gate 1 verification record
+﻿# Gate 1 verification record
+
+> **Historical record — stage-1 codec gate.** The product CLI no longer exposes
+> a container passthrough: `--input` always runs the NVDEC → VSR + TrueHDR →
+> NVENC remaster. The measurements below were taken with the earlier
+> `runNvidiaContainerTranscode` harness and are kept as the zero-copy codec
+> baseline. `tools/verify_gate1.ps1` now drives the product remaster for its
+> container check (which also asserts `zero_copy_main_loop`); the script and
+> section 4 remain the repeatable procedure.
 
 Stage 1 exits only when the bare transcode loop moves no pixel through host
 memory. This document records what was measured, on which hardware, and how to
@@ -12,8 +20,8 @@ repeat the measurement on the RTX 50-series acceptance host.
 | NVENC encode | `nvEncRegisterResource` with `NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR` | Implemented |
 | Container I/O | libavformat demux + Annex-B conversion + MP4 mux | Implemented |
 | Zero-copy main loop | `decoder_device_to_host_bytes == 0` and `encoder_host_to_device_bytes == 0` | Measured 0 |
-| Bare prototype | `rtx-transcode-base.exe`, `--backend nvidia` by default | Built |
-| Unit suite | `rtx_tests.exe` green with no environment overrides | 113/113 |
+| Product binary | single `CineRTX.exe` with GUI/CLI; no `-base` prototype | Implemented |
+| Unit suite | `rtx_tests.exe` green with no environment overrides | 113/113 at the time; now 137/137 |
 
 ## 2. Environments used for this record
 
@@ -28,7 +36,7 @@ repeat the measurement on the RTX 50-series acceptance host.
 | NVDEC | H.264 and HEVC Main/Main10 |
 | OS | Windows 11 26200 |
 | Toolchain | Zig 0.13 (Clang 18.1.6), CMake 3.29.6, Ninja |
-| FFmpeg | 8.1 shared build, `RTX_FFMPEG_ROOT=C:/[REDACTED_DIR]/ffmpeg-n8.1-latest-win64-gpl-shared-8.1` |
+| FFmpeg | 8.1 shared build, `RTX_FFMPEG_ROOT=C:/[REDACTED_DIR]/ffmpeg-n8.1-latest-win64-gpl-shared-8.1`（历史环境；`RTX_FFMPEG_ROOT` 已于阶段三废除，现由 CMake 从 `third_party/ffmpeg` 静态编译） |
 
 ### 2.2 Development host (secondary)
 
@@ -181,19 +189,18 @@ above is the Gate-1 evidence.
 ## 5. Reproduction procedure
 
 ```powershell
-# 1. Build with FFmpeg enabled
-$env:RTX_FFMPEG_ROOT = 'C:\ffmpeg'          # prefix containing include/ and lib/
-cmake --preset windows-msvc -DRTX_FFMPEG_ROOT=$env:RTX_FFMPEG_ROOT `
-      -DRTX_FFMPEG_DLL_DIR="$env:RTX_FFMPEG_ROOT\bin"
+# 1. Build (the container layer is statically linked, unconditionally)
+cmake --preset windows-msvc
 cmake --build --preset windows-msvc
 
-# 2. Static and functional gate
+# 2. Static and functional gate (raw artefact + product container remaster)
 pwsh tools/verify_gate1.ps1 -BuildDir build/cmake/windows-msvc `
-     -Container sample.mp4 -Codec hevc -BitDepth 8
+     -Container sample.mp4
 
-# 3. 10-bit path (HEVC Main10 decode + encode)
+# 3. A 10-bit source can be substituted; the product remaster always emits
+#    HEVC Main10 regardless of the source depth.
 pwsh tools/verify_gate1.ps1 -BuildDir build/cmake/windows-msvc `
-     -Container sample10.mp4 -Codec hevc -BitDepth 10
+     -Container sample10.mp4
 ```
 
 `verify_gate1.ps1` asserts:
@@ -213,7 +220,7 @@ independently on the wire:
 ```powershell
 nsys profile --trace=cuda,nvtx,osrt --cuda-memory-usage=true `
      --output=gate1 --force-overwrite=true `
-     rtx-transcode.exe --input sample.mp4 --output out.mp4 --backend nvidia --codec hevc
+     CineRTX.exe --input sample.mp4 --output out.mp4
 nsys stats --report cuda_gpu_mem_time_sum gate1.nsys-rep
 ```
 

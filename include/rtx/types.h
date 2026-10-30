@@ -175,6 +175,12 @@ struct Packet {
     bool keyframe = false;
     int stream_index = 0;
     Rational time_base{1, 1000};
+
+    // Projection of `pts` onto the Flicks integer timeline (705,600,000 Hz).
+    // `flicks_valid` is false when the container supplies no presentation
+    // timestamp at all; `pts_flicks` is then meaningless.
+    int64_t pts_flicks = 0;
+    bool flicks_valid = false;
 };
 
 }  // namespace rtx

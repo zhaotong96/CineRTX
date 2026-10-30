@@ -74,8 +74,68 @@ const char* stageName(Stage stage) noexcept {
     return "Unknown";
 }
 
-std::string PipelineMetrics::toJson() const {
-    std::ostringstream out;
+const char* watermarkTierName(uint8_t tier) noexcept {
+    switch (tier) {
+        case 0:
+            return "Low";
+        case 1:
+            return "High";
+        case 2:
+            return "Critical";
+        default:
+            return "Unknown";
+    }
+}
+
+const char* frucModeName(uint8_t mode) noexcept {
+    switch (mode) {
+        case 0:
+            return "none";
+        case 1:
+            return "nvofruc";
+        case 2:
+            return "trt-rife";
+        case 3:
+            return "duplicate";
+        default:
+            return "unknown";
+    }
+}
+
+std::vector<Stage> canonicalStageOrder() {
+    // Phase-3 seven-operator DAG.  Stage::Preprocess stays available for the
+    // reference pipeline but is not part of the canonical graph: the NV12 pair
+    // packing is folded into Pack so that a bare transcode and a remaster share
+    // one stage list.
+    return {Stage::Demux, Stage::Decode,   Stage::Interpolate, Stage::Enhance,
+            Stage::Pack,  Stage::Encode,   Stage::Mux};
+}
+
+std::vector<StageBinding> completeStageDag(std::vector<StageBinding> stages) {
+    const std::vector<Stage> order = canonicalStageOrder();
+    std::vector<StageBinding> completed;
+    completed.reserve(order.size());
+
+    for (Stage stage : order) {
+        StageBinding binding;
+        binding.stage = stage;
+        for (const StageBinding& supplied : stages) {
+            if (supplied.stage == stage) {
+                binding = supplied;
+                break;
+            }
+        }
+        if (!binding.execute) {
+            // Identity operator: the mode does not use this stage, but the DAG
+            // shape and the per-stage metrics stay identical.
+            binding.execute = [](FrameContext&) -> Result<void> { return {}; };
+        }
+        completed.push_back(std::move(binding));
+    }
+    return completed;
+}
+
+std::string PipelineMetrics::toJson() const {    std::ostringstream out;
     out << "{\n";
     out << "  \"frames\": " << frames << ",\n";
     out << "  \"dropped\": " << dropped << ",\n";

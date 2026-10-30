@@ -7,7 +7,8 @@
 #   1. rtx_tests.exe without any environment variable override
 #   2. shim probe (device, NVDEC/NVENC components, capabilities)
 #   3. raw NV12 -> P010 artefact path (NVENC encodes, NVDEC decodes its output)
-#   4. container transcode with the zero-copy assertion (optional, needs FFmpeg)
+#   4. product container remaster with the zero-copy assertion (optional, needs
+#      FFmpeg + a Turing or newer GPU with the RTX Video runtimes)
 #
 # Example:
 #   pwsh tools/verify_gate1.ps1 -BuildDir build/cmake/zig-windows
@@ -38,9 +39,9 @@ if (-not [IO.Path]::IsPathRooted($BuildDir)) {
 }
 $BuildDir = (Resolve-Path -LiteralPath $BuildDir).Path
 
-$transcode = Join-Path $BuildDir 'rtx-transcode.exe'
+$transcode = Join-Path $BuildDir 'CineRTX.exe'
 if (-not (Test-Path -LiteralPath $transcode)) {
-    $transcode = Join-Path $BuildDir 'rtx-transcode'
+    $transcode = Join-Path $BuildDir 'CineRTX'
 }
 $tests = Join-Path $BuildDir 'rtx_tests.exe'
 if (-not (Test-Path -LiteralPath $tests)) {
@@ -88,17 +89,8 @@ if (-not $SkipTests) {
     if (-not (Test-Path -LiteralPath $tests)) {
         Add-Result 'unit-tests' $false "rtx_tests not found in $BuildDir"
     } else {
-        $savedShim = $env:RTX_TEST_SHIM_PATH
-        $savedNgx = $env:RTX_TEST_NGX_PATH
-        Remove-Item Env:RTX_TEST_SHIM_PATH -ErrorAction SilentlyContinue
-        Remove-Item Env:RTX_TEST_NGX_PATH -ErrorAction SilentlyContinue
-        try {
-            $output = & $tests 2>&1 | Out-String
-            $exit = $LASTEXITCODE
-        } finally {
-            if ($savedShim) { $env:RTX_TEST_SHIM_PATH = $savedShim }
-            if ($savedNgx) { $env:RTX_TEST_NGX_PATH = $savedNgx }
-        }
+        $output = & $tests 2>&1 | Out-String
+        $exit = $LASTEXITCODE
         $summary = ($output -split "`n" | Where-Object { $_ -match 'test\(s\) run' } | Select-Object -Last 1)
         $passed = ($exit -eq 0) -and ($summary -match '0 failed')
         Add-Result 'unit-tests' $passed ($summary.Trim())
@@ -165,13 +157,14 @@ if ($rawOk) {
 Add-Result 'raw-nv12-to-p010' $rawOk $rawDetail
 
 # ---------------------------------------------------------------------------
-# 4. Container transcode with the zero-copy assertion
+# 4. Product container remaster with the zero-copy assertion
 # ---------------------------------------------------------------------------
 if ($Container) {
     $outMp4 = Join-Path $work 'gate1-out.mp4'
     if (Test-Path -LiteralPath $outMp4) { Remove-Item -LiteralPath $outMp4 -Force }
-    $args = @('--input', $Container, '--output', $outMp4, '--backend', 'nvidia',
-              '--codec', $Codec, '--bit-depth', $BitDepth, '--json')
+    # --codec and --bit-depth are verification knobs for --input-raw; the
+    # product remaster is always HEVC Main10.
+    $args = @('--input', $Container, '--output', $outMp4, '--json')
     $out = & $transcode @args 2>&1 | Out-String
     $exit = $LASTEXITCODE
     if ($exit -ne 0) {

@@ -1,15 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// Real libavformat/libavcodec demuxer and muxer.  The translation unit is
-// always compiled; when the build cannot find FFmpeg development files the
-// implementation falls back to a structured diagnostic instead of an
-// exception.  Set -DRTX_FFMPEG_ROOT=<prefix> or the RTX_FFMPEG_ROOT
-// environment variable to enable the real path.
+// Real libavformat/libavcodec demuxer and muxer.
+//
+// The translation unit has no conditional compilation and no degraded stub:
+// libavformat, libavcodec, libavutil and libswresample are statically linked
+// into rtx_core in every configuration (Gate 3.0,
+// SPEC-FFMPEG-STATIC-CONSOLIDATION-20261026).  A build that cannot resolve the
+// surgical static archives fails at configure time, so this file can never be
+// compiled into a binary that lacks container I/O.
+//
+// Two source kinds are supported by the same classes:
+//   * a filesystem path (production), and
+//   * an in-memory buffer through rtx::io::MemoryAvioContext (hermetic tests).
+//
+// Every packet is also projected onto the Flicks integer timeline
+// (705,600,000 Hz) with a remainder-carrying 128-bit rescale and a strict
+// monotonicity repair, so a VFR or B-frame-reordered source can never make the
+// muxer's interleaver step backwards (W7-2).
 
 #include "rtx/io.h"
 
 #include "bitstream.h"
+#include "memory_avio.h"
+#include "rtx/rational.h"
 
 #include <algorithm>
 #include <climits>
@@ -19,22 +33,22 @@
 #include <sstream>
 #include <utility>
 
-#ifdef RTX_HAVE_FFMPEG
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
+#include <libavformat/avio.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
 #include <libavutil/mastering_display_metadata.h>
+#include <libavutil/mem.h>
+#include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
+#include <libswresample/swresample.h>
 }
-#endif
 
 namespace rtx {
 namespace {
-
-#ifdef RTX_HAVE_FFMPEG
 
 std::string avErrorString(int error) {
     char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -287,17 +301,124 @@ int detectBitDepth(const AVCodecParameters& parameters, VideoCodec codec) {
 
 class FfmpegDemuxer final : public IDemuxer {
 public:
+    // Filesystem source.  `container_hint` is only used to label the result.
+    explicit FfmpegDemuxer(std::string container_hint = {})
+        : container_hint_(std::move(container_hint)) {}
+
+    // In-memory source.  The bytes are owned by the demuxer so the AVIOContext
+    // span stays valid for the whole lifetime of the AVFormatContext.
+    FfmpegDemuxer(std::vector<uint8_t> bytes, std::string container_hint)
+        : memory_bytes_(std::move(bytes)),
+          container_hint_(std::move(container_hint)),
+          memory_source_(true) {}
+
     ~FfmpegDemuxer() override { close(); }
 
     Result<MediaInfo> open(const std::string& path) override {
         close();
-        int status = avformat_open_input(&format_, path.c_str(), nullptr, nullptr);
-        if (status < 0) {
-            return Result<MediaInfo>::fail(ErrorCode::Io,
-                                           "cannot open media container: " + path,
-                                           avErrorString(status));
+        if (memory_source_) {
+            // Zero-disk path: `path` is a container-name hint only.  No file is
+            // opened and no environment variable is consulted.
+            memory_avio_ = std::make_unique<io::MemoryAvioContext>(
+                std::span<const uint8_t>(memory_bytes_.data(), memory_bytes_.size()));
+            if (!memory_avio_->valid()) {
+                close();
+                return Result<MediaInfo>::fail(ErrorCode::OutOfMemory,
+                                               "cannot allocate the in-memory AVIO context");
+            }
+            // The AVIO context must be attached to a freshly allocated
+            // AVFormatContext *before* avformat_open_input(); passing it
+            // afterwards would let the probe open a different (file) source.
+            format_ = avformat_alloc_context();
+            if (format_ == nullptr) {
+                close();
+                return Result<MediaInfo>::fail(ErrorCode::OutOfMemory,
+                                               "cannot allocate AVFormatContext");
+            }
+            format_->pb = memory_avio_->raw();
+            format_->flags |= AVFMT_FLAG_CUSTOM_IO;
+            const int memory_status = avformat_open_input(&format_, nullptr, nullptr, nullptr);
+            if (memory_status < 0) {
+                close();
+                return Result<MediaInfo>::fail(ErrorCode::Io,
+                                               "cannot open in-memory media container",
+                                               avErrorString(memory_status));
+            }
+        } else {
+            const int status = avformat_open_input(&format_, path.c_str(), nullptr, nullptr);
+            if (status < 0) {
+                return Result<MediaInfo>::fail(ErrorCode::Io,
+                                               "cannot open media container: " + path,
+                                               avErrorString(status));
+            }
         }
-        status = avformat_find_stream_info(format_, nullptr);
+        return finishOpen(path);
+    }
+
+    Result<Packet> readPacket() override {
+        if (format_ == nullptr || video_stream_ < 0) {
+            return Result<Packet>::fail(ErrorCode::State, "demuxer is not open");
+        }
+        for (;;) {
+            if (!pending_.empty()) {
+                Packet packet = std::move(pending_.front());
+                pending_.pop_front();
+                return Result<Packet>::ok(std::move(packet));
+            }
+            if (drained_) {
+                return Result<Packet>::fail(ErrorCode::NotFound, "end of stream");
+            }
+            int status = av_read_frame(format_, packet_);
+            if (status == AVERROR_EOF) {
+                drained_ = true;
+                if (bitstream_filter_ != nullptr && !bitstream_filter_flushed_) {
+                    bitstream_filter_flushed_ = true;
+                    (void)av_bsf_send_packet(bitstream_filter_, nullptr);
+                    drainBitstreamFilter();
+                    continue;
+                }
+                return Result<Packet>::fail(ErrorCode::NotFound, "end of stream");
+            }
+            if (status < 0) {
+                return Result<Packet>::fail(ErrorCode::Io, "cannot read packet",
+                                            avErrorString(status));
+            }
+            if (packet_->stream_index == audio_stream_) {
+                // Multi-track audio is delivered to the phase-3 audio pipeline;
+                // the video contract of readPacket() is unchanged.
+                bool audio_valid = false;
+                last_audio_flicks_ = projectWithTimebase(
+                    *packet_, info_.time_base, audio_drift_, audio_guard_, &audio_valid);
+                last_audio_flicks_valid_ = audio_valid;
+                av_packet_unref(packet_);
+                continue;
+            }
+            if (packet_->stream_index != video_stream_) {
+                av_packet_unref(packet_);
+                continue;
+            }
+            if (bitstream_filter_ != nullptr) {
+                status = av_bsf_send_packet(bitstream_filter_, packet_);
+                av_packet_unref(packet_);
+                if (status < 0) {
+                    return Result<Packet>::fail(ErrorCode::Io, "bitstream filter rejected packet",
+                                                avErrorString(status));
+                }
+                drainBitstreamFilter();
+                continue;
+            }
+            pending_.push_back(convertPacket(*packet_));
+            av_packet_unref(packet_);
+        }
+    }
+
+    std::vector<std::string> warnings() const override { return warnings_; }
+
+    int audioStreamIndex() const noexcept override { return audio_stream_; }
+
+private:
+    Result<MediaInfo> finishOpen(const std::string& path) {
+        int status = avformat_find_stream_info(format_, nullptr);
         if (status < 0) {
             close();
             return Result<MediaInfo>::fail(ErrorCode::Io, "cannot read stream information",
@@ -312,10 +433,11 @@ public:
                                            "container has no decodable video stream");
         }
         video_stream_ = stream_index;
+        audio_stream_ = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
         AVStream* stream = format_->streams[stream_index];
 
         MediaInfo info;
-        info.container = pathExtension(path);
+        info.container = !container_hint_.empty() ? container_hint_ : pathExtension(path);
         if (!info.container.empty() && info.container.front() == '.') {
             info.container.erase(info.container.begin());
         }
@@ -359,6 +481,10 @@ public:
         // from the container name: MP4 always needs h264_mp4toannexb /
         // hevc_mp4toannexb, while Matroska is demuxed to Annex-B by FFmpeg.
         info_ = info;
+        video_drift_ = FlicksDriftCompensator{};
+        audio_drift_ = FlicksDriftCompensator{};
+        video_guard_.reset();
+        audio_guard_.reset();
         packet_ = av_packet_alloc();
         if (packet_ == nullptr) {
             close();
@@ -398,9 +524,9 @@ public:
         info_.annex_b = packets_are_annex_b || bitstream_filter_ != nullptr;
         if (probe_valid) {
             if (bitstream_filter_ != nullptr) {
-                const int status = av_bsf_send_packet(bitstream_filter_, probe);
+                const int bsf_status = av_bsf_send_packet(bitstream_filter_, probe);
                 av_packet_unref(probe);
-                if (status < 0) {
+                if (bsf_status < 0) {
                     warnings_.push_back("bitstream filter rejected the first packet");
                 } else {
                     drainBitstreamFilter();
@@ -414,56 +540,6 @@ public:
         return Result<MediaInfo>::ok(info_);
     }
 
-    Result<Packet> readPacket() override {
-        if (format_ == nullptr || video_stream_ < 0) {
-            return Result<Packet>::fail(ErrorCode::State, "demuxer is not open");
-        }
-        for (;;) {
-            if (!pending_.empty()) {
-                Packet packet = std::move(pending_.front());
-                pending_.pop_front();
-                return Result<Packet>::ok(std::move(packet));
-            }
-            if (drained_) {
-                return Result<Packet>::fail(ErrorCode::NotFound, "end of stream");
-            }
-            int status = av_read_frame(format_, packet_);
-            if (status == AVERROR_EOF) {
-                drained_ = true;
-                if (bitstream_filter_ != nullptr && !bitstream_filter_flushed_) {
-                    bitstream_filter_flushed_ = true;
-                    (void)av_bsf_send_packet(bitstream_filter_, nullptr);
-                    drainBitstreamFilter();
-                    continue;
-                }
-                return Result<Packet>::fail(ErrorCode::NotFound, "end of stream");
-            }
-            if (status < 0) {
-                return Result<Packet>::fail(ErrorCode::Io, "cannot read packet",
-                                            avErrorString(status));
-            }
-            if (packet_->stream_index != video_stream_) {
-                av_packet_unref(packet_);
-                continue;
-            }
-            if (bitstream_filter_ != nullptr) {
-                status = av_bsf_send_packet(bitstream_filter_, packet_);
-                av_packet_unref(packet_);
-                if (status < 0) {
-                    return Result<Packet>::fail(ErrorCode::Io, "bitstream filter rejected packet",
-                                                avErrorString(status));
-                }
-                drainBitstreamFilter();
-                continue;
-            }
-            pending_.push_back(convertPacket(*packet_));
-            av_packet_unref(packet_);
-        }
-    }
-
-    std::vector<std::string> warnings() const override { return warnings_; }
-
-private:
     void configureBitstreamFilter(const char* name) {
         const AVBitStreamFilter* filter = av_bsf_get_by_name(name);
         if (filter == nullptr) {
@@ -499,7 +575,23 @@ private:
         }
     }
 
-    Packet convertPacket(const AVPacket& source) const {
+    // Projects a container timestamp onto the Flicks axis and repairs a
+    // regression.  Returns the (possibly repaired) Flicks value; `valid` is
+    // false when the container supplies no timestamp at all.
+    int64_t projectWithTimebase(const AVPacket& source, Rational time_base,
+                                FlicksDriftCompensator& drift, FlicksMonotonicGuard& guard,
+                                bool* valid) {
+        if (source.pts == AV_NOPTS_VALUE || !time_base.valid()) {
+            *valid = false;
+            return guard.primed() ? guard.last() : 0;
+        }
+        *valid = true;
+        return guard.apply(drift.rescaleToFlicks(
+            source.pts, static_cast<uint32_t>(time_base.num),
+            static_cast<uint32_t>(time_base.den)));
+    }
+
+    Packet convertPacket(const AVPacket& source) {
         Packet packet;
         packet.data.assign(source.data, source.data + source.size);
         packet.pts = source.pts;
@@ -508,6 +600,8 @@ private:
         packet.keyframe = (source.flags & AV_PKT_FLAG_KEY) != 0;
         packet.stream_index = source.stream_index;
         packet.time_base = info_.time_base;
+        packet.pts_flicks = projectWithTimebase(source, info_.time_base, video_drift_,
+                                                video_guard_, &packet.flicks_valid);
         return packet;
     }
 
@@ -522,27 +616,51 @@ private:
             packet_ = nullptr;
         }
         if (format_ != nullptr) {
+            // With AVFMT_FLAG_CUSTOM_IO libavformat does not own the AVIO
+            // context; detach it so neither side can double-free the page.
+            if (memory_avio_ != nullptr) {
+                format_->pb = nullptr;
+            }
             avformat_close_input(&format_);
             format_ = nullptr;
         }
+        memory_avio_.reset();
         drained_ = false;
         bitstream_filter_flushed_ = false;
         video_stream_ = -1;
+        audio_stream_ = -1;
+        video_guard_.reset();
+        audio_guard_.reset();
     }
 
+    std::vector<uint8_t> memory_bytes_;
+    std::string container_hint_;
+    bool memory_source_ = false;
+    std::unique_ptr<io::MemoryAvioContext> memory_avio_;
     AVFormatContext* format_ = nullptr;
     AVBSFContext* bitstream_filter_ = nullptr;
     AVPacket* packet_ = nullptr;
     std::deque<Packet> pending_;
     std::vector<std::string> warnings_;
     MediaInfo info_;
+    FlicksDriftCompensator video_drift_;
+    FlicksDriftCompensator audio_drift_;
+    FlicksMonotonicGuard video_guard_;
+    FlicksMonotonicGuard audio_guard_;
+    int64_t last_audio_flicks_ = 0;
+    bool last_audio_flicks_valid_ = false;
     int video_stream_ = -1;
+    int audio_stream_ = -1;
     bool drained_ = false;
     bool bitstream_filter_flushed_ = false;
 };
 
 class FfmpegMuxer final : public IMuxer {
 public:
+    FfmpegMuxer() = default;
+    explicit FfmpegMuxer(std::vector<uint8_t>* memory_target, std::string format)
+        : memory_target_(memory_target), memory_format_(std::move(format)) {}
+
     ~FfmpegMuxer() override { (void)finalize(); }
 
     Status open(const std::string& path, const MediaInfo& info,
@@ -555,7 +673,14 @@ public:
             return Status::fail(ErrorCode::InvalidArgument,
                                 "unsupported output video codec", path);
         }
-        int status = avformat_alloc_output_context2(&format_, nullptr, nullptr, path.c_str());
+        const bool in_memory = memory_target_ != nullptr;
+        int status = in_memory
+                         ? avformat_alloc_output_context2(
+                               &format_, nullptr,
+                               memory_format_.empty() ? "matroska" : memory_format_.c_str(),
+                               nullptr)
+                         : avformat_alloc_output_context2(&format_, nullptr, nullptr,
+                                                          path.c_str());
         if (format_ == nullptr) {
             return Status::fail(ErrorCode::Io, "cannot create output context",
                                 avErrorString(status));
@@ -610,11 +735,22 @@ public:
             }
         }
 
-        status = avio_open(&format_->pb, path.c_str(), AVIO_FLAG_WRITE);
-        if (status < 0) {
-            close();
-            return Status::fail(ErrorCode::Io, "cannot open output file",
-                                path + ": " + avErrorString(status));
+        if (in_memory) {
+            memory_avio_ = std::make_unique<io::MemoryAvioContext>(memory_target_);
+            if (!memory_avio_->valid()) {
+                close();
+                return Status::fail(ErrorCode::OutOfMemory,
+                                    "cannot allocate the in-memory AVIO context");
+            }
+            format_->pb = memory_avio_->raw();
+            format_->flags |= AVFMT_FLAG_CUSTOM_IO;
+        } else {
+            status = avio_open(&format_->pb, path.c_str(), AVIO_FLAG_WRITE);
+            if (status < 0) {
+                close();
+                return Status::fail(ErrorCode::Io, "cannot open output file",
+                                    path + ": " + avErrorString(status));
+            }
         }
         status = avformat_write_header(format_, nullptr);
         if (status < 0) {
@@ -628,7 +764,9 @@ public:
             return Status::fail(ErrorCode::OutOfMemory, "cannot allocate output packet");
         }
         annex_b_ = info.annex_b;
-        container_ = info.format_name.empty() ? pathExtension(path) : info.format_name;
+        container_ = info.format_name.empty()
+                         ? (in_memory ? memory_format_ : pathExtension(path))
+                         : info.format_name;
         hdr_ = hdr;
         opened_ = true;
         return Status::success();
@@ -687,6 +825,9 @@ public:
             if (status < 0) {
                 result = Status::fail(ErrorCode::Io, "cannot finalise container",
                                       avErrorString(status));
+            }
+            if (memory_avio_ != nullptr) {
+                avio_flush(memory_avio_->raw());
             }
         }
         close();
@@ -759,15 +900,23 @@ private:
         }
         if (format_ != nullptr) {
             if (format_->pb != nullptr) {
-                avio_closep(&format_->pb);
+                if (memory_avio_ != nullptr) {
+                    format_->pb = nullptr;  // custom I/O: owned by memory_avio_
+                } else {
+                    avio_closep(&format_->pb);
+                }
             }
             avformat_free_context(format_);
             format_ = nullptr;
         }
+        memory_avio_.reset();
         stream_ = nullptr;
         hdr_ = Hdr10Metadata{};
     }
 
+    std::vector<uint8_t>* memory_target_ = nullptr;
+    std::string memory_format_;
+    std::unique_ptr<io::MemoryAvioContext> memory_avio_;
     AVFormatContext* format_ = nullptr;
     AVStream* stream_ = nullptr;
     AVPacket* packet_ = nullptr;
@@ -777,62 +926,19 @@ private:
     bool opened_ = false;
 };
 
-#else  // RTX_HAVE_FFMPEG
-
-class FfmpegNotCompiledDemuxer final : public IDemuxer {
-public:
-    Result<MediaInfo> open(const std::string& path) override {
-        return Result<MediaInfo>::fail(
-            ErrorCode::FfmpegMissing,
-            "FFmpeg demuxer is not compiled into this build",
-            "path=" + path +
-                "; reconfigure with -DRTX_FFMPEG_ROOT=<prefix> (or set RTX_FFMPEG_ROOT)");
-    }
-    Result<Packet> readPacket() override {
-        return Result<Packet>::fail(ErrorCode::FfmpegMissing,
-                                    "FFmpeg demuxer is not compiled into this build");
-    }
-};
-
-class FfmpegNotCompiledMuxer final : public IMuxer {
-public:
-    Status open(const std::string& path, const MediaInfo&, const Hdr10Metadata&) override {
-        return Status::fail(ErrorCode::FfmpegMissing,
-                            "FFmpeg muxer is not compiled into this build", path);
-    }
-    Status writePacket(const Packet&) override {
-        return Status::fail(ErrorCode::FfmpegMissing,
-                            "FFmpeg muxer is not compiled into this build");
-    }
-    Status finalize() override { return Status::success(); }
-};
-
-#endif  // RTX_HAVE_FFMPEG
-
 }  // namespace
 
-bool ffmpegAvailable() {
-#ifdef RTX_HAVE_FFMPEG
-    return true;
-#else
-    return false;
-#endif
+std::unique_ptr<IDemuxer> makeFfmpegDemuxer() { return std::make_unique<FfmpegDemuxer>(); }
+
+std::unique_ptr<IMuxer> makeFfmpegMuxer() { return std::make_unique<FfmpegMuxer>(); }
+
+std::unique_ptr<IDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes) {
+    return std::make_unique<FfmpegDemuxer>(std::move(bytes), std::string{"memory"});
 }
 
-std::unique_ptr<IDemuxer> makeFfmpegDemuxer() {
-#ifdef RTX_HAVE_FFMPEG
-    return std::make_unique<FfmpegDemuxer>();
-#else
-    return std::make_unique<FfmpegNotCompiledDemuxer>();
-#endif
-}
-
-std::unique_ptr<IMuxer> makeFfmpegMuxer() {
-#ifdef RTX_HAVE_FFMPEG
-    return std::make_unique<FfmpegMuxer>();
-#else
-    return std::make_unique<FfmpegNotCompiledMuxer>();
-#endif
+std::unique_ptr<IMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
+                                        std::string container_format) {
+    return std::make_unique<FfmpegMuxer>(output, std::move(container_format));
 }
 
 }  // namespace rtx

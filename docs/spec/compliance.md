@@ -32,6 +32,32 @@ NvOFFRUC, TensorRT, NGX) **only when** those modules are loaded at runtime
 through the Plugin Interface and are not statically linked. It terminates for
 any build that statically links an Independent Module.
 
+### 2.1 FFmpeg static inlining compliance rule
+
+**【FFmpeg 静态内联法务合规准则】** CineRTX 所集成的手术刀级裁剪 FFmpeg 静态库
+在配置期严格禁用 `--enable-gpl` 与 `--enable-nonfree`，保持纯正 LGPLv2.1+
+授权。静态链接并入 GPL-3.0-or-later WITH Plugin-Exception 的 Zone A 主工程时，
+依据 LGPLv2.1 第 3 条合法升级并入主工程 GPLv3 授权域（Covered Work）。编译期
+显式禁用 `--disable-ffnvcodec --disable-cuvid --disable-nvenc`，确保仅有
+Zone B/C 的独立桥接模块动态加载 NVIDIA 专有驱动。
+
+Operationally:
+
+| Requirement | Where it is enforced |
+| --- | --- |
+| No `--enable-gpl`, no `--enable-nonfree` | `tools/build_ffmpeg_static_msvc.sh` configure line |
+| No FFmpeg hardware/NVIDIA integration (`--disable-ffnvcodec --disable-cuvid --disable-nvenc --disable-cuda-llvm`) | same |
+| No swscale/avfilter/postproc (LGPL modules the engine never calls) | same |
+| Static archives, never DLLs | `cmake/RtxFfmpegStatic.cmake` (450 KB import-stub fuse) |
+| Zero `av*.dll` / `sw*.dll` in the output tree | `tools/audit_imports.ps1` |
+| FFmpeg is **not** an Independent Module | `COPYING.EXCEPTION` section 0 |
+
+The consequence for distribution: shipping `CineRTX.exe` conveys the
+LGPLv2.1+ FFmpeg object code inside a GPLv3 Covered Work. LGPLv2.1 section 3
+permits that relicensing, and the full corresponding source of both the engine
+and the trimmed FFmpeg configuration is published, so no additional relinking
+right is owed to the recipient.
+
 ## 3. Build-time rules
 
 The following are mandatory and audited:
@@ -47,12 +73,21 @@ The following are mandatory and audited:
 - No `.lib`/`.a` binary blobs in the repository.
 - The core and CLI must not list an NVIDIA DLL in their PE/ELF import tables.
 
-The CMake targets reflect this: `rtx_core` and `rtx-transcode` link only
-`rtx_core`, `rtx_rife_support`, and platform threads. `rtx_shim` and
-`rtx_ngx_bridge` are shared libraries and are never link dependencies of the
-CLI. The CLI loads `rtx_shim` at runtime. In this source drop the NGX bridge is
-loaded directly by the test suite through `DynLibrary`; the SDK-enabled NVIDIA
-backend is the intended production loader.
+The CMake targets reflect this: the `CineRTX` executable links only
+`rtx_core`, `rtx_rife_support`, and platform system libraries. `rtx_shim` and
+`rtx_fruc_bridge` are static archives (`rtx_shim_static`,
+`rtx_fruc_bridge_static`) that `rtx_core` links directly into the image; at
+runtime `NvidiaShim::loadEmbedded()` binds the identical C ABI tables from
+inside the executable. The Plugin-Exception boundary is preserved because these
+archives contain no NVIDIA code — only runtime
+`LoadLibraryExW`/`GetProcAddress` resolution of driver modules — and the one
+component that contains proprietary code, the SDK-enabled NGX bridge, is
+always a separately loaded DLL: canonical staging at
+`build/external/plugins/nvidia_rtx/`, mirrored to `plugins/nvidia_rtx/` beside
+`CineRTX.exe`, and installed to the same relative location. It is never linked
+into the GPLv3 executable, which remains `CineRTX.exe` alone. Non-Windows hosts,
+which have no NGX/D3D12, compile the SDK-free static bridge
+(`rtx_ngx_bridge_static`) instead.
 
 ## 4. Runtime rules
 
@@ -93,7 +128,7 @@ Exit code is non-zero on any violation.
 ### 5.2 Import-table audit
 
 ```powershell
-pwsh tools/audit_imports.ps1 -Binary build/cmake/zig-windows/rtx-transcode.exe
+pwsh tools/audit_imports.ps1 -Binary build/cmake/zig-windows/CineRTX.exe
 ```
 
 On Windows the script parses the PE import and delay-import directories
@@ -106,8 +141,10 @@ It fails if any of the following appears as a dependency or imported symbol:
 nvcuda  nvcuvid  nvEncodeAPI  nvsdk_ngx  nvngx  NvOFFRUC  nvinfer  nvrtc  nvapi
 ```
 
-The same check is applied to `rtx_shim.dll` and `rtx_ngx_bridge.dll`: they are
-allowed to load NVIDIA libraries at runtime, not to import them statically.
+The same check is applied to `CineRTX.exe` itself, which embeds the shim and
+FRUC bridge archives: they are allowed to load NVIDIA libraries at runtime, not
+to import them statically. The separately staged `rtx_ngx_bridge.dll` is audited
+the same way.
 
 ### 5.3 Release packaging audit
 
@@ -118,8 +155,8 @@ allowed to load NVIDIA libraries at runtime, not to import them statically.
 - a SHA-256 manifest cannot be written.
 
 It produces a zip, a `SHA256SUMS.txt`, and a JSON manifest listing every file's
-size and hash. This addresses the failure mode where a release omitted the
-bridge DLL or silently picked up a proprietary static import.
+size and hash. This addresses the failure mode where a release shipped an
+incomplete deliverable or silently picked up a proprietary static import.
 
 ## 6. CI enforcement
 
@@ -148,22 +185,31 @@ A failing audit blocks the build; packaging depends on all three build jobs.
 ## 8. Third-party components
 
 - **NVIDIA CUDA / Video Codec SDK / Optical Flow SDK / TensorRT / RTX Video
-  SDK** — not distributed here. Users install them under NVIDIA's terms. The
-  engine only loads them at runtime.
-- **FFmpeg** — optional. If built with `RTX_WITH_FFMPEG=ON`, the resulting
-  binary must comply with the applicable FFmpeg license (LGPL or GPL depending
-  on the configuration). The demuxer/muxer implementation is compiled in when
-  an FFmpeg prefix is supplied (`RTX_FFMPEG_ROOT`); without one the build still
-  succeeds and the I/O layer reports `FfmpegMissing` at runtime.
+  SDK** — SDK headers, import libraries and static stubs are not part of this
+  source repository. The runtime components the product uses are deployed as
+  Independent Modules (for NGX, `plugins/nvidia_rtx/` beside `CineRTX.exe`)
+  under NVIDIA's terms; the engine only loads them at run time.
+- **FFmpeg** — statically linked, always. The surgical static archives
+  (`libavformat`, `libavcodec`, `libavutil`, `libswresample`) are built by
+  `tools/build_ffmpeg_static_msvc.sh` without `--enable-gpl` and without
+  `--enable-nonfree`, i.e. under **LGPLv2.1-or-later**. LGPLv2.1 section 3
+  permits combining them into the GPLv3 Covered Work, so the shipped single
+  executable is GPLv3 throughout. There is no configuration in which the engine
+  omits the container layer.
 - **TensorRT RIFE engine** — an `.engine` file is a build artifact tied to the
   GPU, TensorRT version, and model. It is not distributed and should not be
   committed.
-- Vendored code is limited to `third_party/open_headers/ffnvcodec/`, the MIT
-  licensed nv-codec-headers (`Copyright (c) 2016 NVIDIA Corporation`, upstream
+- Vendored code is limited to the `third_party/nv-codec-headers` git
+  submodule, the MIT licensed nv-codec-headers pinned to upstream tag
+  `n13.0.19.1` (`Copyright (c) 2016 NVIDIA Corporation`, upstream
   `Permission is hereby granted, free of charge` notice retained verbatim).
   These are declarations only; no NVIDIA binary, import library, or CUDA
-  runtime is linked. `tools/check_spdx.ps1` audits the directory and accepts
-  only MIT-compatible headers.
+  runtime is linked. The thin dynamic-loading wrapper from the former vendor
+  tree is original project code and now lives at
+  `include/shim/dynlink_nvEncodeAPI.h` (`MIT OR Apache-2.0`), including
+  `<ffnvcodec/nvEncodeAPI.h>` from the submodule. `tools/check_spdx.ps1`
+  audits the submodule's headers for MIT when the submodule is initialised
+  and prints a notice when it is not.
 
 ## 9. Known gaps
 
@@ -172,10 +218,11 @@ A failing audit blocks the build; packaging depends on all three build jobs.
   changing the headers.
 - The D3D12/CUDA interop layer loads `d3d12.dll` and `dxgi.dll` through
   `LoadLibraryExW`, so it carries no static Direct3D import either. The NGX
-  evaluation path requires the RTX Video SDK runtime (`_nvngx.dll`,
-  `nvngx_vsr.dll`, `nvngx_truehdr.dll`, resolved via the internal bridge
-  stub `nvsdk_ngx_s.lib`), which is not distributed here; without it the bridge
-  reports `RTX_ERR_NGX` and never pretends a texture exists.
+  path requires the proprietary RTX Video SDK at build time (`nvsdk_ngx_s.lib`,
+  supplied automatically by the configure step and never committed) and
+  NVIDIA's runtime (`_nvngx.dll`, `nvngx_vsr.dll`, `nvngx_truehdr.dll`) at run
+  time; when the runtime is missing the bridge reports `RTX_ERR_NGX` and never
+  pretends a texture exists.
 - SPDX exception identifiers are not registered with the SPDX License List.
   `Plugin-Exception` is defined by `COPYING.EXCEPTION` in this repository.
   Distributors who require a registered identifier can use

@@ -201,12 +201,14 @@ RtxResult run_interop_selftest(uint32_t width, uint32_t height, char* detail,
 // ---------------------------------------------------------------------------
 // Proprietary SDK plugin isolation (expert directive B-1, RTX verdict 5.1)
 //
-// The proprietary RTX Video SDK binaries are deployed to
-// <app_root>/plugins/nvidia_rtx/ (overridable with RTX_NGX_PLUGIN_DIR) so the
-// open-source package ships no proprietary bytes.  Plugin DLLs are loaded by
-// full path with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32
-// so their dependencies resolve only next to them and in System32, which
-// blocks current-directory DLL planting.
+// The proprietary RTX Video SDK binaries are deployed either in the bridge's
+// own directory (build/external/plugins/nvidia_rtx, <app_root>/plugins/nvidia_rtx)
+// or under <app_root>/plugins/nvidia_rtx when the bridge sits at the app root;
+// overridable with RTX_NGX_PLUGIN_DIR so the open-source package ships no
+// proprietary bytes.  Plugin DLLs are loaded by full path with
+// LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 so their
+// dependencies resolve only next to them and in System32, which blocks
+// current-directory DLL planting.
 // ---------------------------------------------------------------------------
 std::wstring plugin_directory();
 void* load_plugin_library(const wchar_t* name);

@@ -91,7 +91,7 @@ flowchart TD
 ### 阶段 2：专有依赖解除与 W5/W6 冲刺路线
 * **外部组件调拨**：从 NVIDIA 开发者网络获取 `RTX Video SDK`（含头文件、`nvsdk_ngx_d.dll`、`nvngx_vsr.dll`、`nvngx_truehdr.dll`）；
 * **功能串联落地**：
-  1. 打开 `RTX_WITH_NGX_SDK=ON`，在 `ngx_d3d12_bridge.cpp` 中按 Blackwell 双句柄独立参数规范串联 VSR 与 TrueHDR；
+  1. 在 `ngx_d3d12_bridge.cpp` 中按 Blackwell 双句柄独立参数规范串联 VSR 与 TrueHDR（2026-10-29 注：`RTX_WITH_NGX_SDK` 开关已删除，Windows 构建始终启用，SDK 由 configure 自动供应）；
   2. 启用已验证的 `p010_pack_ptx.h` 内核，将 4K RGBA16F 压制回 4K P010；
   3. 接入 `PipelineScheduler`，开启防 TDR 守卫（最大在途 3 帧）与背压调度；
   4. 部署 `nsys` 抓取 1000 帧物理 Trace，正式向 Gate 2.1 ~ 2.4 发起全量终审冲击。

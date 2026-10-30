@@ -3,8 +3,8 @@
  *
  * VSR -> TrueHDR evaluator on the headless D3D12 device owned by
  * D3D12Interop.  This is the only translation unit that includes the
- * proprietary RTX Video SDK headers, and it is compiled only when
- * RTX_WITH_NGX_SDK links nvsdk_ngx_s.lib into the bridge.
+ * proprietary RTX Video SDK headers, and it is compiled only into the Windows
+ * bridge, which links nvsdk_ngx_s.lib.
  */
 
 #ifndef RTX_NGX_BRIDGE_NGX_D3D12_BRIDGE_H

@@ -194,6 +194,14 @@ struct WatermarkLevels {
     double critical = 0.90;
 };
 
+// Three-tier VRAM watermark used by the phase-3 backpressure controller.  The
+// tiers are a hysteresis state machine, not thresholds on a single reading:
+// Low -> High at 75 %, High -> Critical at 88 %, and every fallback to Low
+// requires 55 % or less for 300 consecutive samples (about 5 s at 60 Hz).
+enum class WatermarkTier : uint8_t { Low = 0, High = 1, Critical = 2 };
+
+const char* watermarkTierName(WatermarkTier tier) noexcept;
+
 // Hysteresis-based backpressure controller.  Pauses decode at the high
 // watermark and only resumes at the low watermark, preventing queue flap.
 class BackpressureController {
@@ -209,6 +217,26 @@ public:
     uint64_t criticalCount() const noexcept { return critical_count_; }
     void reset();
 
+    // ------------------------------------------------------------------
+    // Phase-3 three-tier VRAM watermark (W8-3)
+    //
+    // Fed with the driver's free/total VRAM at the frame boundary.  Entering
+    // Critical fires the emergency fallback (unload the TensorRT RIFE engine
+    // and hot-degrade to NvOFFRUC, which releases > 1.0 GB); returning to Low
+    // fires the restore callback only after the level has stayed below 55 %
+    // for 300 consecutive samples.
+    // ------------------------------------------------------------------
+    void updateVramState(uint64_t used_bytes, uint64_t total_bytes);
+    WatermarkTier vramTier() const noexcept { return vram_tier_; }
+    void setEmergencyFallback(std::function<void()> callback) {
+        emergency_fallback_ = std::move(callback);
+    }
+    void setRestorePreferred(std::function<void()> callback) {
+        restore_preferred_ = std::move(callback);
+    }
+    uint64_t emergencyFallbackCount() const noexcept { return emergency_fallbacks_; }
+    uint64_t restoreCount() const noexcept { return restores_; }
+
 private:
     WatermarkLevels levels_;
     bool paused_ = false;
@@ -217,6 +245,13 @@ private:
     uint64_t pause_count_ = 0;
     uint64_t resume_count_ = 0;
     uint64_t critical_count_ = 0;
+
+    WatermarkTier vram_tier_ = WatermarkTier::Low;
+    uint32_t low_stable_counter_ = 0;
+    uint64_t emergency_fallbacks_ = 0;
+    uint64_t restores_ = 0;
+    std::function<void()> emergency_fallback_;
+    std::function<void()> restore_preferred_;
 };
 
 // Monotonic 64-bit timeline shared by the CUDA external semaphore and the

@@ -5,7 +5,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('zig-windows', 'zig-linux', 'linux-release', 'windows-msvc')]
+    [ValidateSet('zig-windows', 'zig-linux', 'linux-release', 'windows-msvc', 'windows-msvc-ninja')]
     [string]$Preset = 'zig-windows',
 
     [string]$BuildDir,
@@ -55,18 +55,17 @@ if (-not $cmakeExe) {
     throw 'CMake was not found. Pass -CMake <path> or set RTX_CMAKE.'
 }
 
+# Ninja is optional here: cmake/RtxBootstrap.cmake provisions it before
+# project() when it is missing, so a bare host does not have to pre-install it.
 $ninjaExe = Find-Tool -Explicit $Ninja -Command 'ninja' -EnvironmentName 'RTX_NINJA'
 if ($ninjaExe) {
     $env:PATH = (Split-Path -Parent $ninjaExe) + [IO.Path]::PathSeparator + $env:PATH
-} elseif ($Preset -ne 'windows-msvc') {
-    throw 'Ninja was not found. Pass -Ninja <path> or set RTX_NINJA.'
 }
 
 $zigExe = Find-Tool -Explicit $Zig -Command 'zig' -EnvironmentName 'RTX_ZIG'
-if ($Preset -like 'zig-*') {
-    if (-not $zigExe) {
-        throw 'Zig was not found. Pass -Zig <path> or set RTX_ZIG.'
-    }
+if ($Preset -like 'zig-*' -and $zigExe) {
+    # An explicit Zig forces the portable kit.  Without one the toolchain
+    # prefers the host compiler and only falls back to Zig.
     $env:RTX_ZIG = $zigExe
 }
 
@@ -90,7 +89,7 @@ if ($Clean) {
 
 Write-Host "==> toolchain"
 Write-Host "    cmake : $cmakeExe"
-if ($ninjaExe) { Write-Host "    ninja : $ninjaExe" }
+if ($ninjaExe) { Write-Host "    ninja : $ninjaExe" } else { Write-Host "    ninja : provisioned by CMake if missing" }
 if ($zigExe) { Write-Host "    zig   : $zigExe" }
 Write-Host "    build : $binaryDir"
 

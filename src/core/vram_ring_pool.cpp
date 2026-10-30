@@ -411,6 +411,71 @@ void BackpressureController::reset() {
     pause_count_ = 0;
     resume_count_ = 0;
     critical_count_ = 0;
+    vram_tier_ = WatermarkTier::Low;
+    low_stable_counter_ = 0;
+    emergency_fallbacks_ = 0;
+    restores_ = 0;
+}
+
+const char* watermarkTierName(WatermarkTier tier) noexcept {
+    switch (tier) {
+        case WatermarkTier::Low:
+            return "Low";
+        case WatermarkTier::High:
+            return "High";
+        case WatermarkTier::Critical:
+            return "Critical";
+    }
+    return "Unknown";
+}
+
+void BackpressureController::updateVramState(uint64_t used_bytes, uint64_t total_bytes) {
+    if (total_bytes == 0) {
+        return;
+    }
+    const double ratio = static_cast<double>(used_bytes) / static_cast<double>(total_bytes);
+
+    switch (vram_tier_) {
+        case WatermarkTier::Low:
+            if (ratio >= 0.75) {
+                vram_tier_ = WatermarkTier::High;
+            }
+            break;
+        case WatermarkTier::High:
+            if (ratio >= 0.88) {
+                vram_tier_ = WatermarkTier::Critical;
+                low_stable_counter_ = 0;
+                ++emergency_fallbacks_;
+                // Unload the TensorRT RIFE engine and hot-degrade to NvOFFRUC:
+                // this releases > 1.0 GB inside the current frame boundary
+                // (FMEA-01, < 50 ms).
+                if (emergency_fallback_) {
+                    emergency_fallback_();
+                }
+            } else if (ratio < 0.55) {
+                vram_tier_ = WatermarkTier::Low;
+            }
+            break;
+        case WatermarkTier::Critical:
+            if (ratio < 0.55) {
+                // 300 consecutive samples at 60 Hz is the documented 5 s of
+                // stable headroom before the preferred mode is restored.
+                if (low_stable_counter_ < 300u) {
+                    ++low_stable_counter_;
+                }
+                if (low_stable_counter_ >= 300u) {
+                    vram_tier_ = WatermarkTier::Low;
+                    low_stable_counter_ = 0;
+                    ++restores_;
+                    if (restore_preferred_) {
+                        restore_preferred_();
+                    }
+                }
+            } else {
+                low_stable_counter_ = 0;
+            }
+            break;
+    }
 }
 
 void TdrGuard::completed(std::chrono::microseconds elapsed) noexcept {

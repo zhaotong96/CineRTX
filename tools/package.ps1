@@ -23,7 +23,7 @@ if (-not $OutputDir) {
 
 if (-not $Version) {
     $cmakeText = Get-Content -LiteralPath (Join-Path $repo 'CMakeLists.txt') -Raw
-    if ($cmakeText -match 'project\s*\(\s*(?:CineRTX|rtx_transcode)\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+    if ($cmakeText -match 'project\s*\(\s*CineRTX\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
         $Version = $Matches[1]
     } else {
         throw 'cannot determine the project version from CMakeLists.txt'
@@ -39,10 +39,11 @@ $osName = if ($env:OS -eq 'Windows_NT') {
 }
 $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 $platform = "$osName-$arch"
-$packageName = "rtx-transcode-$Version-$platform"
+$packageName = "CineRTX-$Version-$platform"
 
 if (-not $BuildDir) {
     $candidates = @(
+        "build/RelWithDebInfo",
         "build/cmake/zig-windows",
         "build/cmake/windows-msvc/Release",
         "build/cmake/linux-release",
@@ -73,24 +74,15 @@ function Find-Artifact {
     return $null
 }
 
-$cli = Find-Artifact $BuildDir @('rtx-transcode.exe', 'rtx-transcode')
-$cliBase = Find-Artifact $BuildDir @('rtx-transcode-base.exe', 'rtx-transcode-base')
-$gui = Find-Artifact $BuildDir @('rtx-transcode-gui.exe', 'rtx-transcode-gui')
-$shim = Find-Artifact $BuildDir @(
-    'rtx_shim.dll', 'librtx_shim.so', 'rtx_shim.so', 'librtx_shim.dylib')
-$bridge = Find-Artifact $BuildDir @(
-    'rtx_ngx_bridge.dll', 'librtx_ngx_bridge.so', 'rtx_ngx_bridge.so',
-    'librtx_ngx_bridge.dylib')
+# The deliverable is one self-contained executable.  The shim, the NGX bridge,
+# the FRUC bridge and the media container layer are static archives linked into
+# it, so there is nothing else to collect -- and shipping a sidecar DLL would be
+# a Gate 3.0 closure failure, not a packaging convenience.
+$exe = Find-Artifact $BuildDir @('CineRTX.exe', 'CineRTX')
 
 $requiredItems = @(
-    @{ Name = 'rtx-transcode'; Path = $cli },
-    @{ Name = 'rtx-transcode-base'; Path = $cliBase },
-    @{ Name = 'rtx_shim'; Path = $shim },
-    @{ Name = 'rtx_ngx_bridge'; Path = $bridge }
+    @{ Name = 'CineRTX'; Path = $exe }
 )
-if ($osName -eq 'windows') {
-    $requiredItems += @{ Name = 'rtx-transcode-gui'; Path = $gui }
-}
 
 foreach ($item in $requiredItems) {
     if (-not $item.Path) {
@@ -105,12 +97,7 @@ if (-not $SkipAudit) {
         throw 'SPDX audit failed; refusing to package'
     }
 
-    $binaries = @($cli, $cliBase, $shim, $bridge)
-    if ($gui) {
-        $binaries += $gui
-    }
-    $binaryList = $binaries -join ','
-    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'audit_imports.ps1') -Binary $binaryList
+    & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'audit_imports.ps1') -Binary $exe
     if ($LASTEXITCODE -ne 0) {
         throw 'import-table audit failed; refusing to package'
     }
@@ -122,13 +109,7 @@ if (Test-Path -LiteralPath $stage) {
 }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-Copy-Item -LiteralPath $cli -Destination $stage
-Copy-Item -LiteralPath $cliBase -Destination $stage
-if ($gui) {
-    Copy-Item -LiteralPath $gui -Destination $stage
-}
-Copy-Item -LiteralPath $shim -Destination $stage
-Copy-Item -LiteralPath $bridge -Destination $stage
+Copy-Item -LiteralPath $exe -Destination $stage
 
 foreach ($name in @('README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'COPYING.EXCEPTION')) {
     $source = Join-Path $repo $name

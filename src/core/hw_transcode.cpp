@@ -315,11 +315,6 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
         return Result<HwTranscodeReport>::fail(
             ErrorCode::Unsupported, "stage-1 NVENC supports HEVC and H.264 output");
     }
-    if (!ffmpegAvailable()) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::FfmpegMissing, "this build was compiled without FFmpeg",
-            "reconfigure with -DRTX_FFMPEG_ROOT=<prefix>");
-    }
 
     std::unique_ptr<IDemuxer> demuxer = makeFfmpegDemuxer();
     Result<MediaInfo> opened = demuxer->open(options.input_path);
@@ -762,11 +757,6 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
     if (options.vsr_quality < 1 || options.vsr_quality > 4) {
         return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
                                                "vsr_quality must be in 1..4");
-    }
-    if (!ffmpegAvailable()) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::FfmpegMissing, "this build was compiled without FFmpeg",
-            "reconfigure with -DRTX_FFMPEG_ROOT=<prefix>");
     }
 
     std::unique_ptr<IDemuxer> demuxer = makeFfmpegDemuxer();

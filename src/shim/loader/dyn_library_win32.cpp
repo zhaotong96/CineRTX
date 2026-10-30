@@ -149,14 +149,11 @@ bool DynLibrary::openExplicitPath(const std::string& path, std::string* error) {
         wide.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (module == nullptr) {
         const DWORD first_error = GetLastError();
-        module = LoadLibraryExW(wide.c_str(), nullptr, 0);
-        if (module == nullptr) {
-            last_error_ = "LoadLibraryExW(" + path + ") failed: " + windowsError(first_error);
-            if (error != nullptr) {
-                *error = last_error_;
-            }
-            return false;
+        last_error_ = "LoadLibraryExW(" + path + ") failed: " + windowsError(first_error);
+        if (error != nullptr) {
+            *error = last_error_;
         }
+        return false;
     }
     handle_ = reinterpret_cast<void*>(module);
     path_ = path;

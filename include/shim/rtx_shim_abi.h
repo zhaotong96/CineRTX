@@ -16,6 +16,8 @@
 #ifdef _WIN32
 #if defined(RTX_SHIM_EXPORTS)
 #define RTX_SHIM_API __declspec(dllexport)
+#elif defined(RTX_SHIM_STATIC)
+#define RTX_SHIM_API
 #else
 #define RTX_SHIM_API __declspec(dllimport)
 #endif

@@ -5,13 +5,15 @@
  *
  * The bridge owns the headless D3D12 device, the shared ping-pong textures and
  * the CUDA external-memory import (d3d12_interop.cpp).  When the RTX Video SDK
- * is compiled in (RTX_WITH_NGX_SDK=ON) NVIDIA's static stub is linked into this
+ * is compiled in (every Windows build) NVIDIA's static stub is linked into this
  * DLL and ngx_d3d12_bridge.cpp evaluates VSR and TrueHDR on the same queue.
  * Without the SDK the bridge still validates the interop layer and reports
  * RTX_ERR_NGX for evaluation calls instead of pretending a texture exists.
  */
 
+#if !defined(RTX_SHIM_STATIC)
 #define RTX_SHIM_EXPORTS 1
+#endif
 
 #include "ngx_bridge_abi.h"
 
@@ -33,6 +35,7 @@
 
 #include "d3d12_interop.h"
 #include "p010_pack_runtime.h"
+#include "rife_builder.h"
 #if defined(RTX_HAVE_NGX_SDK)
 #include "ngx_d3d12_bridge.h"
 #endif
@@ -180,7 +183,7 @@ std::string missingComponents(const SdkComponents& components, bool need_vsr,
         missing += name;
     };
     if ((need_vsr || need_truehdr) && !components.host) {
-        append("nvsdk_ngx_s.lib (rebuild with RTX_WITH_NGX_SDK=ON)");
+        append("nvsdk_ngx_s.lib (RTX Video SDK bridge not compiled on this platform)");
     }
     if (need_vsr && !components.vsr) {
         append("nvngx_vsr.dll");
@@ -767,6 +770,12 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
               "ms ngx=" + std::to_string(ngx_ms) + "ms pack=" + std::to_string(pack_ms) + "ms");
     return RTX_OK;
 #endif
+}
+
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_build_rife_engine(
+    const RtxNgxRifeBuildParams* params,
+    RtxNgxRifeBuildResult* result) {
+    return rtx::ngx::buildRifeEngineInBridge(params, result);
 }
 
 }  // extern "C"

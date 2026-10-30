@@ -5,18 +5,10 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <sstream>
-#include <vector>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#include <unistd.h>
-#endif
+#include "rtx/nvidia_shim.h"
 
 namespace rtx::cli {
 namespace {
@@ -30,62 +22,6 @@ std::string safeString(const char* value, size_t capacity) {
         ++length;
     }
     return std::string(value, length);
-}
-
-std::filesystem::path utf8ToPath(const std::string& value) {
-    return std::filesystem::path(std::u8string(value.begin(), value.end()));
-}
-
-std::string pathToUtf8(const std::filesystem::path& path) {
-#if defined(_WIN32)
-    const std::u8string value = path.u8string();
-    return std::string(value.begin(), value.end());
-#else
-    return path.string();
-#endif
-}
-
-std::string executableDirectory() {
-#if defined(_WIN32)
-    wchar_t buffer[32768] = {};
-    const DWORD length = GetModuleFileNameW(nullptr, buffer, 32768);
-    if (length == 0 || length >= 32768) {
-        return {};
-    }
-    return pathToUtf8(std::filesystem::path(std::wstring(buffer, length)).parent_path());
-#else
-    char buffer[4096] = {};
-    const ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-    if (length <= 0) {
-        return {};
-    }
-    return std::filesystem::path(std::string(buffer, static_cast<size_t>(length)))
-        .parent_path()
-        .string();
-#endif
-}
-
-std::string shimFileName() {
-#if defined(_WIN32)
-    return "rtx_shim.dll";
-#elif defined(__APPLE__)
-    return "librtx_shim.dylib";
-#else
-    return "librtx_shim.so";
-#endif
-}
-
-std::vector<std::string> candidatePaths() {
-    std::vector<std::string> paths;
-    const char* configured = std::getenv("RTX_SHIM_PATH");
-    if (configured != nullptr && configured[0] != '\0') {
-        paths.emplace_back(configured);
-    }
-    const std::string directory = executableDirectory();
-    if (!directory.empty()) {
-        paths.push_back(pathToUtf8(utf8ToPath(directory) / shimFileName()));
-    }
-    return paths;
 }
 
 void appendUnicodeEscape(std::string& output, uint32_t codepoint) {
@@ -286,82 +222,19 @@ std::string capabilityList(uint32_t caps) {
 
 ShimProbeResult probeShim() {
     ShimProbeResult outcome;
-    const std::vector<std::string> candidates = candidatePaths();
-    if (candidates.empty()) {
-        outcome.error = "cannot determine the executable directory; set RTX_SHIM_PATH";
+    // NvidiaShim owns the sidecar/embedded resolution: it prefers rtx_shim.dll
+    // next to the executable and falls back to the statically linked table in
+    // the single-EXE build.
+    rtx::NvidiaShim shim;
+    std::string error;
+    if (!shim.open(&error)) {
+        outcome.error = error;
         return outcome;
     }
-
-    void* handle = nullptr;
-    std::string last_error;
-    for (const std::string& candidate : candidates) {
-#if defined(_WIN32)
-        const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, candidate.c_str(),
-                                             static_cast<int>(candidate.size()), nullptr, 0);
-        if (size <= 0) {
-            last_error = "invalid UTF-8 shim path: " + candidate;
-            continue;
-        }
-        std::wstring wide(static_cast<size_t>(size), L'\0');
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, candidate.c_str(),
-                            static_cast<int>(candidate.size()), wide.data(), size);
-        HMODULE module = LoadLibraryExW(
-            wide.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (module == nullptr) {
-            last_error = "LoadLibraryExW failed for " + candidate + " (error " +
-                         std::to_string(GetLastError()) + ")";
-            continue;
-        }
-        handle = reinterpret_cast<void*>(module);
-#else
-        handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (handle == nullptr) {
-            const char* message = dlerror();
-            last_error = candidate + ": " + (message != nullptr ? message : "dlopen failed");
-            continue;
-        }
-#endif
-        outcome.loaded = true;
-        outcome.path = candidate;
-        break;
-    }
-    if (handle == nullptr) {
-        outcome.error = last_error.empty() ? "rtx_shim not found" : last_error;
-        outcome.error +=
-            " (build the rtx_shim target or set RTX_SHIM_PATH; the CPU reference backend "
-            "does not require it)";
-        return outcome;
-    }
-
-#if defined(_WIN32)
-    const auto probe_fn =
-        reinterpret_cast<RtxResult(RTX_SHIM_CALL*)(RtxDiagnostics*)>(
-            GetProcAddress(reinterpret_cast<HMODULE>(handle), "rtx_shim_probe"));
-    const auto abi_fn = reinterpret_cast<uint32_t(RTX_SHIM_CALL*)()>(
-        GetProcAddress(reinterpret_cast<HMODULE>(handle), "rtx_shim_abi_version"));
-#else
-    const auto probe_fn = reinterpret_cast<RtxResult(RTX_SHIM_CALL*)(RtxDiagnostics*)>(
-        dlsym(handle, "rtx_shim_probe"));
-    const auto abi_fn =
-        reinterpret_cast<uint32_t(RTX_SHIM_CALL*)()>(dlsym(handle, "rtx_shim_abi_version"));
-#endif
-    if (probe_fn == nullptr || abi_fn == nullptr) {
-        outcome.error = "rtx_shim is missing rtx_shim_probe or rtx_shim_abi_version";
-    } else {
-        outcome.abi_version = abi_fn();
-        outcome.result = static_cast<int32_t>(probe_fn(&outcome.diagnostics));
-        if (outcome.abi_version != RTX_SHIM_ABI_VERSION) {
-            outcome.error = "rtx_shim ABI version " + std::to_string(outcome.abi_version) +
-                            " does not match the CLI expectation " +
-                            std::to_string(RTX_SHIM_ABI_VERSION);
-        }
-    }
-
-#if defined(_WIN32)
-    FreeLibrary(reinterpret_cast<HMODULE>(handle));
-#else
-    dlclose(handle);
-#endif
+    outcome.loaded = true;
+    outcome.path = shim.path();
+    outcome.abi_version = RTX_SHIM_ABI_VERSION;
+    outcome.result = static_cast<int32_t>(shim.probe(&outcome.diagnostics));
     return outcome;
 }
 

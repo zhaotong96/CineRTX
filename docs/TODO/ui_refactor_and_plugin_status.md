@@ -6,6 +6,11 @@
 > **状态**：待评审 / 演进路线规划 (Draft / RFC)  
 > **适用目标**：[`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp) 原生 Win32 GDI 即时态单 exe GUI
 
+> **2026-10-29 更新：** 产品契约已统一为单一重制链路。GUI 现在直接调用
+> `rtx::runNvidiaRemasterTranscode`，不再提供“极速转码 / AI 重制”双模式选择，
+> 也不允许在缺少 NGX DLL 时退回另一种像素路径。本文档中状态栏、异步探针与
+> 诊断引导仍然有效；涉及双模式切换的描述仅作历史设计参考。
+
 ---
 
 ## 1. 现状审查与核心痛点 (Problem Statement)
@@ -16,7 +21,8 @@
 2. **插件装载为静默失败 (Silent Fallback)**：
    - 依赖目录 `plugins/nvidia_rtx/` 下缺少 `nvngx_vsr.dll` 或 `nvngx_truehdr.dll` 时，GUI 没有任何显式视觉提示（如置灰、警告角标、缺件说明）；
    - 用户无法直观获知：当前运行的是纯硬件零拷贝裸转码（Gate 1），还是具备画质重制能力的超分/HDR 流水线（Gate 2）；
-3. **功能入口割裂**：当前 GUI 仅固化调用了 `rtx::runNvidiaContainerTranscode`，尚未将重制核心 `rtx::runNgxRemasterPipeline` 暴露为可视化操作模式。
+3. **功能入口已统一**：GUI 现在调用 `rtx::runNvidiaRemasterTranscode`；本文
+   余下的双模式选择设计已被单一产品契约取代，仅保留状态栏与诊断探针部分。
 
 ---
 

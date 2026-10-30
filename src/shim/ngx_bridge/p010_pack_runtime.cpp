@@ -16,7 +16,14 @@
 #include <mutex>
 #include <string>
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Woverlength-strings"
+#endif
 #include "p010_pack_ptx.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 #include "p010_pack_runtime.h"
 
 #if defined(_WIN32)

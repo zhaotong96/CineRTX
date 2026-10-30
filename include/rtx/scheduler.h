@@ -34,6 +34,53 @@ enum class Stage : int {
 
 const char* stageName(Stage stage) noexcept;
 
+// ---------------------------------------------------------------------------
+// Lock-free telemetry block (W9-1)
+//
+// One cache-line-aligned structure is the only shared state between the
+// transcode worker and the Win32 message pump.  Every field is atomic and
+// independently published, so a repaint never blocks the worker and a
+// WM_ENTERSIZEMOVE modal loop cannot deadlock the pipeline (FMEA-03).
+// ---------------------------------------------------------------------------
+struct alignas(64) TelemetrySnapshot {
+    std::atomic<uint64_t> frames_decoded{0};
+    std::atomic<uint64_t> frames_interpolated{0};
+    std::atomic<uint64_t> frames_encoded{0};
+    std::atomic<uint64_t> scene_cuts_bypassed{0};
+    std::atomic<uint64_t> vram_used_bytes{0};
+    std::atomic<uint64_t> vram_total_bytes{0};
+    std::atomic<uint64_t> device_to_host_bytes{0};
+    std::atomic<uint32_t> ewma_fps_x10{0};      // 1287 means 128.7 FPS
+    std::atomic<uint32_t> pack_stage_us{0};     // 526 means 0.526 ms
+    std::atomic<int32_t> av_sync_drift_us{0};   // live A/V offset, microseconds
+    std::atomic<uint8_t> active_fruc_mode{0};   // 1 = NvOFFRUC, 2 = TRT_RIFE, 3 = bypass
+    std::atomic<uint8_t> watermark_tier{0};     // 0 = Low, 1 = High, 2 = Critical
+    std::atomic<uint8_t> ngx_ready{0};          // 1 = VSR + TrueHDR loaded
+    std::atomic<uint8_t> hardware_ready{0};     // 1 = NVDEC/NVENC probed OK
+
+    void reset() noexcept {
+        frames_decoded.store(0, std::memory_order_relaxed);
+        frames_interpolated.store(0, std::memory_order_relaxed);
+        frames_encoded.store(0, std::memory_order_relaxed);
+        scene_cuts_bypassed.store(0, std::memory_order_relaxed);
+        vram_used_bytes.store(0, std::memory_order_relaxed);
+        device_to_host_bytes.store(0, std::memory_order_relaxed);
+        ewma_fps_x10.store(0, std::memory_order_relaxed);
+        pack_stage_us.store(0, std::memory_order_relaxed);
+        av_sync_drift_us.store(0, std::memory_order_relaxed);
+        active_fruc_mode.store(0, std::memory_order_relaxed);
+        watermark_tier.store(0, std::memory_order_relaxed);
+    }
+};
+
+static_assert(sizeof(TelemetrySnapshot) % 64 == 0,
+              "telemetry must not share a cache line with unrelated state");
+
+// VRAM watermark tier names for the status bar: Low / High / Critical.
+const char* watermarkTierName(uint8_t tier) noexcept;
+// FRUC mode names: none / nvofruc / trt-rife / duplicate.
+const char* frucModeName(uint8_t mode) noexcept;
+
 struct StageMetrics {
     uint64_t submissions = 0;
     uint64_t failures = 0;
@@ -74,6 +121,17 @@ struct StageBinding {
     Stage stage = Stage::Demux;
     std::function<Result<void>(FrameContext&)> execute;
 };
+
+// The canonical phase-3 operator graph.  A bare transcode and a full remaster
+// run the same seven stages; the ones a mode does not need are bound to the
+// identity operator instead of being skipped, so there is exactly one code
+// path and one set of metrics (W8-3).
+std::vector<Stage> canonicalStageOrder();
+
+// Sorts `stages` into canonical order and inserts an identity binding for every
+// canonical stage that the caller did not supply.  An empty input therefore
+// becomes a complete no-op DAG, which is what the scheduler tests assert.
+std::vector<StageBinding> completeStageDag(std::vector<StageBinding> stages);
 
 struct PipelineHooks {
     std::function<bool()> pause_decode;
@@ -128,7 +186,7 @@ private:
 // and by the zero-copy audit script in tools/.
 class TraceRecorder {
 public:
-    explicit TraceRecorder(std::string process_name = "rtx-transcoder");
+    explicit TraceRecorder(std::string process_name = "CineRTX");
 
     void eventBegin(const char* name, const char* category);
     void eventEnd(const char* name, const char* category);

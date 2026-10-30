@@ -18,13 +18,17 @@
 #endif
 
 #include "rtx/hw_transcode.h"
+#include "rtx/i18n.h"
+#include "rtx/ngx_remaster.h"
 #include "rtx/pipeline.h"
 #include "rtx/rife.h"
 #include "rtx/status.h"
+#include "rife_engine.h"
 #include "shim_probe.h"
+#include "viewport_throttle.h"
 
 #ifndef RTX_VERSION_STRING
-#define RTX_VERSION_STRING "0.1.0"
+#define RTX_VERSION_STRING "0.2.0"
 #endif
 
 namespace {
@@ -39,6 +43,7 @@ enum class Mode {
     Container,
     BuildRife,
     SelfTest,
+    ViewportSelfTest,
     Help,
     Version,
 };
@@ -55,15 +60,12 @@ struct Options {
     Rational input_fps{24, 1};
     Rational output_fps{60, 1};
     int vsr_quality = 2;
-    bool interpolate = true;
-    bool hdr = true;
     bool scene_detection = true;
     bool json = false;
     bool quiet = false;
     bool verbose = false;
     bool frames_set = false;
     bool fps_set = false;
-    bool remaster = false;
     bool four_k_profile = false;
     bool no_cuda_graph = false;
     std::string backend = "auto";
@@ -76,6 +78,7 @@ struct Options {
     std::string trace;
     std::string onnx;
     std::string engine;
+    std::string language;
     int bitrate_kbps = 0;
     int preset = 5;
     int rate_control = 0;
@@ -84,55 +87,56 @@ struct Options {
 };
 
 void printHelp() {
-    std::cout
-        << "rtx-transcode " << RTX_VERSION_STRING << "\n"
-        << "Offline SDR -> 4K HDR10 transcode engine (reference CLI)\n\n"
+    std::cout << "CineRTX " << RTX_VERSION_STRING << "\n"
+              << tr(StrId::AppTitle) << "\n"
+              << "Offline SDR -> 4K HDR10 transcode engine (reference CLI)\n\n"
         << "Usage:\n"
-        << "  rtx-transcode --probe [--json]\n"
-        << "  rtx-transcode --simulate N [options]\n"
-        << "  rtx-transcode --input in.mp4 --output out.mp4 --backend nvidia [options]\n"
-        << "  rtx-transcode --input-raw in.nv12 --width W --height H --output-raw out.p010 "
+        << "  CineRTX --probe [--json]\n"
+        << "  CineRTX --simulate N [options]\n"
+        << "  CineRTX --input in.mp4 --output out.mp4 [options]\n"
+        << "  CineRTX --input-raw in.nv12 --width W --height H --output-raw out.p010 "
            "--backend nvidia\n"
-        << "  rtx-transcode --self-test\n"
-        << "  rtx-transcode --build-rife --onnx model.onnx --engine model.engine\n\n"
+        << "  CineRTX --self-test\n"
+        << "  CineRTX --viewport-self-test\n"
+        << "  CineRTX --build-rife --onnx model.onnx --engine model.engine\n\n"
         << "Options:\n"
-        << "  --input PATH                 Container input (MP4/MKV) for hardware transcode\n"
+        << "  --input PATH                 Container input (MP4/MKV); always remastered to\n"
+        << "                               4K HDR10 HEVC Main10 via VSR + TrueHDR\n"
         << "  --output PATH                Container output (MP4/MKV)\n"
-        << "  --codec hevc|h264            NVENC output codec (default hevc)\n"
+        << "  --codec hevc|h264            Verification paths only; the product remaster\n"
+        << "                               always emits HEVC Main10\n"
         << "  --bitrate KBPS               Encoder target bitrate (0 = auto)\n"
         << "  --preset 1..7                NVENC P1..P7 preset (default 5)\n"
         << "  --rate-control cbr|vbr|qp    NVENC rate control (default cbr)\n"
         << "  --qp N                       Constant QP when --rate-control qp\n"
-        << "  --bit-depth 8|10             NVENC input depth (default: preserve source)\n"
+        << "  --bit-depth 8|10             Verification paths only; remaster is always 10-bit\n"
         << "  --width, --height            Raw input geometry (default 1920x1080)\n"
-        << "  --target-width/height        Output geometry (default 3840x2160)\n"
+        << "  --target-width/height        Remaster output geometry (default 3840x2160)\n"
         << "  --fps N[/D]                  Input frame rate (default 24)\n"
-        << "  --output-fps N[/D]           Output frame rate (default 60)\n"
+        << "  --output-fps N[/D]           Reference pipeline output rate (default 60)\n"
         << "  --frames N                   Frame limit (raw input / synthetic count /\n"
         << "                               container and remaster runs)\n"
-        << "  --scene-cut N                Synthetic hard cut at frame N\n"
-        << "  --bar-speed N                Synthetic moving-edge speed\n"
-        << "  --output-raw PATH            Write tight 10-bit P010 output\n"
-        << "  --hdr-sidecar PATH           Write HDR10 JSON sidecar\n"
-        << "  --trace PATH                 Write Chrome tracing JSON\n"
-        << "  --vsr-quality 1..4           Reference upscaler quality hint\n"
-        << "  --remaster                   GPU-only VSR + TrueHDR remaster: 1080p SDR in,\n"
-        << "                               4K HDR10 HEVC Main10 out (requires --backend nvidia)\n"
-        << "  --no-interpolate             Disable 24->60 FRUC synthesis\n"
-        << "  --no-hdr                     Disable HDR10 metadata synthesis\n"
-        << "  --no-scene-detect            Disable cut bypass\n"
-        << "  --backend cpu|auto|nvidia    Select backend (nvidia runs NVDEC/NVENC)\n"
+        << "  --scene-cut N                Synthetic reference cut at frame N\n"
+        << "  --bar-speed N                Synthetic reference moving-edge speed\n"
+        << "  --output-raw PATH            Reference/raw verification P010 output\n"
+        << "  --hdr-sidecar PATH           Reference/raw verification HDR10 JSON sidecar\n"
+        << "  --trace PATH                 Reference pipeline Chrome tracing JSON\n"
+        << "  --vsr-quality 1..4           NGX VSR quality (default 2)\n"
+        << "  --no-scene-detect            Reference pipeline only: disable cut bypass\n"
+        << "  --backend cpu|auto|nvidia    Verification selector for --simulate/--input-raw;\n"
+        << "                               --input always uses the NVIDIA remaster path\n"
         << "  --json                       Machine-readable output\n"
         << "  --quiet, --verbose           Logging verbosity\n"
         << "  --4k-profile                 Allow a 4K RIFE workspace\n"
         << "  --no-cuda-graph              Omit --useCudaGraph from trtexec\n"
+        << "  --lang en|zh                 Output language (default: zh)\n"
         << "  --version, --help            Show version/help\n\n"
-        << "The default backend is the deterministic CPU reference implementation.\n"
-        << "The NVIDIA backend is loaded at runtime from rtx_shim.dll/librtx_shim.so.\n"
-        << "Container mode keeps decoded frames in device memory: NVDEC writes a\n"
-        << "pre-allocated VRAM slot and NVENC registers the CUdeviceptr directly, so\n"
-        << "the main loop performs no host pixel copies.  The raw NV12 path is a\n"
-        << "verification artefact that reports its host staging traffic separately.\n";
+        << "The product transcode is unconditional: every container input is decoded by\n"
+        << "NVDEC, remastered by RTX VSR + TrueHDR in device memory, and encoded as 4K\n"
+        << "HDR10 HEVC Main10.  There is no passthrough or feature switch; only a\n"
+        << "missing NVIDIA runtime component can make a stage unavailable.  The CPU\n"
+        << "reference, raw NV12 and container passthrough entry points exist solely\n"
+        << "for the verification harness.\n";
 }
 
 bool parseInteger(const std::string& text, int& value) {
@@ -170,8 +174,20 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.mode = Mode::Probe;
         } else if (argument == "--self-test") {
             options.mode = Mode::SelfTest;
+        } else if (argument == "--viewport-self-test") {
+            options.mode = Mode::ViewportSelfTest;
         } else if (argument == "--build-rife") {
             options.mode = Mode::BuildRife;
+        } else if (argument == "--lang") {
+            if (!requireValue(argc, argv, i, options.language)) {
+                return false;
+            }
+            const Result<Language> parsed = parseLanguage(options.language);
+            if (!parsed.ok()) {
+                error = "unknown language: " + options.language;
+                return false;
+            }
+            setLanguage(parsed.value());
         } else if (argument == "--simulate") {
             if (!requireValue(argc, argv, i, value) || !parseInteger(value, options.frames) ||
                 options.frames <= 0) {
@@ -302,16 +318,10 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             }
         } else if (argument == "--json") {
             options.json = true;
-        } else if (argument == "--remaster") {
-            options.remaster = true;
         } else if (argument == "--quiet") {
             options.quiet = true;
         } else if (argument == "--verbose") {
             options.verbose = true;
-        } else if (argument == "--no-interpolate") {
-            options.interpolate = false;
-        } else if (argument == "--no-hdr") {
-            options.hdr = false;
         } else if (argument == "--no-scene-detect") {
             options.scene_detection = false;
         } else if (argument == "--4k-profile") {
@@ -374,12 +384,34 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
     return true;
 }
 
+void printNgxBridgeProbe() {
+    rtx::NgxRemasterBridge bridge;
+    std::string error;
+    if (!bridge.open(&error)) {
+        std::cout << "\nNGX bridge probe\n  status: unavailable\n  detail: " << error << "\n";
+        return;
+    }
+    RtxNgxBridgeCaps caps{};
+    const RtxResult result = bridge.queryCaps(&caps);
+    std::cout << "\nNGX bridge probe\n  bridge: " << bridge.path() << "\n";
+    std::cout << "  vsr: " << (caps.vsr_available != 0 ? "available" : "missing")
+              << "; truehdr: " << (caps.truehdr_available != 0 ? "available" : "missing")
+              << "; d3d12: " << (caps.d3d12_device_created != 0 ? "created" : "not created")
+              << "; cuda_interop: "
+              << (caps.cuda_interop_available != 0 ? "available" : "unavailable") << "\n";
+    std::cout << "  detail: " << caps.diagnostics << "\n";
+    if (result != RTX_OK) {
+        std::cout << "  query_caps: error " << static_cast<int>(result) << "\n";
+    }
+}
+
 int runProbe(const Options& options) {
     const cli::ShimProbeResult probe = cli::probeShim();
     if (options.json) {
         std::cout << cli::formatProbeJson(probe);
     } else {
         std::cout << cli::formatProbeHuman(probe);
+        printNgxBridgeProbe();
     }
     if (!probe.loaded) {
         return 4;
@@ -419,16 +451,23 @@ HwTranscodeOptions makeHwOptions(const Options& options) {
             : (options.output_raw.empty() ? options.output_path : options.output_raw);
     hardware.width = options.width;
     hardware.height = options.height;
-    hardware.frame_limit = options.mode == Mode::Raw || options.remaster ? options.frames : 0;
-    hardware.codec = videoCodecFromName(options.codec);
-    hardware.bit_depth = options.bit_depth;
+    hardware.frame_limit =
+        options.mode == Mode::Raw || options.frames_set ? options.frames : 0;
+    if (options.mode == Mode::Container) {
+        // The product remaster always emits HEVC Main10; --codec/--bit-depth
+        // belong to the verification harness and cannot change the product's
+        // output contract.
+        hardware.codec = VideoCodec::HEVC;
+        hardware.bit_depth = 10;
+    } else {
+        hardware.codec = videoCodecFromName(options.codec);
+        hardware.bit_depth = options.bit_depth;
+    }
     hardware.bitrate_kbps = options.bitrate_kbps;
     hardware.preset = options.preset;
     hardware.rate_control = options.rate_control;
     hardware.qp = options.qp;
     hardware.fps = options.fps_set ? options.input_fps : Rational{0, 1};
-    hardware.hdr = options.hdr;
-    hardware.remaster = options.remaster;
     hardware.target_width = options.target_width;
     hardware.target_height = options.target_height;
     hardware.vsr_quality = options.vsr_quality;
@@ -478,16 +517,20 @@ void printHwReport(const HwTranscodeReport& report, const Options& options) {
 }
 
 int runHardwareMode(const Options& options) {
-    if (options.backend != "nvidia") {
-        std::cerr << "error: container hardware transcode requires --backend nvidia\n";
+    if (options.mode == Mode::Container) {
+        if (options.backend != "auto" && options.backend != "nvidia") {
+            std::cerr << "error: container input always runs the NVIDIA remaster path; "
+                         "there is no CPU or passthrough product backend\n";
+            return 2;
+        }
+    } else if (options.backend != "nvidia") {
+        std::cerr << "error: --input-raw is a verification path and requires --backend nvidia\n";
         return 2;
     }
     const HwTranscodeOptions hardware = makeHwOptions(options);
-    Result<HwTranscodeReport> result =
-        options.mode != Mode::Container
-            ? runNvidiaRawTranscode(hardware)
-            : (options.remaster ? runNvidiaRemasterTranscode(hardware)
-                                : runNvidiaContainerTranscode(hardware));
+    Result<HwTranscodeReport> result = options.mode != Mode::Container
+                                           ? runNvidiaRawTranscode(hardware)
+                                           : runNvidiaRemasterTranscode(hardware);
     if (!result.ok()) {
         std::cerr << "error: " << result.error().toString() << "\n";
         return 1;
@@ -507,8 +550,6 @@ PipelineRunConfig makePipelineConfig(const Options& options) {
     config.bar_speed = options.bar_speed;
     config.input_fps = options.input_fps;
     config.output_fps = options.output_fps;
-    config.interpolate = options.interpolate;
-    config.enable_hdr = options.hdr;
     config.scene_detection = options.scene_detection;
     config.vsr_quality = options.vsr_quality;
     config.output_p010 = options.output_raw;
@@ -593,9 +634,10 @@ int runSelfTest() {
     const PipelineReport& value = report.value();
     const bool pass = value.input_frames == 4 && value.output_frames >= 4 &&
                       value.scene_cuts >= 1 && value.packet_bytes > 0;
-    std::cout << "self-test " << (pass ? "PASS" : "FAIL") << ": " << value.input_frames
-              << " input -> " << value.output_frames << " output frames, " << value.scene_cuts
-              << " scene cut(s), " << value.packet_bytes << " packet bytes\n";
+    std::cout << tr(pass ? StrId::SelfTestPass : StrId::SelfTestFail) << ": "
+              << value.input_frames << " input -> " << value.output_frames << " output frames, "
+              << value.scene_cuts << " scene cut(s), " << value.packet_bytes
+              << " packet bytes\n";
     return pass ? 0 : 1;
 }
 
@@ -604,23 +646,91 @@ int buildRife(const Options& options) {
         std::cerr << "error: --build-rife requires --onnx and --engine\n";
         return 2;
     }
-    RifeConfig config;
-    config.source_width = options.width;
-    config.source_height = options.height;
-    const RifeTensorShape shape = rifeAlignedShape(options.width, options.height);
-    config.tensor_width = shape.w;
-    config.tensor_height = shape.h;
-    config.enable_4k_profile = options.four_k_profile;
-    config.use_cuda_graph = !options.no_cuda_graph;
-    const Result<void> valid = validateRifeConfig(config);
-    if (!valid.ok()) {
-        std::cerr << "error: " << valid.error().toString() << "\n";
+    RifeEngineBuildRequest request;
+    request.onnx_path = options.onnx;
+    request.engine_path = options.engine;
+    request.width = options.width;
+    request.height = options.height;
+    request.fp16 = true;
+    request.verbose = options.verbose;
+
+    // State the pinned baseline before the attempt: with TensorRT provisioned the
+    // in-process builder runs and a fixture ONNX fails to parse, so the version
+    // lock has to be visible on both the success and the failure path (the
+    // cli_rife_command test asserts exactly this string).
+    std::cout << "# TensorRT baseline: " << kRifeTensorRtBaseline
+              << " (10.14+ regresses RIFE v4.25 activation memory)\n";
+
+    const Result<RifeEngineBuildReport> report = buildRifeEngine(request);
+    if (!report.ok()) {
+        std::cerr << "error: " << report.error().toString() << "\n";
         return 1;
     }
-    std::cout << buildTrtexecCommand(config, options.onnx, options.engine) << "\n";
-    std::cout << "# TensorRT baseline: 10.13.3.9 (10.14+ regresses RIFE v4.25 activation "
-                 "memory)\n";
+    const RifeEngineBuildReport& value = report.value();
+    if (value.built_in_process) {
+        std::cout << "engine: " << options.engine << " (" << value.engine_bytes << " bytes)\n";
+    } else {
+        // No TensorRT runtime resolvable at run time: emit the sanctioned
+        // command.  The integrity sidecar is still written, so the resulting
+        // engine is checked against the exact ONNX that produced it.
+        if (!value.runtime_note.empty()) {
+            std::cerr << "note: " << value.runtime_note << "\n";
+        }
+        std::cout << value.trtexec_command << "\n";
+    }
+    std::cout << "onnx_sha256: " << value.onnx_sha256 << "\n";
+    std::cout << "sidecar: " << value.sidecar_path << "\n";
     return 0;
+}
+
+// Headless verification of the DirectComposition viewport contract (Gate 6).
+// Runs the scheduling state machine for one simulated second of UI ticks and
+// asserts the 60 Hz gate, the occlusion bypass and the split clamp.
+int runViewportSelfTest() {
+    gui::ViewportThrottle throttle;
+    constexpr int kTicks = 1000;          // 1 kHz UI timer for one second
+    constexpr double kTickSeconds = 0.001;
+    int presents = 0;
+    for (int tick = 0; tick < kTicks; ++tick) {
+        if (throttle.shouldPresent(static_cast<double>(tick) * kTickSeconds, false, false)) {
+            ++presents;
+        }
+    }
+    // 1 s at 60 Hz is 60 presentations; allow the boundary tick.
+    const bool rate_ok = presents >= 59 && presents <= 61;
+
+    // Occluded and minimised windows must dispatch nothing at all.
+    gui::ViewportThrottle occluded;
+    int occluded_presents = 0;
+    for (int tick = 0; tick < 120; ++tick) {
+        if (occluded.shouldPresent(static_cast<double>(tick) * 0.016, true, false)) {
+            ++occluded_presents;
+        }
+    }
+    const bool occlusion_ok = occluded_presents == 0 && occluded.occlusionBypasses() == 120;
+
+    gui::ViewportThrottle minimised;
+    int minimised_presents = 0;
+    for (int tick = 0; tick < 60; ++tick) {
+        if (minimised.shouldPresent(static_cast<double>(tick) * 0.016, false, true)) {
+            ++minimised_presents;
+        }
+    }
+    const bool minimised_ok = minimised_presents == 0;
+
+    // Split clamp: out-of-range cursors and a zero-width viewport must not
+    // produce a sampling coordinate outside [0, 1].
+    const bool split_ok = throttle.splitForCursor(-40, 800) == 0.0 &&
+                          throttle.splitForCursor(400, 800) == 0.5 &&
+                          throttle.splitForCursor(9999, 800) == 1.0 &&
+                          throttle.splitForCursor(10, 0) == 0.5;
+
+    const bool pass = rate_ok && occlusion_ok && minimised_ok && split_ok;
+    std::cout << "viewport self-test " << (pass ? "PASS" : "FAIL") << ": " << presents
+              << " presents/s, " << occluded_presents << " presents while occluded, "
+              << minimised_presents << " while minimised, split clamp "
+              << (split_ok ? "OK" : "FAILED") << "\n";
+    return pass ? 0 : 1;
 }
 
 }  // namespace
@@ -676,9 +786,6 @@ int rtxCliMain(int argc, char** argv) {
     }
 #endif
     Options options;
-#ifdef RTX_BASE_EDITION
-    options.backend = "nvidia";
-#endif
     std::string error;
     if (!parseOptions(argc, argv, options, error)) {
         std::cerr << "error: " << error << "\n";
@@ -690,12 +797,14 @@ int rtxCliMain(int argc, char** argv) {
             printHelp();
             return 0;
         case Mode::Version:
-            std::cout << "rtx-transcode " << RTX_VERSION_STRING << "\n";
+            std::cout << "CineRTX " << RTX_VERSION_STRING << "\n";
             return 0;
         case Mode::Probe:
             return runProbe(options);
         case Mode::SelfTest:
             return runSelfTest();
+        case Mode::ViewportSelfTest:
+            return runViewportSelfTest();
         case Mode::BuildRife:
             return buildRife(options);
         case Mode::Simulate:

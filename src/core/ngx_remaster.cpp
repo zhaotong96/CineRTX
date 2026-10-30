@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// Implementation of the rtx_ngx_bridge.dll runtime loader (see
-// include/rtx/ngx_remaster.h).  Mirrors nvidia_shim.cpp: candidate paths,
-// LoadLibraryExW with restricted search, symbol resolution and an explicit
-// ABI version gate before the remaster contract may be used.
+// Implementation of the rtx_ngx_bridge runtime loader (see
+// include/rtx/ngx_remaster.h).  Mirrors nvidia_shim.cpp: candidate paths
+// (explicit override, <exe>/plugins/nvidia_rtx, then the executable
+// directory), LoadLibraryExW with restricted search, symbol resolution and an
+// explicit ABI version gate before the remaster contract may be used.  A
+// sidecar DLL is honoured first for plugin override; when none is present the
+// single-EXE build falls back to bindEmbedded(), which binds the identical C
+// ABI that rtx_ngx_bridge_static linked into this image.
 
 #include "rtx/ngx_remaster.h"
 
@@ -82,7 +86,11 @@ std::vector<std::string> candidatePaths() {
     }
     const std::string directory = executableDirectory();
     if (!directory.empty()) {
-        paths.push_back((std::filesystem::path(directory) / bridgeFileName()).string());
+        const std::filesystem::path root(directory);
+        // Canonical deployment and install layout: the bridge and NVIDIA's
+        // feature DLLs live together under <app>/plugins/nvidia_rtx.
+        paths.push_back((root / bridgeFileName()).string());
+        paths.push_back((root / "plugins" / "nvidia_rtx" / bridgeFileName()).string());
     }
     return paths;
 }
@@ -107,6 +115,34 @@ bool NgxRemasterBridge::resolve(Fn& function, const char* name, std::string* err
     return true;
 }
 
+#if defined(RTX_EMBEDDED_NGX_BRIDGE)
+bool NgxRemasterBridge::bindEmbedded(std::string* error) {
+    if (rtx_ngx_bridge_abi_version() < RTX_NGX_BRIDGE_ABI_VERSION) {
+        error_ = "embedded rtx_ngx_bridge ABI version " +
+                 std::to_string(rtx_ngx_bridge_abi_version()) +
+                 " is older than the remaster contract " +
+                 std::to_string(RTX_NGX_BRIDGE_ABI_VERSION);
+        if (error != nullptr) {
+            *error = error_;
+        }
+        return false;
+    }
+    query_caps_ = &rtx_ngx_bridge_query_caps;
+    create_ = &rtx_ngx_bridge_create;
+    destroy_ = &rtx_ngx_bridge_destroy;
+    remaster_ = &rtx_ngx_bridge_remaster;
+    get_remaster_stats_ = &rtx_ngx_bridge_get_remaster_stats;
+    last_error_ = &rtx_ngx_bridge_last_error;
+    embedded_ = true;
+    path_ = "embedded:rtx_ngx_bridge";
+    error_.clear();
+    if (error != nullptr) {
+        error->clear();
+    }
+    return true;
+}
+#endif
+
 bool NgxRemasterBridge::open(std::string* error) {
     if (loaded()) {
         return true;
@@ -114,6 +150,11 @@ bool NgxRemasterBridge::open(std::string* error) {
     close();
     const std::vector<std::string> candidates = candidatePaths();
     if (candidates.empty()) {
+#if defined(RTX_EMBEDDED_NGX_BRIDGE)
+        if (bindEmbedded(error)) {
+            return true;
+        }
+#endif
         error_ = "cannot determine the executable directory; set RTX_NGX_BRIDGE_PATH";
         if (error != nullptr) {
             *error = error_;
@@ -122,7 +163,9 @@ bool NgxRemasterBridge::open(std::string* error) {
     }
 
     std::string last_error;
+    std::string searched;
     for (const std::string& candidate : candidates) {
+        searched += (searched.empty() ? "" : ", ") + candidate;
 #if defined(_WIN32)
         const std::wstring wide = widen(candidate);
         if (wide.empty()) {
@@ -147,74 +190,76 @@ bool NgxRemasterBridge::open(std::string* error) {
         }
 #endif
         path_ = candidate;
-        break;
-    }
-    if (handle_ == nullptr) {
-        error_ = last_error.empty() ? "rtx_ngx_bridge not found" : last_error;
-        if (error != nullptr) {
-            *error = error_;
+
+        // A stale override or an old sidecar must not shadow a working copy
+        // later in the search order: gate every candidate on the ABI version
+        // and the full remaster symbol set, then keep searching on failure.
+        std::string message;
+        uint32_t(RTX_SHIM_CALL * abi_version)() = nullptr;
+        if (!resolve(abi_version, "rtx_ngx_bridge_abi_version", &message)) {
+            // A bridge without the version export predates the remaster
+            // contract; treat it as ABI 1 and refuse rather than guess.
+            last_error = candidate +
+                         ": does not export rtx_ngx_bridge_abi_version; it predates the "
+                         "remaster contract (rebuild the bridge)";
+            close();
+            continue;
         }
-        return false;
+        if (abi_version() < RTX_NGX_BRIDGE_ABI_VERSION) {
+            last_error = candidate + ": ABI version " + std::to_string(abi_version()) +
+                         " is older than the remaster contract " +
+                         std::to_string(RTX_NGX_BRIDGE_ABI_VERSION);
+            close();
+            continue;
+        }
+
+        const bool complete =
+            resolve(query_caps_, "rtx_ngx_bridge_query_caps", &message) &&
+            resolve(create_, "rtx_ngx_bridge_create", &message) &&
+            resolve(destroy_, "rtx_ngx_bridge_destroy", &message) &&
+            resolve(remaster_, "rtx_ngx_bridge_remaster", &message) &&
+            resolve(get_remaster_stats_, "rtx_ngx_bridge_get_remaster_stats", &message) &&
+            resolve(last_error_, "rtx_ngx_bridge_last_error", &message);
+        if (!complete) {
+            last_error = candidate + ": " + message;
+            close();
+            continue;
+        }
+
+        error_.clear();
+        if (error != nullptr) {
+            error->clear();
+        }
+        return true;
     }
 
-    std::string message;
-    uint32_t(RTX_SHIM_CALL * abi_version)() = nullptr;
-    if (!resolve(abi_version, "rtx_ngx_bridge_abi_version", &message)) {
-        // A bridge without the version export predates the remaster contract;
-        // treat it as ABI 1 and refuse rather than guess.
-        close();
-        error_ = "rtx_ngx_bridge does not export rtx_ngx_bridge_abi_version; it predates "
-                 "the remaster contract (rebuild the bridge)";
-        if (error != nullptr) {
-            *error = error_;
-        }
-        return false;
+    // The single-EXE build inlines the bridge, so a missing sidecar is not a
+    // failure: the same C ABI is already in this image.
+#if defined(RTX_EMBEDDED_NGX_BRIDGE)
+    if (bindEmbedded(error)) {
+        return true;
     }
-    if (abi_version() < RTX_NGX_BRIDGE_ABI_VERSION) {
-        const uint32_t actual = abi_version();
-        close();
-        error_ = "rtx_ngx_bridge ABI version " + std::to_string(actual) +
-                 " is older than the remaster contract " +
-                 std::to_string(RTX_NGX_BRIDGE_ABI_VERSION);
-        if (error != nullptr) {
-            *error = error_;
-        }
-        return false;
+#endif
+    error_ = last_error.empty() ? "rtx_ngx_bridge not found" : last_error;
+    if (!searched.empty()) {
+        error_ += " (searched: " + searched + ")";
     }
-
-    const bool complete =
-        resolve(query_caps_, "rtx_ngx_bridge_query_caps", &message) &&
-        resolve(create_, "rtx_ngx_bridge_create", &message) &&
-        resolve(destroy_, "rtx_ngx_bridge_destroy", &message) &&
-        resolve(remaster_, "rtx_ngx_bridge_remaster", &message) &&
-        resolve(get_remaster_stats_, "rtx_ngx_bridge_get_remaster_stats", &message) &&
-        resolve(last_error_, "rtx_ngx_bridge_last_error", &message);
-    if (!complete) {
-        close();
-        error_ = message;
-        if (error != nullptr) {
-            *error = error_;
-        }
-        return false;
-    }
-
-    error_.clear();
     if (error != nullptr) {
-        error->clear();
+        *error = error_;
     }
-    return true;
+    return false;
 }
 
 void NgxRemasterBridge::close() {
-    if (handle_ == nullptr) {
-        return;
-    }
+    if (handle_ != nullptr) {
 #if defined(_WIN32)
-    FreeLibrary(reinterpret_cast<HMODULE>(handle_));
+        FreeLibrary(reinterpret_cast<HMODULE>(handle_));
 #else
-    dlclose(handle_);
+        dlclose(handle_);
 #endif
-    handle_ = nullptr;
+        handle_ = nullptr;
+    }
+    embedded_ = false;
     path_.clear();
     query_caps_ = nullptr;
     create_ = nullptr;

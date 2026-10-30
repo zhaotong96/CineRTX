@@ -6,7 +6,9 @@
  * core sees opaque handles and plain C structs from rtx_shim_abi.h.
  */
 
+#if !defined(RTX_SHIM_STATIC)
 #define RTX_SHIM_EXPORTS 1
+#endif
 
 #include "rtx_shim_abi.h"
 
@@ -151,7 +153,13 @@ ProbeState probeNvidia() {
                     major > 7 || (major == 7 && minor >= 5);
                 const bool nvenc_present = componentPresent(state, "NVENC");
                 const bool nvdec_present = componentPresent(state, "NVDEC (cuvid)");
-                const bool ngx_present = componentPresent(state, "RTX Video SDK (NGX)");
+#if defined(_WIN32)
+                const bool vsr_present = componentPresent(state, "nvngx_vsr.dll");
+                const bool truehdr_present = componentPresent(state, "nvngx_truehdr.dll");
+#else
+                const bool vsr_present = componentPresent(state, "libnvngx_vsr.so");
+                const bool truehdr_present = componentPresent(state, "libnvngx_truehdr.so");
+#endif
                 const bool nvofruc_present = componentPresent(state, "NvOFFRUC");
                 const bool tensorrt_present = componentPresent(state, "TensorRT") &&
                                               state.runtime.hasTensorRt();
@@ -166,8 +174,11 @@ ProbeState probeNvidia() {
                 if (nvenc_present && nvenc_version >= 1200 && (major > 8 || (major == 8 && minor >= 9))) {
                     state.capabilities |= RTX_CAP_NVENC_AV1;
                 }
-                if (turing_or_newer && ngx_present) {
-                    state.capabilities |= RTX_CAP_VSR | RTX_CAP_TRUEHDR;
+                if (turing_or_newer && vsr_present) {
+                    state.capabilities |= RTX_CAP_VSR;
+                }
+                if (turing_or_newer && truehdr_present) {
+                    state.capabilities |= RTX_CAP_TRUEHDR;
                 }
                 if (turing_or_newer && nvofruc_present) {
                     state.capabilities |= RTX_CAP_NVOFA;

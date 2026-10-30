@@ -12,7 +12,7 @@
 2. 领域专家一阶段深度验收报告 [`RTX转码引擎一阶段专家验收.md`](file:///[REDACTED_DRIVE]/work/[REDACTED_PROJ]/RTX转码引擎一阶段专家验收.md)
 3. 二阶段工程施工技术任务书 [`phase2_construction_specification.md`](file:///C:/[REDACTED_PROJ]/phase2_construction_specification.md)
 4. 一阶段验收记录 [`docs/gate1.md`](file:///P:/[REDACTED_PROJ]/docs/gate1.md) 与二阶段工程师报告 [`docs/gate2.md`](file:///P:/[REDACTED_PROJ]/docs/gate2.md)
-5. 研发机构建产物目录 `P:\PUBLIC\nlp\build\` 与宿主验证环境 `[REDACTED_HOST]`（RTX 5060 Laptop GPU, sm_120）
+5. 研发机构建产物目录 `P:\PUBLIC\[REDACTED_PROJ]\build\` 与宿主验证环境 `[REDACTED_HOST]`（RTX 5060 Laptop GPU, sm_120）
 
 ---
 
@@ -168,7 +168,7 @@ flowchart TD
 只有同时满足以下 4 条硬性门禁，项目架构师方可受理二阶段复验：
 
 1. **Gate 1 无回退门禁**：
-   在 RTX 5060 Laptop 宿主上运行 `pwsh tools/verify_gate1.ps1 -BuildDir P:\PUBLIC\nlp\build\zig-ffmpeg -Container <sample.mp4>`，必须取得 **4/4 项全部 PASS**（单元测试 100%、设备探针正常、Raw 路径无 205 错误、容器转码 $D2H=0, H2D=0$）。
+   在 RTX 5060 Laptop 宿主上运行 `pwsh tools/verify_gate1.ps1 -BuildDir P:\PUBLIC\[REDACTED_PROJ]\build\zig-ffmpeg -Container <sample.mp4>`，必须取得 **4/4 项全部 PASS**（单元测试 100%、设备探针正常、Raw 路径无 205 错误、容器转码 $D2H=0, H2D=0$）。
 2. **W4 互操作自测绿灯门禁**：
    运行 `rtx_ngx_bridge_selftest(256, 256, ...)` 必须返回 `RTX_OK` (0)，且详细回显包含 `round trip OK: 256x256 RGBA16F, D3D12 -> CUDA -> D3D12`。
 3. **自动化测试无死角门禁**：

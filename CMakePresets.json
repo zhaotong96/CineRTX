@@ -17,8 +17,21 @@
       }
     },
     {
+      "name": "windows-msvc-ninja",
+      "displayName": "Windows MSVC (Ninja, VS 2022/2026)",
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
       "name": "zig-windows",
-      "displayName": "Zig 0.13 (Windows)",
+      "displayName": "Windows (native compiler; Zig 0.13 fallback)",
       "inherits": "base",
       "toolchainFile": "${sourceDir}/cmake/toolchain-zig.cmake",
       "condition": {
@@ -29,7 +42,7 @@
     },
     {
       "name": "zig-linux",
-      "displayName": "Zig 0.13 (Linux)",
+      "displayName": "Linux (native compiler; Zig 0.13 fallback)",
       "inherits": "base",
       "toolchainFile": "${sourceDir}/cmake/toolchain-zig.cmake",
       "condition": {
@@ -84,6 +97,10 @@
       "name": "windows-msvc",
       "configurePreset": "windows-msvc",
       "configuration": "Release"
+    },
+    {
+      "name": "windows-msvc-ninja",
+      "configurePreset": "windows-msvc-ninja"
     }
   ],
   "testPresets": [
@@ -112,6 +129,13 @@
       "name": "windows-msvc",
       "configurePreset": "windows-msvc",
       "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-ninja",
+      "configurePreset": "windows-msvc-ninja",
       "output": {
         "outputOnFailure": true
       }

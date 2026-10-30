@@ -1,5 +1,12 @@
 # Gate 2 construction record (W4–W6)
 
+> **Historical phase-2 record.** Measurements and commands below were taken
+> before the single-product unification. The product now runs the remaster
+> unconditionally: `--remaster` no longer exists, container input always emits
+> 4K HDR10 HEVC Main10, and the old `rtx-transcode.exe` /
+> `rtx-transcode-base.exe` targets are gone in favour of `CineRTX.exe`. The
+> recorded numbers remain the acceptance evidence for the underlying pipeline.
+
 Status of the phase-2 task book (`phase2_construction_specification.md`) against
 the code and the hardware that were actually available. Nothing here is
 projected: every "verified" row was executed on `[REDACTED_HOST]` (RTX 5060 Laptop,
@@ -69,8 +76,9 @@ What is already in place for W5:
 - independent texture/parameter plumbing points (the ABI keeps VSR and TrueHDR
   settings separate, so the Blackwell "two handles, two parameter blocks" rule
   can be implemented without an ABI change);
-- the `RTX_WITH_NGX_SDK` CMake switch that expects
-  `src/shim/ngx_bridge/ngx_d3d12_bridge.cpp`.
+- the Windows bridge implementation `src/shim/ngx_bridge/ngx_d3d12_bridge.cpp`,
+  which every Windows build compiles against the RTX Video SDK (the former
+  opt-in switch was removed; the SDK sources are mandatory).
 
 ## 4. W6 — pack kernel, HDR10 dual injection, pipeline merge
 
@@ -97,8 +105,8 @@ CTest, Gate-1 zero-copy transcode on sm_120 and sm_52).
 ## 6. What is needed to finish
 
 1. Install the RTX Video SDK (headers + `nvngx_vsr.dll`, `nvngx_truehdr.dll`,
-   `nvsdk_ngx_d.dll`) on the RTX 5060 host and rebuild with
-   `RTX_WITH_NGX_SDK=ON`.
+   `nvsdk_ngx_d.dll`) on the RTX 5060 host and rebuild normally; the bridge is
+   part of every Windows build.
 2. Resolve the interop copy failure (isolate without the pack module; verify
    whether `D3D12CreateDevice` invalidates the retained primary context).
 3. Install Nsight Systems and capture 1000 frames (`--trace=cuda,nvtx,dx12`).
@@ -160,8 +168,10 @@ verified on the RTX 5060 on 2026-10-24 (`rtx_w5\eval.log`: `vsr=1 truehdr=1`,
   and a producer/consumer encode pipeline (NVENC overlaps the next frame's
   NGX evaluation through the two-buffer P010 ring; ring-depth contract:
   frame *i* is issued only after frame *i−2* finished encoding).
-* **CLI**: `--remaster`, `--frames` now honoured by the container path,
-  `--target-width/--target-height/--vsr-quality` wired into the hardware path.
+* **CLI**: `--frames` is honoured by the product container path,
+  `--target-width/--target-height/--vsr-quality` are wired into the remaster
+  path. The historical `--remaster` switch was removed when the remaster became
+  the only product container path.
 * **Bug fixed en route**: `tuningForPreset()` returned
   `NV_ENC_TUNING_INFO_UNDEFINED` for presets 3/4, which made those presets
   fail `rtx_shim_encoder_create` on driver 617.14; presets 3/4 now map to the
@@ -169,7 +179,8 @@ verified on the RTX 5060 on 2026-10-24 (`rtx_w5\eval.log`: `vsr=1 truehdr=1`,
 
 ### 8.2 Gate 2.1 — 1000-frame 1080p SDR → 4K HDR10 throughput — **PASS**
 
-Command (RTX 5060, driver 617.14, 2026-10-25, `C:\Users\[REDACTED_USER]\rtx_w6`):
+Command recorded at the time (the `--remaster` flag shown here has since been
+removed; the container path is always the remaster now):
 
 ```bat
 rtx-transcode.exe --input in_1080p_sdr_1000f.mp4 --output gate21_v2.mp4 ^
@@ -238,7 +249,7 @@ be verified from an SSH session** (no interactive desktop); per handover
 
 | Artefact | SHA-256 |
 | --- | --- |
-| `rtx_ngx_bridge.dll` (build/zig-ngx, SDK ON) | `06755c7666b4f0c783062cd192698d4b01b149b4f9af2f115d0857a4cab38267` |
+| `rtx_ngx_bridge.dll` (build/zig-ngx, SDK-enabled Windows bridge) | `06755c7666b4f0c783062cd192698d4b01b149b4f9af2f115d0857a4cab38267` |
 | `rtx-transcode.exe` (build/gcc-gui) | `fb60efee38620b2876bb6c15c59ae63b36bd7ba2b3e62129599ff74b1a613f2a` |
 | `rtx_shim.dll` (build/gcc-gui) | `1e4c78b495b987b2cf1697b1230d14b184a9d50cde1d6cf4d282fedf211ba409` |
 | `rtx-transcode-gui.exe` (build/gcc-gui) | `f596208b317ff07e21529225c5ae78fe131c88951edc52cee749e5cc10d989f8` |

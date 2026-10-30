@@ -236,11 +236,40 @@ bool NvidiaRuntime::loadNvOfruc(std::string* error) {
 
 bool NvidiaRuntime::loadTensorRt(std::string* error) {
     ComponentStatus& component = addComponent("TensorRT");
+    // The pinned runtime is TensorRT 10.13.3.9, whose module is nvinfer_10.dll.
+    // The 11.x archive renames it to nvinfer_11.dll, so both are probed: the
+    // component must report what is actually installed, and the RIFE version
+    // gate (kRifeTensorRtBaseline in include/rtx/rife.h) is what refuses to
+    // build an engine on anything but 10.13.3.9.  Probing a library is not a
+    // promise that the graph will build on it.
+    const struct {
+        const char* windows_name;
+        const char* posix_name;
+    } candidates[] = {
+        {"nvinfer_10.dll", "libnvinfer.so.10"},
+        {"nvinfer_11.dll", "libnvinfer.so.11"},
+    };
+
     std::string message;
-    const std::string name = platformLibraryName("nvinfer_10.dll", "libnvinfer.so.10");
-    if (!openSdkLibrary(tensorrt_, name, false, &message)) {
+    bool opened = false;
+    for (const auto& candidate : candidates) {
+        std::string attempt;
+        const std::string name =
+            platformLibraryName(candidate.windows_name, candidate.posix_name);
+        if (openSdkLibrary(tensorrt_, name, false, &attempt)) {
+            opened = true;
+            break;
+        }
+        if (!message.empty()) {
+            message += "; ";
+        }
+        message += attempt;
+    }
+    if (!opened) {
         component.note = errorOr(
-            message, "TensorRT 10.13.3.9 not found (RIFE disabled; set RTX_NVIDIA_DIR)");
+            message,
+            "TensorRT 10.13.3.9 (nvinfer_10.dll) not found beside CineRTX.exe; "
+            "RIFE disabled (set RTX_NVIDIA_DIR)");
         if (error != nullptr) {
             *error = component.note;
         }
@@ -255,6 +284,13 @@ bool NvidiaRuntime::loadTensorRt(std::string* error) {
         tensorrt_version_ = static_cast<uint32_t>(version);
         component.version = version;
         component.note = "TensorRT " + tensorrt::versionToString(version);
+        // NV_TENSORRT_VERSION packs major*10000 + minor*100 + patch, so the
+        // pinned 10.13.3.9 runtime reports 101303.  The build number is not part
+        // of the value; the RIFE gate compares the full header version instead.
+        constexpr int32_t kRifeRuntimeVersion = 10 * 10000 + 13 * 100 + 3;
+        if (version != kRifeRuntimeVersion) {
+            component.note += " (RIFE engine build requires 10.13.3.9)";
+        }
     } else {
         component.note = resolve_error;
     }
@@ -265,14 +301,52 @@ bool NvidiaRuntime::loadTensorRt(std::string* error) {
 }
 
 bool NvidiaRuntime::loadNgx(std::string* error) {
-    ComponentStatus& component = addComponent("RTX Video SDK (NGX)");
 #if defined(_WIN32)
     const char* primary = "nvsdk_ngx_d.dll";
     const char* fallback = "nvsdk_ngx.dll";
+    const char* feature_names[] = {"nvngx_vsr.dll", "nvngx_truehdr.dll"};
 #else
     const char* primary = "libnvsdk_ngx.so";
     const char* fallback = "libnvsdk_ngx.so";
+    const char* feature_names[] = {"libnvngx_vsr.so", "libnvngx_truehdr.so"};
 #endif
+
+    // The proprietary host stub is linked into rtx_ngx_bridge, not into this
+    // shim, so nvsdk_ngx_d.dll is not a deliverable.  The feature DLLs are the
+    // real signal that the plugin is deployed; look where the bridge looks.
+    std::vector<std::string> directories;
+    const char* plugin_directory = std::getenv("RTX_NGX_PLUGIN_DIR");
+    if (plugin_directory != nullptr && plugin_directory[0] != '\0') {
+        directories.emplace_back(plugin_directory);
+    }
+    if (const char* nvidia_directory = std::getenv("RTX_NVIDIA_DIR");
+        nvidia_directory != nullptr && nvidia_directory[0] != '\0') {
+        for (const std::string& entry : splitPaths(nvidia_directory)) {
+            directories.push_back(entry);
+        }
+    }
+    const std::string application_directory = executableDirectory();
+    if (!application_directory.empty()) {
+        const std::filesystem::path root = utf8ToPath(application_directory);
+        directories.push_back(pathToUtf8(root / "plugins" / "nvidia_rtx"));
+        directories.push_back(application_directory);
+    }
+
+    std::string feature_directory;
+    bool features_complete = false;
+    for (const std::string& directory : directories) {
+        bool complete = true;
+        for (const char* feature : feature_names) {
+            const std::filesystem::path candidate = utf8ToPath(directory) / feature;
+            complete = complete && fileExists(pathToUtf8(candidate));
+        }
+        if (complete) {
+            feature_directory = directory;
+            features_complete = true;
+            break;
+        }
+    }
+
     std::string message;
     bool opened = openSdkLibrary(ngx_, primary, false, &message);
     if (!opened && std::string(fallback) != primary) {
@@ -282,37 +356,45 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
             message += "; " + fallback_message;
         }
     }
-    if (!opened) {
-        component.note = errorOr(message, "nvsdk_ngx not found");
+    if (!opened && !features_complete) {
+        ComponentStatus& component = addComponent("RTX Video SDK (NGX)");
+        component.note = errorOr(message, "nvsdk_ngx not found and the NGX feature DLLs are missing");
         if (error != nullptr) {
             *error = component.note;
         }
         return false;
     }
-    component.present = true;
-    component.path = ngx_.path();
 
-    const std::string directory = pathToUtf8(utf8ToPath(ngx_.path()).parent_path());
-#if defined(_WIN32)
-    const char* feature_names[] = {"nvngx_vsr.dll", "nvngx_truehdr.dll"};
-#else
-    const char* feature_names[] = {"libnvngx_vsr.so", "libnvngx_truehdr.so"};
-#endif
+    if (opened && feature_directory.empty()) {
+        feature_directory = pathToUtf8(utf8ToPath(ngx_.path()).parent_path());
+    }
+
     for (const char* feature : feature_names) {
         ComponentStatus& feature_component = addComponent(feature);
-        const std::filesystem::path candidate = utf8ToPath(directory) / feature;
-        feature_component.present = fileExists(pathToUtf8(candidate));
+        const std::filesystem::path candidate =
+            feature_directory.empty() ? std::filesystem::path()
+                                      : utf8ToPath(feature_directory) / feature;
+        feature_component.present =
+            !candidate.empty() && fileExists(pathToUtf8(candidate));
         feature_component.path = pathToUtf8(candidate);
         feature_component.note =
             feature_component.present ? "feature DLL present" : "feature DLL missing";
     }
 
-    ngx::Table table;
-    std::string resolve_error;
-    if (table.resolve(ngx_, &resolve_error)) {
-        component.note = "NGX exports resolved (D3D12 evaluate entry points)";
+    ComponentStatus& component = addComponent("RTX Video SDK (NGX)");
+    component.present = true;
+    component.path = opened ? ngx_.path() : feature_directory;
+    if (opened) {
+        ngx::Table table;
+        std::string resolve_error;
+        if (table.resolve(ngx_, &resolve_error)) {
+            component.note = "NGX exports resolved (D3D12 evaluate entry points)";
+        } else {
+            component.note = resolve_error;
+        }
     } else {
-        component.note = resolve_error;
+        component.note =
+            "feature DLLs present; the NGX host stub is embedded in rtx_ngx_bridge";
     }
     if (error != nullptr) {
         error->clear();

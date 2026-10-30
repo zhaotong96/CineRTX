@@ -7,6 +7,10 @@
 #include <filesystem>
 #include <vector>
 
+#if defined(RTX_EMBEDDED_SHIM)
+#include "rtx/embedded_shim.h"
+#endif
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -103,6 +107,49 @@ bool NvidiaShim::resolve(Fn& function, const char* name, std::string* error) {
     return true;
 }
 
+#if defined(RTX_EMBEDDED_SHIM)
+bool NvidiaShim::loadEmbedded(std::string* error) {
+    const EmbeddedShimApi* api = embeddedShimApi();
+    if (api == nullptr || api->abi_version == nullptr) {
+        return false;
+    }
+    if (api->abi_version() != RTX_SHIM_ABI_VERSION) {
+        error_ = "embedded rtx_shim ABI version " + std::to_string(api->abi_version()) +
+                 " does not match the engine expectation " +
+                 std::to_string(RTX_SHIM_ABI_VERSION);
+        if (error != nullptr) {
+            *error = error_;
+        }
+        return false;
+    }
+    probe_ = api->probe;
+    decoder_create_ = api->decoder_create;
+    decoder_destroy_ = api->decoder_destroy;
+    decoder_submit_ = api->decoder_submit;
+    decoder_receive_ = api->decoder_receive;
+    decoder_flush_ = api->decoder_flush;
+    decoder_release_ = api->decoder_release_frame;
+    decoder_download_ = api->decoder_download;
+    decoder_stats_ = api->decoder_get_stats;
+    decoder_last_error_ = api->decoder_last_error;
+    encoder_create_ = api->encoder_create;
+    encoder_destroy_ = api->encoder_destroy;
+    encoder_encode_ = api->encoder_encode;
+    encoder_encode_host_ = api->encoder_encode_host;
+    encoder_flush_ = api->encoder_flush;
+    encoder_sequence_header_ = api->encoder_get_sequence_header;
+    encoder_stats_ = api->encoder_get_stats;
+    encoder_last_error_ = api->encoder_last_error;
+    embedded_ = true;
+    path_ = "embedded:rtx_shim";
+    error_.clear();
+    if (error != nullptr) {
+        error->clear();
+    }
+    return true;
+}
+#endif
+
 bool NvidiaShim::open(std::string* error) {
     if (loaded()) {
         return true;
@@ -110,6 +157,11 @@ bool NvidiaShim::open(std::string* error) {
     close();
     const std::vector<std::string> candidates = candidatePaths();
     if (candidates.empty()) {
+#if defined(RTX_EMBEDDED_SHIM)
+        if (loadEmbedded(error)) {
+            return true;
+        }
+#endif
         error_ = "cannot determine the executable directory; set RTX_SHIM_PATH";
         if (error != nullptr) {
             *error = error_;
@@ -146,6 +198,13 @@ bool NvidiaShim::open(std::string* error) {
         break;
     }
     if (handle_ == nullptr) {
+        // The single-EXE build links rtx_shim_static, so a missing sidecar is
+        // not a failure: the exact same codec implementation is in the image.
+#if defined(RTX_EMBEDDED_SHIM)
+        if (loadEmbedded(error)) {
+            return true;
+        }
+#endif
         error_ = last_error.empty() ? "rtx_shim not found" : last_error;
         if (error != nullptr) {
             *error = error_;
@@ -157,6 +216,11 @@ bool NvidiaShim::open(std::string* error) {
     uint32_t(RTX_SHIM_CALL * abi_version)() = nullptr;
     if (!resolve(abi_version, "rtx_shim_abi_version", &message)) {
         close();
+#if defined(RTX_EMBEDDED_SHIM)
+        if (loadEmbedded(error)) {
+            return true;
+        }
+#endif
         error_ = message;
         if (error != nullptr) {
             *error = error_;
@@ -166,6 +230,11 @@ bool NvidiaShim::open(std::string* error) {
     if (abi_version() != RTX_SHIM_ABI_VERSION) {
         const uint32_t actual = abi_version();
         close();
+#if defined(RTX_EMBEDDED_SHIM)
+        if (loadEmbedded(error)) {
+            return true;
+        }
+#endif
         error_ = "rtx_shim ABI version " + std::to_string(actual) +
                  " does not match the engine expectation " +
                  std::to_string(RTX_SHIM_ABI_VERSION);
@@ -196,6 +265,11 @@ bool NvidiaShim::open(std::string* error) {
         resolve(encoder_last_error_, "rtx_shim_encoder_last_error", &message);
     if (!complete) {
         close();
+#if defined(RTX_EMBEDDED_SHIM)
+        if (loadEmbedded(error)) {
+            return true;
+        }
+#endif
         error_ = message;
         if (error != nullptr) {
             *error = error_;
@@ -211,15 +285,15 @@ bool NvidiaShim::open(std::string* error) {
 }
 
 void NvidiaShim::close() {
-    if (handle_ == nullptr) {
-        return;
-    }
+    if (handle_ != nullptr) {
 #if defined(_WIN32)
-    FreeLibrary(reinterpret_cast<HMODULE>(handle_));
+        FreeLibrary(reinterpret_cast<HMODULE>(handle_));
 #else
-    dlclose(handle_);
+        dlclose(handle_);
 #endif
-    handle_ = nullptr;
+        handle_ = nullptr;
+    }
+    embedded_ = false;
     path_.clear();
     probe_ = nullptr;
     decoder_create_ = nullptr;

@@ -26,7 +26,12 @@ enum class ErrorCode : int {
     OutOfMemory = 9,
     NgxFailure = 10,
     TensorRtVersion = 11,
-    FfmpegMissing = 12,
+    // Slot 12 is permanently retired: it named a runtime "FFmpeg was not
+    // compiled in" state.  The media container layer is now an unconditional
+    // statically linked core component (Gate 3.0,
+    // SPEC-FFMPEG-STATIC-CONSOLIDATION-20261026), so that state cannot exist.
+    // The numeric slot stays reserved to keep the remaining values stable for
+    // log and trace consumers.
     Config = 13,
     State = 14,
     Timeout = 15,

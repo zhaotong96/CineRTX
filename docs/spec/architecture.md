@@ -7,12 +7,57 @@ Main10. Its distinguishing constraint is that uncompressed frames must never
 cross the PCIe bus on the NVIDIA path. That constraint drives the stage order,
 the memory plan, and the plugin boundary.
 
-This document describes the architecture as implemented. Stage 1 (NVDEC
-decode, NVENC encode, and the zero-copy VRAM hand-off) is implemented and
-executes on Maxwell (sm_52) and newer. The RTX-only mechanisms — VSR, TrueHDR,
-NvOFFRUC, and TensorRT — are marked as **gated**: the interface and error
-contracts exist, but executing them requires the proprietary SDK and a Turing
-or newer GPU.
+This document describes the architecture as implemented. The single product
+container path is NVDEC decode → RTX VSR + TrueHDR in device memory → P010 pack
+→ NVENC HEVC Main10, and it is shared by the GUI and the CLI. The zero-copy
+codec foundation (NVDEC decode, NVENC encode, and the VRAM hand-off) executes
+on Maxwell (sm_52) and newer. VSR and TrueHDR are always built into the product
+(there is no build or command-line switch that removes them); executing them
+requires the proprietary NVIDIA runtimes and a Turing or newer GPU.
+
+NvOFFRUC and TensorRT RIFE are also unconditional parts of the source tree —
+their ABIs, loaders, tensor layout and engine builder are always compiled in —
+but their interpolation calls are not yet wired into the product loop:
+`rtx_fruc_bridge_interpolate` reports `RTX_FRUC_ERR_UNSUPPORTED` for real
+interpolation and the shim reports `RTX_ERR_NOT_IMPLEMENTED` when RIFE is
+requested. See [§7](#7-fruc-paths), which documents the contract that the
+integration must satisfy. The verification harness still exercises the
+duplicate bypass and the RIFE engine builder.
+
+### 1.2 Single-EXE absolute self-containment (first principle)
+
+**【单 EXE 绝对自包含第一原则】** CineRTX 主程序（单一 `CineRTX.exe`：无参数时
+是 Win32 DirectComposition GUI，带参数时附着父控制台运行完整 CLI）必须构建为
+100% 自包含的原生 Win32 单体可执行文件（体积上限 12.0 MB）。媒体容器解封装、
+交织复用、码流过滤与音频编解码均为不可分割的第一公民核心组件，必须通过手术刀级
+裁剪的 FFmpeg 静态库（`.lib` / `.a`）全量内联进主可执行文件内部。代码库中永久
+严禁出现任何将媒体容器层降级为可选特性的条件编译宏（如 `RTX_WITH_FFMPEG` /
+`RTX_HAVE_FFMPEG`）或向产物目录拷贝外部媒体 DLL 的构建逻辑。`rtx_shim` 与
+`rtx_fruc_bridge` 为静态库并由 `rtx_core` 直接链接，产物目录中不得出现任何
+sidecar DLL；`rtx_ngx_bridge` 因 Plugin-Exception 必须保持独立加载的 DLL：
+规范落点为 `build/external/plugins/nvidia_rtx/`，构建时镜像到 `CineRTX.exe`
+同级的 `plugins/nvidia_rtx/`，安装布局相同；它不并入 GPLv3 可执行文件
+（非 Windows 宿主内联 SDK-free 静态桥接，不产生 DLL）。
+
+Consequences that are enforced mechanically, not by convention:
+
+1. `cmake/RtxFfmpegStatic.cmake` resolves the surgical static archives at
+   configure time and binds them to `rtx_core` through `rtx::ffmpeg_static`.
+   Every executable and test inherits the container layer by dependency
+   propagation; there is no per-target opt-in.
+2. A missing archive, or an `avformat.lib`/`avcodec.lib` smaller than 450 KB
+   (i.e. a DLL import stub), is a `FATAL_ERROR`. A binary without container I/O
+   is never produced, so the engine can never degrade to a runtime error code.
+3. `tools/audit_imports.ps1` fails the build if any PE file imports
+   `avcodec*`/`avformat*`/`avutil*`/`swresample*`/`swscale*`, if the output
+   directory contains an `av*.dll`/`sw*.dll`, if any module other than
+   `CineRTX.exe` / `rtx_tests.exe` is present in the output directory
+   (`Test-OutputClosure`), or if `CineRTX.exe` leaves the
+   `1.2 MB .. 12.0 MB` envelope.
+4. `src/io/ffmpeg_io.cpp` contains no conditional compilation. The zero-disk
+   unit tests exercise the real static code through
+   `rtx::io::MemoryAvioContext` (`avio_alloc_context`), so "the tests pass but
+   the shipped binary cannot demux" is structurally impossible.
 
 ## 2. Stage order
 
@@ -21,15 +66,17 @@ or newer GPU.
 | 0. Demux | Container / raw | NV12 frames | Raw reader or libavformat | libavformat + `*_mp4toannexb` bitstream filter |
 | 1. Decode | Compressed packets | NV12/P010 | Raw NV12 reader | NVDEC + `cuvidMapVideoFrame64` |
 | 2. Scene detect | Consecutive luma planes | Cut flag | Subsampled SAD | CUDA SAD reduction kernel |
-| 3. FRUC | Two 1080p frames | 1080p interpolated frames | Linear blend + duplicate on cut | NvOFFRUC (path A, gated) or TensorRT RIFE (path B, gated) |
-| 4. Enhance | 1080p SDR | 4K HDR10 RGBA16F | BT.709 → BT.2020 + PQ + upscale | NGX VSR + TrueHDR on D3D12 (gated) |
+| 3. FRUC (reference only) | Two 1080p frames | 1080p interpolated frames | Linear blend + duplicate on cut | NvOFFRUC / RIFE bridge contracts; execution not yet wired into the product loop |
+| 4. Enhance | 1080p SDR | 4K HDR10 RGBA16F | BT.709 → BT.2020 + PQ + upscale | NGX VSR + TrueHDR on D3D12 |
 | 5. Pack | RGBA16F | P010 | BT.2020 NCL matrix + 10-bit quantisation | Fused CUDA kernel writing `CUsurfObject` |
 | 6. Encode | P010 | Packet | Deterministic packet metadata | NVENC `CUDADEVICEPTR` input |
 | 7. Mux | Packets + side data | MP4/MKV | P010 writer + JSON sidecar | libavformat + container side data |
 
-The order is intentional. Interpolating at 1080p keeps RIFE activations inside
-the 8 GB budget; upscaling first would quadruple the pixel count before the
-most memory-hungry stage. TrueHDR runs after VSR so that the inverse tone
+The shipped product executes stages 0 → 1 → 4 → 5 → 6 → 7. Stage 3 remains in
+the CPU verification pipeline until the vendor interpolation backend is
+implemented; the product loop does not synthesise frames today. The stage order
+is still the target contract: interpolating at 1080p keeps RIFE activations
+inside the 8 GB budget, and TrueHDR runs after VSR so that the inverse tone
 mapping sees reconstructed detail rather than upscaled compression artefacts.
 
 ## 3. Frame and timestamp model
@@ -126,14 +173,28 @@ run can be inspected in `chrome://tracing` without Nsight.
 
 ## 7. FRUC paths
 
-### Path A: NvOFFRUC (gated)
+Both paths are unconditional in the source tree and are exercised by the test
+suite at the ABI/builder level. Neither is dispatched from the product remaster
+loop yet: `rtx_fruc_bridge_interpolate` returns `RTX_FRUC_ERR_UNSUPPORTED`
+after the vendor check, and `nv_backend_shim` returns `RTX_ERR_NOT_IMPLEMENTED`
+for `enable_rife != 0`. The contracts below describe what the completed
+integration must preserve.
+
+### Path A: NvOFFRUC
 
 NvOFFRUC consumes NV12 `CUdeviceptr` surfaces and maintains the previous frame
 internally. The state machine forbids calling `NvOFFRUCProcess` twice with the
 same input frame. The shim exposes the function table; execution requires the
-Optical Flow SDK and an NVOFA-capable GPU.
+Optical Flow SDK and an NVOFA-capable GPU. The bridge currently resolves
+`NvOFFRUCCreate`/`NvOFFRUCProcess` but has no argument marshalling, so it
+reports `RTX_FRUC_ERR_UNSUPPORTED` instead of guessing at the SDK structs.
 
-### Path B: TensorRT RIFE (gated)
+`NvOFFRUC.dll` is opened by explicit path — `RTX_NVIDIA_DIR` first, then the
+executable directory, then the bare name — because it is an SDK redistributable
+with no System32 fallback. It imports `cudart64_110.dll`, so both are staged
+beside `CineRTX.exe` by the build (see README, *Runtime discovery*).
+
+### Path B: TensorRT RIFE
 
 `RifeConfig` locks TensorRT to `10.13.3.9`. Versions in the 10.14/10.15 line
 are rejected because the dynamic-shape RIFE graph regresses from roughly 2.7 GB
@@ -149,6 +210,21 @@ TrueHDR produces black patches and blown highlights. `buildTrtexecCommand()`
 emits the documented flags: `--fp16 --noTF32 --precisionConstraints=obey`,
 FP16 CHW I/O, and FP32 overrides for the sensitive cast/reciprocal/arithmetic
 layers.
+
+The SDK is provisioned at configure time from a SHA-256 pinned archive
+(`cmake/RtxNvidiaSdks.cmake` → `build/external/tensorrt`) and its runtime is
+staged beside `CineRTX.exe`. Nothing is linked: the Zone C bridge (`src/shim/ngx_bridge/rife_builder.cpp` inside `rtx_ngx_bridge.dll`) resolves
+`createInferBuilder_INTERNAL`, `createNvOnnxParser_INTERNAL` and
+`getInferLibVersion` with `GetProcAddress`, so the PE import table stays free of
+NVIDIA DLLs and a host without the runtime falls back to the `trtexec` command
+instead of failing to start. The four-part `10.13.3.9` gate judges the SDK these
+sources were compiled against; a loaded library must additionally report the
+same `NV_TENSORRT_VERSION`.
+
+The engine builder and tensor packing kernels are implemented. A TensorRT
+inference runtime (deserialize the engine, bind the FP16 tensors, enqueue on
+the caller's stream, and synchronise with the decode/encode timeline) is the
+missing piece before this path can run.
 
 ## 8. HDR10 metadata
 
@@ -176,7 +252,8 @@ in the import table:
 1. Decoded surfaces are copied device-to-device into the decode pool and the
    NVDEC surface is unmapped immediately, so the decoder's DPB is never
    blocked.
-2. FRUC consumes and produces device pointers; no host staging buffer exists.
+2. When FRUC is wired in, it must consume and produce device pointers with no
+   host staging buffer; the current product loop has no FRUC stage.
 3. NGX input/output textures are D3D12 committed resources exported as shared
    handles and imported with `CU_EXTERNAL_MEMORY_DEDICATED`. CUDA accesses
    them through `CUsurfObject`, which handles the D3D12 tiling layout.

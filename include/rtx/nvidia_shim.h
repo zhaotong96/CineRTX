@@ -26,7 +26,7 @@ public:
     // directory and resolves the stage-1 codec entry points.
     bool open(std::string* error = nullptr);
     void close();
-    bool loaded() const noexcept { return handle_ != nullptr; }
+    bool loaded() const noexcept { return handle_ != nullptr || embedded_; }
     const std::string& path() const noexcept { return path_; }
     const std::string& error() const noexcept { return error_; }
 
@@ -60,7 +60,12 @@ private:
     template <typename Fn>
     bool resolve(Fn& function, const char* name, std::string* error);
 
+#if defined(RTX_EMBEDDED_SHIM)
+    bool loadEmbedded(std::string* error);
+#endif
+
     void* handle_ = nullptr;
+    bool embedded_ = false;
     std::string path_;
     std::string error_;
 
