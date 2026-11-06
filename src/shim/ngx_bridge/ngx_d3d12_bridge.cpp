@@ -60,17 +60,7 @@ constexpr double kHighP = 0.05;
 constexpr double kHighPSpan = 0.15;
 
 // Opt-in bring-up trace (RTX_BRIDGE_TRACE=1); mirrors d3d12_interop.cpp.
-void trace(const char* step) {
-    static const bool enabled = [] {
-        const char* value = std::getenv("RTX_BRIDGE_TRACE");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
-    }();
-    if (!enabled) {
-        return;
-    }
-    std::fprintf(stderr, "[rtx_ngx_ngx] %s\n", step);
-    std::fflush(stderr);
-}
+void trace(const char* step) { (void)step; }
 
 template <typename T>
 T* as(void* pointer) {

@@ -113,7 +113,7 @@ endif()
 # ---------------------------------------------------------------------------
 
 add_library(rtx_project_options INTERFACE)
-target_compile_features(rtx_project_options INTERFACE cxx_std_20)
+target_compile_features(rtx_project_options INTERFACE cxx_std_23)
 target_include_directories(rtx_project_options INTERFACE
     "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -122,7 +122,7 @@ if(WIN32)
 endif()
 
 if(MSVC)
-    target_compile_options(rtx_project_options INTERFACE /W4 /permissive- /EHsc /utf-8)
+    target_compile_options(rtx_project_options INTERFACE /std:c++latest /W4 /permissive- /EHsc /utf-8)
     if(RTX_WARNINGS_AS_ERRORS)
         target_compile_options(rtx_project_options INTERFACE /WX)
     endif()
@@ -139,25 +139,20 @@ endif()
 # ---------------------------------------------------------------------------
 
 set(RTX_CORE_SOURCES
-    src/core/audio_mixer_avx2.cpp
     src/core/color.cpp
-    src/core/cpu_backend.cpp
     src/core/hw_transcode.cpp
     src/core/i18n.cpp
+    src/core/runtime_env.cpp
     src/core/ngx_remaster.cpp
     src/core/nvidia_shim.cpp
-    src/core/pipeline.cpp
-    src/core/pipeline_scheduler.cpp
     src/core/rational.cpp
-    src/core/scene_detect.cpp
     src/core/sei_synthesizer.cpp
     src/core/status.cpp
     src/core/types.cpp
     src/core/vram_ring_pool.cpp
     src/io/ffmpeg_io.cpp
     src/io/memory_avio.cpp
-    src/io/bitstream.cpp
-    src/io/raw_io.cpp)
+    src/io/bitstream.cpp)
 
 add_library(rtx_core STATIC ${RTX_CORE_SOURCES})
 add_library(rtx::core ALIAS rtx_core)
@@ -170,20 +165,11 @@ target_include_directories(rtx_core PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core")
 set_target_properties(rtx_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 20
+    CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
 
-# The AVX2 mixer translation unit is compiled with /arch:AVX2 (MSVC) or
-# -mavx2 (GCC/Clang) so the intrinsic path is always available; the public
-# entry points still dispatch on a runtime CPUID check.
-if(MSVC)
-    set_source_files_properties(src/core/audio_mixer_avx2.cpp PROPERTIES
-        COMPILE_OPTIONS "/arch:AVX2")
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(src/core/audio_mixer_avx2.cpp PROPERTIES
-        COMPILE_OPTIONS "-mavx2;-mfma")
-endif()
+
 
 if(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
@@ -210,7 +196,7 @@ target_include_directories(rtx_rife_support PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/backends/tensorrt")
 set_target_properties(rtx_rife_support PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 20
+    CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
 
@@ -259,11 +245,7 @@ set(RTX_SHIM_SOURCES
     src/shim/loader/nv_func_tables.cpp
     src/shim/loader/nv_runtime.cpp)
 
-if(WIN32)
-    list(APPEND RTX_SHIM_SOURCES src/shim/loader/dyn_library_win32.cpp)
-else()
-    list(APPEND RTX_SHIM_SOURCES src/shim/loader/dyn_library_posix.cpp)
-endif()
+list(APPEND RTX_SHIM_SOURCES src/shim/loader/dyn_library_win32.cpp)
 
 # ---------------------------------------------------------------------------
 # NVIDIA shim (Zone B/C, MIT OR Apache-2.0) -- static, in-image
@@ -292,7 +274,7 @@ target_include_directories(rtx_shim_static
         "${RTX_NVCODEC_INCLUDE_DIR}")
 set_target_properties(rtx_shim_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 20
+    CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
 target_link_libraries(rtx_core PUBLIC rtx_shim_static)
@@ -322,7 +304,6 @@ set(RTX_NGX_BRIDGE_SOURCES
     src/shim/ngx_bridge/bridge_exports.cpp
     src/shim/ngx_bridge/p010_pack_runtime.cpp
     src/shim/ngx_bridge/d3d12_interop.cpp
-    src/shim/ngx_bridge/pingpong_ring.cpp
     src/shim/ngx_bridge/rife_builder.cpp)
 
 if(WIN32)
@@ -337,7 +318,7 @@ if(WIN32)
         "${RTX_NVCODEC_INCLUDE_DIR}")
     set_target_properties(rtx_ngx_bridge PROPERTIES
         OUTPUT_NAME rtx_ngx_bridge
-        CXX_STANDARD 20
+        CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF)
     set_target_properties(rtx_ngx_bridge PROPERTIES PREFIX "")
@@ -363,7 +344,7 @@ target_include_directories(rtx_ngx_bridge_static PRIVATE
     "${RTX_NVCODEC_INCLUDE_DIR}")
 set_target_properties(rtx_ngx_bridge_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 20
+    CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
 
@@ -396,7 +377,7 @@ target_include_directories(rtx_fruc_bridge_static PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/backends/offruc")
 set_target_properties(rtx_fruc_bridge_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 20
+    CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
 target_link_libraries(rtx_core PUBLIC rtx_fruc_bridge_static)
@@ -605,7 +586,7 @@ if(WIN32)
     target_link_libraries(CineRTX PRIVATE shell32)
 endif()
 if(WIN32 AND RTX_BUILD_GUI)
-    target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 d3d12 dxgi dcomp)
+    target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 comdlg32 d3d12 dxgi dcomp)
 endif()
 if(CMAKE_DL_LIBS)
     target_link_libraries(CineRTX PRIVATE ${CMAKE_DL_LIBS})
@@ -633,7 +614,7 @@ if(WIN32 AND RTX_BUILD_GUI)
 endif()
 set_target_properties(CineRTX PROPERTIES
     OUTPUT_NAME "CineRTX"
-    CXX_STANDARD 20
+    CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
 
@@ -721,8 +702,6 @@ endif()
 
 if(RTX_BUILD_TESTS)
     set(RTX_TEST_SOURCES
-        tests/test_audio_mixer.cpp
-        tests/test_backend.cpp
         tests/test_color.cpp
         tests/test_concurrency.cpp
         tests/test_flicks_timebase.cpp
@@ -732,11 +711,8 @@ if(RTX_BUILD_TESTS)
         tests/test_main.cpp
         tests/test_offruc_bridge.cpp
         tests/test_pingpong_pipeline.cpp
-        tests/test_pipeline.cpp
         tests/test_rational.cpp
         tests/test_rife.cpp
-        tests/test_scene.cpp
-        tests/test_scheduler.cpp
         tests/test_shim.cpp
         tests/test_status.cpp
         tests/test_types.cpp
@@ -768,7 +744,7 @@ if(RTX_BUILD_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/shim")
     set_target_properties(rtx_tests PROPERTIES
-        CXX_STANDARD 20
+        CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF)
 
@@ -778,23 +754,7 @@ if(RTX_BUILD_TESTS)
     add_test(NAME rtx_unit_tests COMMAND rtx_tests)
     set_tests_properties(rtx_unit_tests PROPERTIES TIMEOUT 300)
 
-    add_test(NAME cli_self_test COMMAND CineRTX --self-test)
-    set_tests_properties(cli_self_test PROPERTIES TIMEOUT 60)
-    add_test(NAME cli_simulate_json COMMAND CineRTX
-        --simulate 4 --width 64 --height 64 --target-width 128 --target-height 128 --json)
-    set_tests_properties(cli_simulate_json PROPERTIES
-        PASS_REGULAR_EXPRESSION "\"interpolated\""
-        TIMEOUT 60)
-    # The non-SDK build hashes the ONNX input before emitting the sanctioned
-    # trtexec command, so the gate needs a fixture file.  Keep it in the build
-    # tree: the repository never ships model weights.
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/model.onnx" "CineRTX rife gate fixture\n")
-    add_test(NAME cli_rife_command COMMAND CineRTX
-        --build-rife --onnx model.onnx --engine model.engine)
-    set_tests_properties(cli_rife_command PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-        PASS_REGULAR_EXPRESSION "10\\.13\\.3\\.9"
-        TIMEOUT 60)
+
 
     # Gate 5 (W7): pure C ABI isolation and hard-cut duplicate bypass contract.
     add_test(NAME rtx_fruc_abi_contract_test COMMAND rtx_tests --filter=fruc_abi_*)

@@ -3,10 +3,31 @@
 
 #include "rtx/types.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <format>
 #include <limits>
+#include <span>
+#include <string>
+#include <type_traits>
+#include <utility>
 
 namespace rtx {
+
+std::string DeviceInfo::toString() const {
+    std::string sm = (compute_major > 0)
+        ? std::format("sm_{}{}", compute_major, compute_minor)
+        : "cpu";
+    std::string luid_str;
+    for (int i = 0; i < 8; ++i) {
+        luid_str += std::format("{:x}", luid[i]);
+    }
+    return std::format("{} [{}, LUID={}, VRAM={} MiB]",
+                       name, sm, luid_str, vram_bytes / (1024ull * 1024ull));
+}
+
+
 
 const char* pixelFormatName(PixelFormat format) noexcept {
     switch (format) {
@@ -77,19 +98,19 @@ size_t alignUp(size_t value, size_t alignment) noexcept {
 
 Result<void> FrameBuffer::allocate(size_t size, size_t align) {
     if (size == 0) {
-        return Result<void>::fail(ErrorCode::InvalidArgument, "zero-sized frame buffer");
+        return err(ErrorCode::InvalidArgument, "zero-sized frame buffer");
     }
     alignment = std::max<size_t>(align, 64);
     // Over-allocate so that data() can honour the alignment without relying on
-    // the allocator's guarantees.  The logical size excludes the padding.
+    // the allocator's guarantees. The logical size excludes the padding.
     if (size > std::numeric_limits<size_t>::max() - alignment) {
-        return Result<void>::fail(ErrorCode::InvalidArgument, "frame allocation size overflow");
+        return err(ErrorCode::InvalidArgument, "frame allocation size overflow");
     }
     try {
         bytes.assign(size + alignment - 1, 0);
     } catch (const std::bad_alloc&) {
-        return Result<void>::fail(ErrorCode::OutOfMemory, "frame allocation failed",
-                                  std::to_string(size));
+        return err(ErrorCode::OutOfMemory, "frame allocation failed",
+                   std::to_string(size));
     }
     const uintptr_t raw = reinterpret_cast<uintptr_t>(bytes.data());
     const size_t remainder = raw % alignment;
@@ -192,69 +213,6 @@ size_t frameByteSize(int width, int height, PixelFormat format, int* pitches, in
     return total;
 }
 
-Result<void> Frame::allocateHost(int frame_width, int frame_height, PixelFormat frame_format,
-                                 size_t alignment) {
-    if (frame_width <= 0 || frame_height <= 0 || frame_format == PixelFormat::Unknown) {
-        return Result<void>::fail(ErrorCode::InvalidArgument, "invalid frame geometry");
-    }
-    int local_pitches[3] = {0, 0, 0};
-    int local_chroma_width = 0;
-    int local_chroma_height = 0;
-    const size_t total = frameByteSize(frame_width, frame_height, frame_format, local_pitches,
-                                       &local_chroma_width, &local_chroma_height);
-    if (total == 0) {
-        return Result<void>::fail(ErrorCode::InvalidArgument, "unsupported frame format");
-    }
-
-    auto buffer = std::make_shared<FrameBuffer>();
-    const Status status = buffer->allocate(total, alignment);
-    if (!status.ok()) {
-        return Result<void>::fromStatus(status);
-    }
-
-    width = frame_width;
-    height = frame_height;
-    format = frame_format;
-    bit_depth = isTenBit(frame_format) ? 10 : 8;
-    chroma_width = local_chroma_width;
-    chroma_height = local_chroma_height;
-    storage = std::move(buffer);
-
-    uint8_t* base = storage->data();
-    planes[0] = base;
-    planes[1] = nullptr;
-    planes[2] = nullptr;
-    pitches[0] = local_pitches[0];
-    pitches[1] = local_pitches[1];
-    pitches[2] = local_pitches[2];
-
-    if (planeCount(frame_format) >= 2) {
-        planes[1] = base + planeByteSize(frame_format, width, height, 0, pitches[0]);
-    }
-    if (planeCount(frame_format) >= 3) {
-        planes[2] = planes[1] + planeByteSize(frame_format, width, height, 1, pitches[1]);
-    }
-    for (int plane = 0; plane < 3; ++plane) {
-        plane_sizes[plane] =
-            planeByteSize(frame_format, width, height, plane, pitches[plane]);
-    }
-    return {};
-}
-
-Result<void> Frame::allocateHostLike(const Frame& other) {
-    const Status status = allocateHost(other.width, other.height, other.format);
-    if (!status.ok()) {
-        return Result<void>::fromStatus(status);
-    }
-    pts = other.pts;
-    time_base = other.time_base;
-    duration = other.duration;
-    keyframe = other.keyframe;
-    color = other.color;
-    hdr = other.hdr;
-    return {};
-}
-
 void Frame::copyMetadataFrom(const Frame& other) {
     width = other.width;
     height = other.height;
@@ -262,12 +220,14 @@ void Frame::copyMetadataFrom(const Frame& other) {
     bit_depth = other.bit_depth;
     chroma_width = other.chroma_width;
     chroma_height = other.chroma_height;
+
     for (int i = 0; i < 3; ++i) {
         pitches[i] = other.pitches[i];
         plane_sizes[i] = other.plane_sizes[i];
         device_planes[i] = other.device_planes[i];
         device_pitches[i] = other.device_pitches[i];
     }
+
     pts = other.pts;
     time_base = other.time_base;
     duration = other.duration;

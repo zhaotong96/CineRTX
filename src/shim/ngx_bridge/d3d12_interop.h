@@ -17,6 +17,7 @@
 #ifndef RTX_NGX_BRIDGE_D3D12_INTEROP_H
 #define RTX_NGX_BRIDGE_D3D12_INTEROP_H
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -41,6 +42,96 @@ struct InteropTexture {
 
 // Owns the headless D3D12 device, the direct command queue and the two shared
 // ping-pong textures that NGX consumes and produces.
+struct PingPongSlot {
+    void* cmd_allocator = nullptr;
+    void* shared_input = nullptr;
+    void* shared_output = nullptr;
+    void* cuda_in_array = nullptr;
+    uint64_t cuda_in_surf = 0;
+    void* cuda_out_array = nullptr;
+    uint64_t cuda_out_surf = 0;
+    uint64_t p010_devptr = 0;
+    uint64_t d3d12_fence_val = 0;
+    void* encode_done_ev = nullptr;
+    void* pack_done_ev = nullptr;
+    uint32_t frames_served = 0;
+};
+
+enum class PingPongEventMode : uint8_t { DisableTiming = 0, Default = 1 };
+
+class PingPongRing {
+public:
+    PingPongRing() = default;
+
+    bool initialize(PingPongEventMode mode = PingPongEventMode::DisableTiming,
+                    std::string* error = nullptr) {
+        if (ready_) {
+            if (error != nullptr) *error = "ping-pong ring is already initialised";
+            return false;
+        }
+        mode_ = mode;
+        host_waits_ = 0;
+        submitted_frames_ = 0;
+        duplicate_count_ = 0;
+        scene_cut_count_ = 0;
+        for (auto& slot : slots_) {
+            slot = PingPongSlot{};
+        }
+        ready_ = true;
+        if (error != nullptr) error->clear();
+        return true;
+    }
+
+    void shutdown() {
+        for (auto& slot : slots_) {
+            slot = PingPongSlot{};
+        }
+        ready_ = false;
+    }
+
+    bool ready() const noexcept { return ready_; }
+
+    static size_t slotIndexFor(int64_t frame_index) noexcept { return static_cast<size_t>(frame_index & 1); }
+
+    PingPongSlot& slotFor(int64_t frame_index) noexcept { return slots_[slotIndexFor(frame_index)]; }
+    const PingPongSlot& slotFor(int64_t frame_index) const noexcept {
+        return slots_[slotIndexFor(frame_index)];
+    }
+
+    uint64_t prepareSlot(int64_t frame_index) {
+        if (!ready_ || frame_index < 0 || frame_index < 2) return 0;
+        return slotFor(frame_index).d3d12_fence_val;
+    }
+
+    void completeSlot(int64_t frame_index, uint64_t fence_value) {
+        if (!ready_ || frame_index < 0) return;
+        PingPongSlot& slot = slotFor(frame_index);
+        slot.d3d12_fence_val = fence_value;
+        ++slot.frames_served;
+        ++submitted_frames_;
+    }
+
+    bool eventTimingDisabled() const noexcept {
+        return mode_ == PingPongEventMode::DisableTiming;
+    }
+    PingPongEventMode eventMode() const noexcept { return mode_; }
+
+    uint64_t hostWaits() const noexcept { return host_waits_; }
+    uint64_t submittedFrames() const noexcept { return submitted_frames_; }
+    uint64_t duplicateCount() const noexcept { return duplicate_count_; }
+    uint64_t sceneCutCount() const noexcept { return scene_cut_count_; }
+
+    static constexpr uint32_t kFrucModeDuplicate = 3;
+
+private:
+    std::array<PingPongSlot, 2> slots_{};
+    PingPongEventMode mode_ = PingPongEventMode::DisableTiming;
+    uint64_t host_waits_ = 0;
+    uint64_t submitted_frames_ = 0;
+    uint64_t duplicate_count_ = 0;
+    uint64_t scene_cut_count_ = 0;
+    bool ready_ = false;
+};
 class D3D12Interop {
 public:
     D3D12Interop() = default;

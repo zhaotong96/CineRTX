@@ -25,17 +25,18 @@
 #ifndef RTX_SHIM_RIFE_ENGINE_H
 #define RTX_SHIM_RIFE_ENGINE_H
 
-#include <cstdint>
-#include <string>
-
 #include "rtx/rife.h"
 #include "rtx/status.h"
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
 
 namespace rtx {
 
 struct RifeEngineBuildRequest {
-    std::string onnx_path;
-    std::string engine_path;
+    std::filesystem::path onnx_path;
+    std::filesystem::path engine_path;
     int width = 1920;
     int height = 1080;
     bool fp16 = true;
@@ -46,7 +47,7 @@ struct RifeEngineBuildReport {
     // True when the engine was serialised by this process.
     bool built_in_process = false;
     std::string onnx_sha256;
-    std::string sidecar_path;
+    std::filesystem::path sidecar_path;
     // Populated when built_in_process is false: the command to run.
     std::string trtexec_command;
     uint64_t engine_bytes = 0;
@@ -58,17 +59,17 @@ struct RifeEngineBuildReport {
 
 // Lowercase hex SHA-256 of a file.  Implemented locally: the engine build path
 // must not introduce an OpenSSL dependency into a single-EXE product.
-Result<std::string> computeFileSha256(const std::string& path);
+Result<std::string> computeFileSha256(const std::filesystem::path& path);
 
 // Path of the integrity sidecar for an engine file ("<engine>.sha256").
-std::string engineSidecarPath(const std::string& engine_path);
+std::filesystem::path engineSidecarPath(const std::filesystem::path& engine_path);
 
 // Writes the sidecar atomically (temp file + rename).
-Status writeEngineSidecar(const std::string& engine_path, const std::string& onnx_sha256);
+Result<void> writeEngineSidecar(const std::filesystem::path& engine_path, const std::string& onnx_sha256);
 
 // Reads the recorded ONNX digest.  ErrorCode::NotFound when the sidecar is
 // absent, ErrorCode::Io when it cannot be read.
-Result<std::string> readEngineSidecar(const std::string& engine_path);
+Result<std::string> readEngineSidecar(const std::filesystem::path& engine_path);
 
 // Validates the request, computes the ONNX digest, then either builds the
 // engine or emits the trtexec command, and finally writes the sidecar.

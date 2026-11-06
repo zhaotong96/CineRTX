@@ -8,8 +8,10 @@
 #include "rtx/i18n.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
+#include <string_view>
 
 namespace rtx {
 namespace {
@@ -313,14 +315,26 @@ Result<Language> parseLanguage(std::string_view tag) {
         lowered.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c));
     }
     if (lowered.empty() || lowered == "en" || lowered == "en-us" || lowered == "english") {
-        return Result<Language>::ok(Language::En);
+        return Language::En;
     }
     if (lowered == "zh" || lowered == "zh-cn" || lowered == "cn" || lowered == "chinese" ||
         lowered == "chs") {
-        return Result<Language>::ok(Language::Zh);
+        return Language::Zh;
     }
-    return Result<Language>::fail(ErrorCode::InvalidArgument, "unknown language tag",
-                                  std::string(tag));
+    return err(ErrorCode::InvalidArgument, "unknown language tag",
+               std::string(tag));
+}
+
+std::wstring_view trWView(StrId id) noexcept {
+    return trW(id);
+}
+
+std::string_view strIdNameView(StrId id) noexcept {
+    const size_t index = static_cast<size_t>(id);
+    if (index >= kStrIdCount) {
+        return "Unknown";
+    }
+    return kStrIdNames[index];
 }
 
 const wchar_t* trW(StrId id) noexcept {

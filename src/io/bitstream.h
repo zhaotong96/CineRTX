@@ -9,15 +9,18 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace rtx {
 
 // Splits an Annex-B byte stream into individual NAL units (without start
 // codes).  Empty and trailing-zero units are discarded.
+std::vector<std::vector<uint8_t>> splitAnnexB(std::span<const uint8_t> data);
 std::vector<std::vector<uint8_t>> splitAnnexB(const uint8_t* data, size_t size);
 
 // True when the buffer begins with an Annex-B start code.
+bool looksLikeAnnexB(std::span<const uint8_t> data);
 bool looksLikeAnnexB(const uint8_t* data, size_t size);
 
 // Converts every NAL unit in an Annex-B buffer to a 4-byte big-endian length

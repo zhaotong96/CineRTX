@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// Uniform error plumbing for the core engine.  The engine never throws across
-// a stage boundary: every fallible operation returns Status or Result<T>.
+// Modern C++23 std::expected error model for CineRTX.
+// Control plane: Error with explicit message & detail (zero heap allocation on success path)
+// Data plane: FastError (8B trivial, register passing)
 
 #pragma once
 
-#include <optional>
+#include <cstdint>
+#include <expected>
+#include <source_location>
 #include <string>
-#include <type_traits>
+#include <string_view>
 #include <utility>
+
+#if defined(_MSC_VER)
+#define RTX_FORCEINLINE __forceinline
+#define RTX_NOINLINE __declspec(noinline)
+#else
+#define RTX_FORCEINLINE inline
+#define RTX_NOINLINE
+#endif
 
 namespace rtx {
 
@@ -26,120 +37,57 @@ enum class ErrorCode : int {
     OutOfMemory = 9,
     NgxFailure = 10,
     TensorRtVersion = 11,
-    // Slot 12 is permanently retired: it named a runtime "FFmpeg was not
-    // compiled in" state.  The media container layer is now an unconditional
-    // statically linked core component (Gate 3.0,
-    // SPEC-FFMPEG-STATIC-CONSOLIDATION-20261026), so that state cannot exist.
-    // The numeric slot stays reserved to keep the remaining values stable for
-    // log and trace consumers.
     Config = 13,
     State = 14,
     Timeout = 15,
     Internal = 16,
 };
 
-const char* errorCodeName(ErrorCode code) noexcept;
+[[nodiscard]] const char* errorCodeName(ErrorCode code) noexcept;
+
+struct FastError {
+    ErrorCode code{ErrorCode::Internal};
+    std::int32_t vendor_status{0};
+
+    constexpr FastError() noexcept = default;
+    constexpr explicit FastError(ErrorCode c, std::int32_t vs = 0) noexcept
+        : code(c), vendor_status(vs) {}
+    constexpr bool operator==(const FastError&) const noexcept = default;
+};
+static_assert(sizeof(FastError) == 8);
+
+template <typename T>
+using HotResult = std::expected<T, FastError>;
 
 struct Error {
-    ErrorCode code = ErrorCode::Internal;
-    std::string message;
-    std::string detail;
+    ErrorCode code{ErrorCode::Internal};
+    std::int32_t vendor_status{0};
+    std::string message{};
+    std::string detail{};
+    std::source_location location{std::source_location::current()};
 
-    std::string toString() const;
-};
+    constexpr Error() noexcept = default;
+    constexpr explicit Error(FastError fast) noexcept
+        : code(fast.code), vendor_status(fast.vendor_status) {}
 
-class Status {
-public:
-    Status() = default;
-    explicit Status(Error error) : error_(std::move(error)) {}
+    Error(ErrorCode c, std::string msg, std::string det = {},
+          std::source_location loc = std::source_location::current())
+        : code(c), message(std::move(msg)), detail(std::move(det)), location(loc) {}
 
-    static Status success() { return Status{}; }
-    static Status fail(ErrorCode code, std::string message, std::string detail = {}) {
-        return Status(Error{code, std::move(message), std::move(detail)});
-    }
-
-    bool ok() const noexcept { return !error_.has_value(); }
-    explicit operator bool() const noexcept { return ok(); }
-
-    ErrorCode code() const noexcept { return error_ ? error_->code : ErrorCode::Ok; }
-    const Error& error() const { return *error_; }
-    const std::string& message() const { return error_ ? error_->message : empty_; }
-    std::string toString() const { return error_ ? error_->toString() : std::string("OK"); }
-
-private:
-    std::optional<Error> error_;
-    inline static const std::string empty_{};
+    [[nodiscard]] std::string toString() const;
 };
 
 template <typename T>
-class Result {
-public:
-    Result() = delete;
+using Result = std::expected<T, Error>;
 
-    static Result ok(T value) { return Result(std::move(value), std::nullopt); }
-    static Result fail(Error error) { return Result(std::nullopt, std::move(error)); }
-    static Result fail(ErrorCode code, std::string message, std::string detail = {}) {
-        return fail(Error{code, std::move(message), std::move(detail)});
-    }
-    static Result fromStatus(const Status& status) {
-        return fail(status.error());
-    }
+[[nodiscard]] inline auto err(
+    ErrorCode code, std::string msg = {}, std::string det = {},
+    std::source_location loc = std::source_location::current()) {
+    return std::unexpected<Error>(Error{code, std::move(msg), std::move(det), loc});
+}
 
-    bool ok() const noexcept { return value_.has_value(); }
-    explicit operator bool() const noexcept { return ok(); }
-
-    T& value() & { return *value_; }
-    const T& value() const& { return *value_; }
-    T&& value() && { return std::move(*value_); }
-
-    T valueOr(T fallback) const { return value_ ? *value_ : std::move(fallback); }
-    const Error& error() const { return *error_; }
-    ErrorCode code() const noexcept { return error_ ? error_->code : ErrorCode::Ok; }
-    Status status() const { return error_ ? Status(*error_) : Status::success(); }
-
-private:
-    Result(std::optional<T> value, std::optional<Error> error)
-        : value_(std::move(value)), error_(std::move(error)) {}
-
-    std::optional<T> value_;
-    std::optional<Error> error_;
-};
-
-// Void specialisation.  A default-constructed Result<void> is success; this
-// lets stage lambdas simply `return {};`.
-template <>
-class Result<void> {
-public:
-    Result() = default;
-    explicit Result(Error error) : error_(std::move(error)) {}
-    explicit Result(const Status& status) {
-        if (!status.ok()) {
-            error_ = status.error();
-        }
-    }
-
-    static Result fail(ErrorCode code, std::string message, std::string detail = {}) {
-        return Result(Error{code, std::move(message), std::move(detail)});
-    }
-    static Result fail(Error error) { return Result(std::move(error)); }
-    static Result fromStatus(const Status& status) { return Result(status); }
-
-    bool ok() const noexcept { return !error_.has_value(); }
-    explicit operator bool() const noexcept { return ok(); }
-    operator Status() const { return status(); }
-    const Error& error() const { return *error_; }
-    ErrorCode code() const noexcept { return error_ ? error_->code : ErrorCode::Ok; }
-    Status status() const { return error_ ? Status(*error_) : Status::success(); }
-
-private:
-    std::optional<Error> error_;
-};
-
-inline Result<int> resultFromBool(bool value, ErrorCode code, std::string message) {
-    if (value) {
-        return Result<int>::ok(0);
-    }
-    return Result<int>::fail(code, std::move(message));
+[[nodiscard]] constexpr auto fastErr(ErrorCode code, std::int32_t vendor_status = 0) noexcept {
+    return std::unexpected<FastError>(FastError{code, vendor_status});
 }
 
 }  // namespace rtx

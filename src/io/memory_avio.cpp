@@ -4,8 +4,10 @@
 #include "memory_avio.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 
 extern "C" {
 #include <libavformat/avio.h>
@@ -27,6 +29,12 @@ constexpr int kSeekMask = 0xFF;
 
 MemoryAvioContext::MemoryAvioContext(std::span<const uint8_t> read_only_buf)
     : read_view_(read_only_buf), is_writable_(false) {
+    initAvio(0);
+}
+
+MemoryAvioContext::MemoryAvioContext(std::span<const std::byte> read_only_buf)
+    : read_view_(reinterpret_cast<const uint8_t*>(read_only_buf.data()), read_only_buf.size()),
+      is_writable_(false) {
     initAvio(0);
 }
 
@@ -55,6 +63,8 @@ void MemoryAvioContext::initAvio(int write_flag) {
     if (io_buf == nullptr) {
         return;
     }
+    auto io_buf_deleter = [](uint8_t* p) noexcept { av_free(p); };
+    std::unique_ptr<uint8_t, decltype(io_buf_deleter)> io_buf_guard(io_buf, io_buf_deleter);
     std::memset(io_buf, 0, kPageSize);
     avio_ctx_ = avio_alloc_context(
         io_buf, static_cast<int>(kPageSize), write_flag, this,
@@ -62,14 +72,18 @@ void MemoryAvioContext::initAvio(int write_flag) {
         write_flag != 0 ? &MemoryAvioContext::writePacketCallback : nullptr,
         &MemoryAvioContext::seekCallback);
     if (avio_ctx_ == nullptr) {
-        av_free(io_buf);
         return;
     }
+    io_buf_guard.release();
     // libavformat defaults to non-seekable for caller-supplied contexts.  Both
     // the mov and the matroska muxers need a seekable target to rewrite their
     // index, and a memory sink always is one.
     avio_ctx_->seekable = AVIO_SEEKABLE_NORMAL;
     avio_ctx_->direct = 0;
+}
+
+void MemoryAvioContext::shutdown() noexcept {
+    releaseAvio();
 }
 
 void MemoryAvioContext::releaseAvio() noexcept {
@@ -113,8 +127,12 @@ int MemoryAvioContext::writePacketCallback(void* opaque, const uint8_t* buf, int
         return AVERROR(EIO);
     }
     const size_t end_pos = self->pos_ + static_cast<size_t>(buf_size);
-    if (end_pos > self->write_vec_->size()) {
-        self->write_vec_->resize(end_pos);
+    try {
+        if (end_pos > self->write_vec_->size()) {
+            self->write_vec_->resize(end_pos);
+        }
+    } catch (...) {
+        return AVERROR(ENOMEM);
     }
     std::memcpy(self->write_vec_->data() + self->pos_, buf, static_cast<size_t>(buf_size));
     self->pos_ = end_pos;
@@ -152,7 +170,11 @@ int64_t MemoryAvioContext::seekCallback(void* opaque, int64_t offset, int whence
         static_cast<size_t>(target) > total_size) {
         // Sparse extension: a muxer may seek past the current tail before the
         // next write (moov/mdat back-patching), and the gap must read as zero.
-        self->write_vec_->resize(static_cast<size_t>(target), 0);
+        try {
+            self->write_vec_->resize(static_cast<size_t>(target), 0);
+        } catch (...) {
+            return AVERROR(ENOMEM);
+        }
     }
     self->pos_ = static_cast<size_t>(target);
     return target;

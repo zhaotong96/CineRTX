@@ -90,15 +90,7 @@ bool fileExists(const std::string& path) {
 // up from the current working directory or from an unqualified PATH entry.
 bool openSdkLibrary(DynLibrary& library, const std::string& name, bool system_fallback,
                     std::string* error) {
-    const char* configured = std::getenv("RTX_NVIDIA_DIR");
-    if (configured != nullptr && configured[0] != '\0') {
-        for (const std::string& directory : splitPaths(configured)) {
-            const std::filesystem::path candidate = utf8ToPath(directory) / name;
-            if (library.openExplicitPath(pathToUtf8(candidate), error)) {
-                return true;
-            }
-        }
-    }
+    
 
     const std::string application_directory = executableDirectory();
     if (!application_directory.empty()) {
@@ -315,16 +307,7 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
     // shim, so nvsdk_ngx_d.dll is not a deliverable.  The feature DLLs are the
     // real signal that the plugin is deployed; look where the bridge looks.
     std::vector<std::string> directories;
-    const char* plugin_directory = std::getenv("RTX_NGX_PLUGIN_DIR");
-    if (plugin_directory != nullptr && plugin_directory[0] != '\0') {
-        directories.emplace_back(plugin_directory);
-    }
-    if (const char* nvidia_directory = std::getenv("RTX_NVIDIA_DIR");
-        nvidia_directory != nullptr && nvidia_directory[0] != '\0') {
-        for (const std::string& entry : splitPaths(nvidia_directory)) {
-            directories.push_back(entry);
-        }
-    }
+    
     const std::string application_directory = executableDirectory();
     if (!application_directory.empty()) {
         const std::filesystem::path root = utf8ToPath(application_directory);

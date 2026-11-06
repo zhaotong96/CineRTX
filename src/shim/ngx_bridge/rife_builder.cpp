@@ -155,15 +155,15 @@ RtxResult buildRifeEngineInBridge(
     }
     std::memset(result, 0, sizeof(*result));
 
-    if (params->onnx_path == nullptr || params->engine_path == nullptr ||
-        params->onnx_path[0] == '\0' || params->engine_path[0] == '\0') {
+    if (params->onnx_file == nullptr || params->engine_file == nullptr ||
+        params->onnx_file[0] == '\0' || params->engine_file[0] == '\0') {
         std::snprintf(result->error_message, sizeof(result->error_message),
                       "missing onnx_path or engine_path");
         return RTX_ERR_INVALID_ARGUMENT;
     }
 
     buildTrtexecCommandStr(params->width, params->height, params->fp16 != 0,
-                           params->onnx_path, params->engine_path,
+                           params->onnx_file, params->engine_file,
                            result->trtexec_command, sizeof(result->trtexec_command));
 
 #if defined(RTX_HAVE_TENSORRT)
@@ -207,10 +207,10 @@ RtxResult buildRifeEngineInBridge(
     std::unique_ptr<nvonnxparser::IParser> parser(
         static_cast<nvonnxparser::IParser*>(api.create_onnx_parser(
             network.get(), &logger, NV_ONNX_PARSER_VERSION)));
-    if (!parser || !parser->parseFromFile(params->onnx_path, static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+    if (!parser || !parser->parseFromFile(params->onnx_file, static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
         result->built_in_process = 0;
         std::snprintf(result->error_message, sizeof(result->error_message),
-                      "failed to parse ONNX graph %s", params->onnx_path);
+                      "failed to parse ONNX graph %s", params->onnx_file);
         return RTX_OK;
     }
 
@@ -237,11 +237,11 @@ RtxResult buildRifeEngineInBridge(
     }
 
     {
-        std::ofstream stream(params->engine_path, std::ios::binary | std::ios::trunc);
+        std::ofstream stream(params->engine_file, std::ios::binary | std::ios::trunc);
         if (!stream) {
             result->built_in_process = 0;
             std::snprintf(result->error_message, sizeof(result->error_message),
-                          "cannot create engine output file %s", params->engine_path);
+                          "cannot create engine output file %s", params->engine_file);
             return RTX_ERR_IO;
         }
         stream.write(static_cast<const char*>(serialised->data()),

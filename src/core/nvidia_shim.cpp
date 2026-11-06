@@ -75,10 +75,7 @@ std::string shimFileName() {
 
 std::vector<std::string> candidatePaths() {
     std::vector<std::string> paths;
-    const char* configured = std::getenv("RTX_SHIM_PATH");
-    if (configured != nullptr && configured[0] != '\0') {
-        paths.emplace_back(configured);
-    }
+    
     const std::string directory = executableDirectory();
     if (!directory.empty()) {
         paths.push_back((std::filesystem::path(directory) / shimFileName()).string());
@@ -129,13 +126,11 @@ bool NvidiaShim::loadEmbedded(std::string* error) {
     decoder_receive_ = api->decoder_receive;
     decoder_flush_ = api->decoder_flush;
     decoder_release_ = api->decoder_release_frame;
-    decoder_download_ = api->decoder_download;
     decoder_stats_ = api->decoder_get_stats;
     decoder_last_error_ = api->decoder_last_error;
     encoder_create_ = api->encoder_create;
     encoder_destroy_ = api->encoder_destroy;
     encoder_encode_ = api->encoder_encode;
-    encoder_encode_host_ = api->encoder_encode_host;
     encoder_flush_ = api->encoder_flush;
     encoder_sequence_header_ = api->encoder_get_sequence_header;
     encoder_stats_ = api->encoder_get_stats;
@@ -252,13 +247,11 @@ bool NvidiaShim::open(std::string* error) {
         resolve(decoder_receive_, "rtx_shim_decoder_receive", &message) &&
         resolve(decoder_flush_, "rtx_shim_decoder_flush", &message) &&
         resolve(decoder_release_, "rtx_shim_decoder_release_frame", &message) &&
-        resolve(decoder_download_, "rtx_shim_decoder_download", &message) &&
         resolve(decoder_stats_, "rtx_shim_decoder_get_stats", &message) &&
         resolve(decoder_last_error_, "rtx_shim_decoder_last_error", &message) &&
         resolve(encoder_create_, "rtx_shim_encoder_create", &message) &&
         resolve(encoder_destroy_, "rtx_shim_encoder_destroy", &message) &&
         resolve(encoder_encode_, "rtx_shim_encoder_encode", &message) &&
-        resolve(encoder_encode_host_, "rtx_shim_encoder_encode_host", &message) &&
         resolve(encoder_flush_, "rtx_shim_encoder_flush", &message) &&
         resolve(encoder_sequence_header_, "rtx_shim_encoder_get_sequence_header", &message) &&
         resolve(encoder_stats_, "rtx_shim_encoder_get_stats", &message) &&
@@ -302,13 +295,11 @@ void NvidiaShim::close() {
     decoder_receive_ = nullptr;
     decoder_flush_ = nullptr;
     decoder_release_ = nullptr;
-    decoder_download_ = nullptr;
     decoder_stats_ = nullptr;
     decoder_last_error_ = nullptr;
     encoder_create_ = nullptr;
     encoder_destroy_ = nullptr;
     encoder_encode_ = nullptr;
-    encoder_encode_host_ = nullptr;
     encoder_flush_ = nullptr;
     encoder_sequence_header_ = nullptr;
     encoder_stats_ = nullptr;
@@ -349,13 +340,6 @@ RtxResult NvidiaShim::decoderReleaseFrame(RtxDecoder* decoder, uint64_t slot_ind
                                        : RTX_ERR_DLL_MISSING;
 }
 
-RtxResult NvidiaShim::decoderDownload(RtxDecoder* decoder, const RtxFrameDesc* frame,
-                                      uint8_t* destination, size_t destination_pitch) const {
-    return decoder_download_ != nullptr
-               ? decoder_download_(decoder, frame, destination, destination_pitch)
-               : RTX_ERR_DLL_MISSING;
-}
-
 RtxResult NvidiaShim::decoderStats(RtxDecoder* decoder, RtxHwStats* stats) const {
     return decoder_stats_ != nullptr ? decoder_stats_(decoder, stats) : RTX_ERR_DLL_MISSING;
 }
@@ -380,14 +364,6 @@ RtxResult NvidiaShim::encoderEncode(RtxEncoder* encoder, const RtxFrameDesc* fra
                                     RtxPacketDesc* packet) const {
     return encoder_encode_ != nullptr ? encoder_encode_(encoder, frame, packet)
                                       : RTX_ERR_DLL_MISSING;
-}
-
-RtxResult NvidiaShim::encoderEncodeHost(RtxEncoder* encoder, const uint8_t* data, uint32_t pitch,
-                                        int32_t format, int64_t pts,
-                                        RtxPacketDesc* packet) const {
-    return encoder_encode_host_ != nullptr
-               ? encoder_encode_host_(encoder, data, pitch, format, pts, packet)
-               : RTX_ERR_DLL_MISSING;
 }
 
 RtxResult NvidiaShim::encoderFlush(RtxEncoder* encoder, RtxPacketDesc* packet) const {

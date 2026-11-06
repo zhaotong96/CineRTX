@@ -3,6 +3,8 @@
 
 #include "rtx/status.h"
 
+#include <string>
+
 namespace rtx {
 
 const char* errorCodeName(ErrorCode code) noexcept {

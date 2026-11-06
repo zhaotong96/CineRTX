@@ -4,26 +4,24 @@
 #include "test_framework.h"
 
 #include <string>
+#include <utility>
 
 #include "rtx/status.h"
 
 using namespace rtx;
 
 RTX_TEST(status_success_and_failure) {
-    const Status success;
-    RTX_CHECK(success.ok());
+    const Result<void> success;
+    RTX_CHECK(success.has_value());
     RTX_CHECK(static_cast<bool>(success));
-    RTX_CHECK_EQ(success.code(), ErrorCode::Ok);
-    RTX_CHECK_EQ(success.toString(), std::string("OK"));
-    RTX_CHECK_EQ(success.message(), std::string{});
 
-    const Status failure =
-        Status::fail(ErrorCode::Io, "disk on fire", "sector 7");
-    RTX_CHECK(!failure.ok());
+    const Result<void> failure = err(ErrorCode::Io, "disk on fire", "sector 7");
+    RTX_CHECK(!failure.has_value());
     RTX_CHECK(!static_cast<bool>(failure));
-    RTX_CHECK_EQ(failure.code(), ErrorCode::Io);
-    RTX_CHECK_EQ(failure.message(), std::string("disk on fire"));
-    const std::string text = failure.toString();
+    RTX_CHECK_EQ(failure.error().code, ErrorCode::Io);
+    RTX_CHECK_EQ(failure.error().message, std::string("disk on fire"));
+    RTX_CHECK_EQ(failure.error().detail, std::string("sector 7"));
+    const std::string text = failure.error().toString();
     RTX_CHECK(text.find("IO_ERROR") != std::string::npos);
     RTX_CHECK(text.find("disk on fire") != std::string::npos);
     RTX_CHECK(text.find("sector 7") != std::string::npos);
@@ -40,45 +38,42 @@ RTX_TEST(status_error_names_are_stable) {
 }
 
 RTX_TEST(status_result_value) {
-    const Result<int> good = Result<int>::ok(41);
-    RTX_CHECK(good.ok());
+    const Result<int> good = 41;
+    RTX_CHECK(good.has_value());
     RTX_CHECK_EQ(good.value(), 41);
-    RTX_CHECK_EQ(good.code(), ErrorCode::Ok);
 
-    const Result<int> bad =
-        Result<int>::fail(ErrorCode::Timeout, "too slow", "2 s");
-    RTX_CHECK(!bad.ok());
-    RTX_CHECK_EQ(bad.code(), ErrorCode::Timeout);
+    const Result<int> bad = err(ErrorCode::Timeout, "too slow", "2 s");
+    RTX_CHECK(!bad.has_value());
+    RTX_CHECK_EQ(bad.error().code, ErrorCode::Timeout);
     RTX_CHECK_EQ(bad.error().message, std::string("too slow"));
-    RTX_CHECK_EQ(bad.valueOr(7), 7);
-    RTX_CHECK(bad.status().code() == ErrorCode::Timeout);
-
-    const Result<int> from_status = Result<int>::fromStatus(
-        Status::fail(ErrorCode::Config, "bad config"));
-    RTX_CHECK(!from_status.ok());
-    RTX_CHECK_EQ(from_status.code(), ErrorCode::Config);
+    RTX_CHECK_EQ(bad.value_or(7), 7);
 }
 
 RTX_TEST(status_result_void) {
     Result<void> success;
-    RTX_CHECK(success.ok());
-    RTX_CHECK_EQ(success.status().code(), ErrorCode::Ok);
+    RTX_CHECK(success.has_value());
 
-    Result<void> failure = Result<void>::fail(ErrorCode::State, "not ready");
-    RTX_CHECK(!failure.ok());
-    RTX_CHECK_EQ(failure.code(), ErrorCode::State);
+    Result<void> failure = err(ErrorCode::State, "not ready");
+    RTX_CHECK(!failure.has_value());
+    RTX_CHECK_EQ(failure.error().code, ErrorCode::State);
 
-    const Status converted = failure;  // implicit conversion is used by the API
-    RTX_CHECK_EQ(converted.code(), ErrorCode::State);
-
-    failure = Result<void>::fromStatus(Status::fail(ErrorCode::OutOfMemory, "no vram"));
-    RTX_CHECK_EQ(failure.code(), ErrorCode::OutOfMemory);
+    failure = err(ErrorCode::OutOfMemory, "no vram");
+    RTX_CHECK_EQ(failure.error().code, ErrorCode::OutOfMemory);
 }
 
-RTX_TEST(status_result_from_bool) {
-    const Result<int> yes = resultFromBool(true, ErrorCode::Internal, "unused");
-    RTX_CHECK(yes.ok());
-    const Result<int> no = resultFromBool(false, ErrorCode::Unsupported, "nope");
-    RTX_CHECK(!no.ok());
-    RTX_CHECK_EQ(no.code(), ErrorCode::Unsupported);
+RTX_TEST(status_error_copy_and_move) {
+    Error assigned{ErrorCode::Internal, "stale message", "stale detail"};
+    const Error source{ErrorCode::Io, "assigned message", "assigned detail"};
+    assigned = source;
+    RTX_CHECK_EQ(assigned.message, std::string("assigned message"));
+    RTX_CHECK_EQ(assigned.detail, std::string("assigned detail"));
+
+    Error moved = std::move(assigned);
+    RTX_CHECK_EQ(moved.message, std::string("assigned message"));
+    RTX_CHECK_EQ(moved.detail, std::string("assigned detail"));
+
+    Error move_assigned{ErrorCode::Internal, "old message", "old detail"};
+    move_assigned = std::move(moved);
+    RTX_CHECK_EQ(move_assigned.message, std::string("assigned message"));
+    RTX_CHECK_EQ(move_assigned.detail, std::string("assigned detail"));
 }

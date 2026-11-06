@@ -80,17 +80,17 @@ std::vector<std::string> rifeSensitiveLayers() {
 Result<void> validateTensorRtVersion(const std::string& version) {
     const std::vector<int> parts = parseVersion(version);
     if (parts.size() < 4) {
-        return Result<void>::fail(ErrorCode::TensorRtVersion,
+        return err(ErrorCode::TensorRtVersion,
                                   "malformed TensorRT version string", version);
     }
     if (parts[0] != 10 || parts[1] != 13 || parts[2] != 3 || parts[3] != 9) {
         if (parts[0] == 10 && parts[1] >= 14) {
-            return Result<void>::fail(
+            return err(
                 ErrorCode::TensorRtVersion,
                 "TensorRT 10.14+ has a known RIFE VRAM/latency regression; use 10.13.3.9",
                 "found=" + version);
         }
-        return Result<void>::fail(
+        return err(
             ErrorCode::TensorRtVersion,
             "TensorRT 10.13.3.9 is the only supported baseline for RIFE v4.25",
             "found=" + version + " required=10.13.3.9");
@@ -100,37 +100,37 @@ Result<void> validateTensorRtVersion(const std::string& version) {
 
 Result<void> validateRifeConfig(const RifeConfig& config) {
     if (config.source_width <= 0 || config.source_height <= 0) {
-        return Result<void>::fail(ErrorCode::InvalidArgument, "invalid RIFE source geometry");
+        return err(ErrorCode::InvalidArgument, "invalid RIFE source geometry");
     }
     if (config.source_width > 4096 || config.source_height > 4096) {
-        return Result<void>::fail(ErrorCode::Unsupported,
+        return err(ErrorCode::Unsupported,
                                   "RIFE source exceeds the 4K profile limit");
     }
     if (config.max_batch != 1) {
-        return Result<void>::fail(ErrorCode::Unsupported,
+        return err(ErrorCode::Unsupported,
                                   "RIFE v4.25 is validated with batch size 1");
     }
     if (config.tensor_height % 32 != 0 || config.tensor_width % 32 != 0) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
+        return err(ErrorCode::InvalidArgument,
                                   "RIFE tensor dimensions must be multiples of 32");
     }
     if (config.tensor_width < config.source_width ||
         config.tensor_height < config.source_height) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
+        return err(ErrorCode::InvalidArgument,
                                   "RIFE tensor is smaller than the source frame");
     }
     if (!config.enable_4k_profile && (config.tensor_width > 1920 || config.tensor_height > 1088)) {
-        return Result<void>::fail(
+        return err(
             ErrorCode::OutOfMemory,
             "8 GB profile forbids a 4K RIFE workspace; enable the workstation profile explicitly");
     }
     return {};
 }
 
-std::string buildTrtexecCommand(const RifeConfig& config, const std::string& onnx_path,
-                                const std::string& engine_path) {
+std::string buildTrtexecCommand(const RifeConfig& config, const std::filesystem::path& onnx_file,
+                                const std::filesystem::path& engine_file) {
     std::ostringstream out;
-    out << "trtexec --onnx=\"" << onnx_path << "\" --saveEngine=\"" << engine_path << "\""
+    out << "trtexec --onnx=\"" << onnx_file.string() << "\" --saveEngine=\"" << engine_file.string() << "\""
         << " --fp16";
     if (config.no_tf32) {
         out << " --noTF32";
@@ -162,10 +162,10 @@ std::string buildTrtexecCommand(const RifeConfig& config, const std::string& onn
 Result<void> packRifeInput(const RifeNv12Pair& pair, float timestep, uint16_t* tensor,
                            const RifeTensorShape& shape) {
     if (pair.previous == nullptr || pair.next == nullptr || tensor == nullptr) {
-        return Result<void>::fail(ErrorCode::InvalidArgument, "RIFE input pair is incomplete");
+        return err(ErrorCode::InvalidArgument, "RIFE input pair is incomplete");
     }
     if (pair.width <= 0 || pair.height <= 0 || pair.width > shape.w || pair.height > shape.h) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
+        return err(ErrorCode::InvalidArgument,
                                   "RIFE input frame does not fit the tensor shape");
     }
     const size_t plane_size = static_cast<size_t>(shape.h) * shape.w;
@@ -205,10 +205,10 @@ Result<void> packRifeInput(const RifeNv12Pair& pair, float timestep, uint16_t* t
 Result<void> unpackRifeOutput(const uint16_t* tensor, const RifeTensorShape& shape, int width,
                               int height, uint8_t* nv12, int y_pitch, int uv_pitch) {
     if (tensor == nullptr || nv12 == nullptr || width <= 0 || height <= 0) {
-        return Result<void>::fail(ErrorCode::InvalidArgument, "RIFE output buffer is invalid");
+        return err(ErrorCode::InvalidArgument, "RIFE output buffer is invalid");
     }
     if (width > shape.w || height > shape.h) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
+        return err(ErrorCode::InvalidArgument,
                                   "RIFE output crop exceeds the tensor shape");
     }
     const size_t plane_size = static_cast<size_t>(shape.h) * shape.w;

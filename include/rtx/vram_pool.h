@@ -12,13 +12,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
-#include "rtx/spsc_queue.h"
+#include "rtx/mpmc_ring.h"
 #include "rtx/status.h"
 #include "rtx/types.h"
 
@@ -62,7 +60,7 @@ PoolBudget computeBudget(const std::vector<PoolSpec>& specs);
 
 // Rejects a plan that cannot coexist with the driver's reported free memory,
 // keeping a reserve for the driver, NGX scratch buffers and the D3D12 heap.
-Status validateBudget(const PoolBudget& budget, size_t free_vram_bytes,
+Result<void> validateBudget(const PoolBudget& budget, size_t free_vram_bytes,
                       size_t reserve_bytes = 384ull * 1024 * 1024);
 
 // Bridge between the pool and the CUDA driver.  The core library never links
@@ -76,7 +74,7 @@ struct DeviceAllocator {
 };
 
 struct SurfaceSlot {
-    uint32_t id = 0;
+    SlotHandle id{};
     int width = 0;
     int height = 0;
     PixelFormat format = PixelFormat::Unknown;
@@ -95,7 +93,9 @@ class SurfacePool;
 class SurfaceLease {
 public:
     SurfaceLease() = default;
-    SurfaceLease(SurfacePool* pool, uint32_t slot);
+    SurfaceLease(SurfacePool* pool, SlotHandle slot);
+    SurfaceLease(SurfacePool* pool, uint32_t slot)
+        : SurfaceLease(pool, SlotHandle(slot)) {}
     SurfaceLease(const SurfaceLease&) = delete;
     SurfaceLease& operator=(const SurfaceLease&) = delete;
     SurfaceLease(SurfaceLease&& other) noexcept;
@@ -103,15 +103,15 @@ public:
     ~SurfaceLease();
 
     explicit operator bool() const noexcept { return pool_ != nullptr; }
-    uint32_t slotId() const noexcept { return slot_; }
-    SurfaceSlot* slot() const noexcept;
-    Frame view() const;
+    [[nodiscard]] SlotHandle slotId() const noexcept { return slot_; }
+    [[nodiscard]] SurfaceSlot* slot() const noexcept;
+    [[nodiscard]] Frame view() const;
 
     void reset();
 
 private:
     SurfacePool* pool_ = nullptr;
-    uint32_t slot_ = 0;
+    SlotHandle slot_{SlotHandle::invalid()};
 };
 
 class SurfacePool {
@@ -122,21 +122,29 @@ public:
     SurfacePool(const SurfacePool&) = delete;
     SurfacePool& operator=(const SurfacePool&) = delete;
 
+    // Deterministic explicit lifecycle management
+    [[nodiscard]] bool isInitialized() const noexcept {
+        return initialized_.load(std::memory_order_acquire);
+    }
+
     // CPU/reference initialisation: host slots plus synthetic device pointers
     // when `simulate_device_memory` is true.
-    Status initialize(const PoolSpec& spec, bool simulate_device_memory = true);
+    Result<void> initialize(const PoolSpec& spec, bool simulate_device_memory = true);
     // Production initialisation: every slot is one physical cuMemAlloc
     // allocation supplied by `allocator`.  No host buffer is allocated unless
     // `allocate_host_view` explicitly asks for a staging view (test-only).
-    Status initializeDevice(const PoolSpec& spec, DeviceAllocator allocator,
+    Result<void> initializeDevice(const PoolSpec& spec, DeviceAllocator allocator,
                             bool allocate_host_view = false);
     void shutdown();
 
     SurfaceLease acquire();
-    void release(uint32_t slot_id);
+    void release(SlotHandle slot_id);
+    void release(uint32_t slot_id) { release(SlotHandle(slot_id)); }
 
     const PoolSpec& spec() const noexcept { return spec_; }
-    size_t capacity() const noexcept { return initialized_ ? static_cast<size_t>(spec_.slots) : 0; }
+    size_t capacity() const noexcept {
+        return isInitialized() ? static_cast<size_t>(spec_.slots) : 0;
+    }
     size_t used() const noexcept { return used_.load(std::memory_order_relaxed); }
     size_t available() const noexcept { return capacity() - used(); }
     double occupancy() const noexcept;
@@ -157,18 +165,21 @@ public:
 
     // Called on the consumer side after a slot is released.  May be used to
     // wake a backpressured producer.
-    void setReleaseCallback(std::function<void()> callback) { release_callback_ = std::move(callback); }
+    void setReleaseCallback(std::function<void()> callback) {
+        release_callback_ = std::move(callback);
+    }
 
-    SurfaceSlot* slot(uint32_t id) noexcept;
-    const SurfaceSlot* slot(uint32_t id) const noexcept;
+    SurfaceSlot* slot(SlotHandle id) noexcept;
+    const SurfaceSlot* slot(SlotHandle id) const noexcept;
+    SurfaceSlot* slot(uint32_t id) noexcept { return slot(SlotHandle(id)); }
+    const SurfaceSlot* slot(uint32_t id) const noexcept { return slot(SlotHandle(id)); }
 
 private:
     friend class SurfaceLease;
 
     PoolSpec spec_{};
     std::vector<std::unique_ptr<SurfaceSlot>> slots_;
-    std::unique_ptr<SpscBoundedQueue<uint32_t>> free_list_;
-    mutable std::mutex pool_mutex_;
+    std::unique_ptr<MpmcBoundedQueue<SlotHandle>> free_list_;
     std::atomic<size_t> used_{0};
     std::atomic<uint64_t> acquire_count_{0};
     std::atomic<uint64_t> release_count_{0};
@@ -181,7 +192,7 @@ private:
     std::atomic<uint64_t> device_allocations_{0};
     std::atomic<uint64_t> device_frees_{0};
     bool device_backed_ = false;
-    bool initialized_ = false;
+    std::atomic<bool> initialized_{false};
     std::function<void()> release_callback_;
 };
 
@@ -196,7 +207,7 @@ struct WatermarkLevels {
 
 // Three-tier VRAM watermark used by the phase-3 backpressure controller.  The
 // tiers are a hysteresis state machine, not thresholds on a single reading:
-// Low -> High at 75 %, High -> Critical at 88 %, and every fallback to Low
+// Low -> High at 70 %, High -> Critical at 82 %, and every fallback to Low
 // requires 55 % or less for 300 consecutive samples (about 5 s at 60 Hz).
 enum class WatermarkTier : uint8_t { Low = 0, High = 1, Critical = 2 };
 
@@ -326,13 +337,15 @@ public:
     const Config& config() const noexcept { return config_; }
     bool shouldFlushThisFrame() const noexcept { return config_.flush_each_frame; }
     uint64_t budgetViolations() const noexcept { return budget_violations_; }
-    std::chrono::microseconds maxFrameTime() const noexcept { return max_frame_time_; }
+    std::chrono::microseconds maxFrameTime() const noexcept {
+        return std::chrono::microseconds{max_frame_time_us_.load(std::memory_order_relaxed)};
+    }
     void reset() noexcept {
         in_flight_ = 0;
         submitted_total_ = 0;
         completed_total_ = 0;
         budget_violations_ = 0;
-        max_frame_time_ = std::chrono::microseconds{0};
+        max_frame_time_us_.store(0, std::memory_order_relaxed);
     }
 
 private:
@@ -341,7 +354,7 @@ private:
     std::atomic<uint64_t> submitted_total_{0};
     std::atomic<uint64_t> completed_total_{0};
     std::atomic<uint64_t> budget_violations_{0};
-    std::chrono::microseconds max_frame_time_{0};
+    std::atomic<int64_t> max_frame_time_us_{0};
 };
 
 }  // namespace rtx

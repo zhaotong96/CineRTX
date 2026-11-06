@@ -14,9 +14,7 @@ to as "CineRTX Plugin-Exception") refers to this document.
 
 "Plugin Interface" means the pure C application binary interface declared in
 include/shim/rtx_shim_abi.h, include/shim/ngx_bridge_abi.h and
-include/shim/fruc_bridge_abi.h, together with the loader-facing backend
-interface declared in include/rtx/backend.h and include/shim/i_engine_backend.h,
-as distributed with the Covered Work.
+include/shim/fruc_bridge_abi.h, as distributed with the Covered Work.
 
 "Independent Module" means a software component that
 

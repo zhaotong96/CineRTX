@@ -13,9 +13,6 @@
 
 #pragma once
 
-#include <cstdint>
-#include <string>
-
 #include "viewport_throttle.h"
 
 #if defined(_WIN32) && defined(RTX_HAVE_DCOMP_VIEWPORT)
@@ -27,6 +24,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+
+#include <cstdint>
+#include <string>
 
 namespace rtx::gui {
 

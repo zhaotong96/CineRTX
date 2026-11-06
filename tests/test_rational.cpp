@@ -27,24 +27,24 @@ RTX_TEST(rational_normalization) {
 
 RTX_TEST(rational_parse_and_format) {
     const Result<Rational> exact = Rational::parse("24000/1001");
-    RTX_REQUIRE(exact.ok());
+    RTX_REQUIRE(exact.has_value());
     RTX_CHECK_EQ(exact.value().num, 24000);
     RTX_CHECK_EQ(exact.value().den, 1001);
     RTX_CHECK_EQ(exact.value().toString(), std::string("24000/1001"));
 
     const Result<Rational> decimal = Rational::parse("23.976");
-    RTX_REQUIRE(decimal.ok());
+    RTX_REQUIRE(decimal.has_value());
     RTX_CHECK_NEAR(decimal.value().toDouble(), 23.976, 1e-9);
 
     const Result<Rational> integral = Rational::parse("30");
-    RTX_REQUIRE(integral.ok());
+    RTX_REQUIRE(integral.has_value());
     RTX_CHECK_EQ(integral.value().toString(), std::string("30"));
 
-    RTX_CHECK(!Rational::parse("").ok());
-    RTX_CHECK(!Rational::parse("1/0").ok());
-    RTX_CHECK(!Rational::parse("hello").ok());
-    RTX_CHECK(!Rational::parse("-23.976").ok());
-    RTX_CHECK_EQ(Rational::parse("1/0").code(), ErrorCode::InvalidArgument);
+    RTX_CHECK(!Rational::parse("").has_value());
+    RTX_CHECK(!Rational::parse("1/0").has_value());
+    RTX_CHECK(!Rational::parse("hello").has_value());
+    RTX_CHECK(!Rational::parse("-23.976").has_value());
+    RTX_CHECK_EQ(Rational::parse("1/0").error().code, ErrorCode::InvalidArgument);
 }
 
 RTX_TEST(rational_arithmetic) {
@@ -80,75 +80,62 @@ RTX_TEST(rational_rescale_rounding) {
     RTX_CHECK_EQ(rescaleQ(1, kTimeBase90k, kTimeBase90k), 1);
 }
 
-RTX_TEST(rational_drift_compensation) {
-    DriftCompensator compensator(Rational{1, 48000}, kTimeBase90k);
-    int64_t last = 0;
-    for (int i = 0; i <= 48000; ++i) {
-        last = compensator.map(i);
-    }
-    RTX_CHECK_EQ(last, 90000);
-    RTX_CHECK(compensator.residualNumerator() >= 0);
-    compensator.reset();
-    RTX_CHECK_EQ(compensator.residualNumerator(), 0);
-    RTX_CHECK_EQ(compensator.map(0), 0);
-}
+RTX_TEST(rational_exact_comparison_and_equivalence) {
+    // 1. Un-normalized representation mathematical equivalence
+    Rational half1;
+    half1.num = 1;
+    half1.den = 2;
+    Rational half2;
+    half2.num = 2;
+    half2.den = 4;
+    Rational half3;
+    half3.num = 50;
+    half3.den = 100;
 
-RTX_TEST(rational_frame_mapper_24_to_60) {
-    FrameTimestampMapper mapper(kFps24, kFps60, kTimeBase90k);
-    const std::vector<int> expected = {2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3};
-    int sum = 0;
-    for (size_t i = 0; i < expected.size(); ++i) {
-        const int count = mapper.outputFramesForInterval(static_cast<int64_t>(i));
-        RTX_CHECK_EQ(count, expected[i]);
-        sum += count;
-    }
-    RTX_CHECK_EQ(sum, 30);
-    RTX_CHECK_EQ(mapper.totalOutputFrames(12), 30);
-    RTX_CHECK_EQ(mapper.totalOutputFrames(1), 2);
-    RTX_CHECK_EQ(mapper.totalOutputFrames(0), 0);
-    RTX_CHECK_EQ(mapper.totalOutputFrames(-5), 0);
+    RTX_CHECK(half1 == half2);
+    RTX_CHECK(half2 == half3);
+    RTX_CHECK(half1 == half3);
+    RTX_CHECK_EQ((half1 <=> half2), std::strong_ordering::equal);
+    RTX_CHECK_EQ((half2 <=> half3), std::strong_ordering::equal);
+    RTX_CHECK_EQ((half1 <=> half3), std::strong_ordering::equal);
 
-    RTX_CHECK_EQ(mapper.outputPts(0, 0), 0);
-    RTX_CHECK_EQ(mapper.outputPts(0, 1), 1500);
-    RTX_CHECK_EQ(mapper.outputPts(1, 0), 3000);
-    RTX_CHECK_EQ(mapper.outputPts(1, 2), 6000);
+    // 2. Strict ordering without float precision loss on 64-bit boundaries
+    // In IEEE 754 double, both would be rounded to 1.0, failing float <=> comparison.
+    constexpr int64_t kM = std::numeric_limits<int64_t>::max() / 4;
+    Rational r1;
+    r1.num = kM;
+    r1.den = kM - 1;
+    Rational r2;
+    r2.num = kM - 1;
+    r2.den = kM - 2;
 
-    int64_t previous = -1;
-    size_t outputs = 0;
-    for (int64_t input = 0; input < 12; ++input) {
-        const int count = mapper.outputFramesForInterval(input);
-        for (int k = 0; k < count; ++k) {
-            const int64_t pts = mapper.outputPts(input, k);
-            RTX_CHECK(pts > previous);
-            previous = pts;
-            ++outputs;
-        }
-    }
-    RTX_CHECK_EQ(outputs, static_cast<size_t>(30));
-    RTX_CHECK_EQ(previous, 43500);
-}
+    RTX_CHECK(r1 < r2);
+    RTX_CHECK(r2 > r1);
+    RTX_CHECK(r1 != r2);
+    RTX_CHECK_EQ((r1 <=> r2), std::strong_ordering::less);
+    RTX_CHECK_EQ((r2 <=> r1), std::strong_ordering::greater);
 
-RTX_TEST(rational_frame_mapper_other_rates) {
-    FrameTimestampMapper to_48(kFps24, kFps48, kTimeBase90k);
-    RTX_CHECK_EQ(to_48.outputFramesForInterval(0), 2);
-    RTX_CHECK_EQ(to_48.totalOutputFrames(12), 24);
-    RTX_CHECK_EQ(to_48.outputPts(0, 1), 1875);  // 90000 / 48
+    // 3. Negative fractions & negative denominators
+    Rational neg1;
+    neg1.num = -1;
+    neg1.den = 3;
+    Rational neg2;
+    neg2.num = 1;
+    neg2.den = -3;
+    RTX_CHECK(neg1 == neg2);
+    RTX_CHECK_EQ((neg1 <=> neg2), std::strong_ordering::equal);
 
-    FrameTimestampMapper thirty_to_sixty(kFps30, kFps60, kTimeBase90k);
-    RTX_CHECK_EQ(thirty_to_sixty.outputFramesForInterval(7), 2);
-    RTX_CHECK_EQ(thirty_to_sixty.totalOutputFrames(30), 60);
+    Rational neg_smaller;
+    neg_smaller.num = -1;
+    neg_smaller.den = 2;  // -0.5 < -0.333
+    RTX_CHECK(neg_smaller < neg1);
+    RTX_CHECK_EQ((neg_smaller <=> neg1), std::strong_ordering::less);
 
-    FrameTimestampMapper ntsc(kFps23_976, kFps59_94, kTimeBase90k);
-    RTX_CHECK_EQ(ntsc.totalOutputFrames(24), 60);
-    RTX_CHECK_EQ(ntsc.outputPts(0, 0), 0);
-    RTX_CHECK(ntsc.outputPts(0, 1) > 1500);
-    RTX_CHECK_EQ(ntsc.outputPts(0, 1), 1502);  // round(90000 * 1001 / 60000)
-}
-
-RTX_TEST(rational_invalid_frame_mapper_configuration) {
-    // The mapper substitutes safe defaults for invalid rates so a malformed
-    // probe cannot trigger a division by zero in the hot path.
-    FrameTimestampMapper mapper(Rational{30, 0}, Rational{60, 0}, Rational{1, 0});
-    RTX_CHECK(mapper.outputFrameRate().valid());
-    RTX_CHECK_EQ(mapper.outputFramesForInterval(0), 2);
+    // 4. Zero and identity
+    Rational zero1{0, 1};
+    Rational zero2{0, 99};
+    RTX_CHECK(zero1 == zero2);
+    RTX_CHECK_EQ((zero1 <=> zero2), std::strong_ordering::equal);
+    RTX_CHECK(zero1 < r1);
+    RTX_CHECK(zero1 > neg1);
 }

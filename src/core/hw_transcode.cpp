@@ -3,23 +3,25 @@
 
 #include "rtx/hw_transcode.h"
 
+#include "bitstream.h"
+#include "rtx/hdr.h"
+#include "rtx/ngx_remaster.h"
+#include "rtx/nvidia_shim.h"
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <format>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
-
-#include "bitstream.h"
-#include "rtx/hdr.h"
-#include "rtx/ngx_remaster.h"
-#include "rtx/nvidia_shim.h"
 
 namespace rtx {
 namespace {
@@ -157,13 +159,9 @@ void applyHdrDefaults(Hdr10Metadata& hdr) {
     if (!hdr.enabled) {
         return;
     }
-    // Defaults come from the single source of truth in SeiSynthesizer: DCI-P3
-    // D65 primaries, 1000 cd/m^2 peak, MaxCLL 1000 and MaxFALL 300.  Keeping a
-    // private copy of these numbers here is what produced the BT.2020 /
-    // MaxFALL=400 drift the acceptance review flagged.
     const Result<Hdr10Metadata> canonical =
         SeiSynthesizer::makeMetadata(TrueHdrParameters{});
-    if (!canonical.ok()) {
+    if (!canonical.has_value()) {
         return;
     }
     const Hdr10Metadata& defaults = canonical.value();
@@ -227,8 +225,18 @@ struct EncoderDeleter {
     }
 };
 
+struct BridgeDeleter {
+    const NgxRemasterBridge* loader = nullptr;
+    void operator()(RtxNgxBridge* bridge) const {
+        if (loader != nullptr && bridge != nullptr) {
+            loader->destroy(bridge);
+        }
+    }
+};
+
 using DecoderHandle = std::unique_ptr<RtxDecoder, DecoderDeleter>;
 using EncoderHandle = std::unique_ptr<RtxEncoder, EncoderDeleter>;
+using BridgeHandle = std::unique_ptr<RtxNgxBridge, BridgeDeleter>;
 
 std::string jsonEscape(const std::string& value) {
     std::string output;
@@ -268,277 +276,442 @@ std::string jsonEscape(const std::string& value) {
 }  // namespace
 
 std::string HwTranscodeReport::toJson() const {
-    std::ostringstream out;
-    out << "{\n";
-    out << "  \"backend\": \"" << jsonEscape(backend) << "\",\n";
-    out << "  \"device\": \"" << jsonEscape(device) << "\",\n";
-    out << "  \"path\": \"" << jsonEscape(path) << "\",\n";
-    out << "  \"input_container\": \"" << jsonEscape(input_container) << "\",\n";
-    out << "  \"output_container\": \"" << jsonEscape(output_container) << "\",\n";
-    out << "  \"input_codec\": \"" << jsonEscape(input_codec) << "\",\n";
-    out << "  \"output_codec\": \"" << jsonEscape(output_codec) << "\",\n";
-    out << "  \"input_width\": " << input_width << ",\n";
-    out << "  \"input_height\": " << input_height << ",\n";
-    out << "  \"output_width\": " << output_width << ",\n";
-    out << "  \"output_height\": " << output_height << ",\n";
-    out << "  \"output_bit_depth\": " << output_bit_depth << ",\n";
-    out << "  \"packets_read\": " << packets_read << ",\n";
-    out << "  \"packets_written\": " << packets_written << ",\n";
-    out << "  \"frames_decoded\": " << frames_decoded << ",\n";
-    out << "  \"frames_encoded\": " << frames_encoded << ",\n";
-    out << "  \"bitstream_bytes\": " << bitstream_bytes << ",\n";
-    out << "  \"decoder_device_to_device_bytes\": " << decoder_device_to_device_bytes << ",\n";
-    out << "  \"decoder_device_to_host_bytes\": " << decoder_device_to_host_bytes << ",\n";
-    out << "  \"decoder_host_pixel_copies\": " << decoder_host_pixel_copies << ",\n";
-    out << "  \"encoder_host_to_device_bytes\": " << encoder_host_to_device_bytes << ",\n";
-    out << "  \"encoder_host_pixel_copies\": " << encoder_host_pixel_copies << ",\n";
-    out << "  \"zero_copy_main_loop\": " << (zero_copy_main_loop ? "true" : "false") << ",\n";
-    out << "  \"elapsed_ms\": " << elapsed_ms << ",\n";
-    out << "  \"main_loop_ms\": " << main_loop_ms << ",\n";
-    out << "  \"remaster_preprocess_ms\": " << remaster_preprocess_ms << ",\n";
-    out << "  \"remaster_ngx_ms\": " << remaster_ngx_ms << ",\n";
-    out << "  \"remaster_pack_kernel_ms\": " << remaster_pack_kernel_ms << ",\n";
-    out << "  \"remaster_frame_ms\": " << remaster_frame_ms << ",\n";
-    out << "  \"remaster_pack_kernel_max_ms\": " << remaster_pack_kernel_max_ms << ",\n";
-    out << "  \"remaster_pack_launches\": " << remaster_pack_launches << ",\n";
-    out << "  \"vsr_quality\": " << vsr_quality << "\n";
-    out << "}\n";
-    return out.str();
+    return std::format(
+        "{{\n"
+        "  \"backend\": \"{}\",\n"
+        "  \"device\": \"{}\",\n"
+        "  \"path\": \"{}\",\n"
+        "  \"input_container\": \"{}\",\n"
+        "  \"output_container\": \"{}\",\n"
+        "  \"input_codec\": \"{}\",\n"
+        "  \"output_codec\": \"{}\",\n"
+        "  \"input_width\": {},\n"
+        "  \"input_height\": {},\n"
+        "  \"output_width\": {},\n"
+        "  \"output_height\": {},\n"
+        "  \"output_bit_depth\": {},\n"
+        "  \"packets_read\": {},\n"
+        "  \"packets_written\": {},\n"
+        "  \"frames_decoded\": {},\n"
+        "  \"frames_encoded\": {},\n"
+        "  \"bitstream_bytes\": {},\n"
+        "  \"decoder_device_to_device_bytes\": {},\n"
+        "  \"decoder_device_to_host_bytes\": {},\n"
+        "  \"decoder_host_pixel_copies\": {},\n"
+        "  \"encoder_host_to_device_bytes\": {},\n"
+        "  \"encoder_host_pixel_copies\": {},\n"
+        "  \"zero_copy_main_loop\": {},\n"
+        "  \"elapsed_ms\": {},\n"
+        "  \"main_loop_ms\": {},\n"
+        "  \"remaster_preprocess_ms\": {},\n"
+        "  \"remaster_ngx_ms\": {},\n"
+        "  \"remaster_pack_kernel_ms\": {},\n"
+        "  \"remaster_frame_ms\": {},\n"
+        "  \"remaster_pack_kernel_max_ms\": {},\n"
+        "  \"remaster_pack_launches\": {},\n"
+        "  \"vsr_quality\": {}\n"
+        "}}\n",
+        jsonEscape(backend), jsonEscape(device), jsonEscape(path),
+        jsonEscape(input_container), jsonEscape(output_container),
+        jsonEscape(input_codec), jsonEscape(output_codec),
+        input_width, input_height, output_width, output_height, output_bit_depth,
+        packets_read, packets_written, frames_decoded, frames_encoded, bitstream_bytes,
+        decoder_device_to_device_bytes, decoder_device_to_host_bytes, decoder_host_pixel_copies,
+        encoder_host_to_device_bytes, encoder_host_pixel_copies,
+        zero_copy_main_loop ? "true" : "false",
+        elapsed_ms, main_loop_ms, remaster_preprocess_ms, remaster_ngx_ms,
+        remaster_pack_kernel_ms, remaster_frame_ms, remaster_pack_kernel_max_ms,
+        remaster_pack_launches, vsr_quality);
 }
+
+// ---------------------------------------------------------------------------
+// NvidiaTranscodeSession: Unified hardware transcode session
+// ---------------------------------------------------------------------------
+
+class NvidiaTranscodeSession {
+public:
+    NvidiaTranscodeSession() = default;
+    ~NvidiaTranscodeSession() { shutdown(); }
+
+    NvidiaTranscodeSession(const NvidiaTranscodeSession&) = delete;
+    NvidiaTranscodeSession& operator=(const NvidiaTranscodeSession&) = delete;
+
+    Result<void> initialize(const HwTranscodeOptions& options, bool is_remaster,
+                            HwTranscodeReport& report, int target_w = 0, int target_h = 0) {
+        options_ = options;
+        is_remaster_ = is_remaster;
+        target_width_ = target_w;
+        target_height_ = target_h;
+
+        demuxer_ = makeFfmpegDemuxer();
+        auto opened = demuxer_->open(options.input_path);
+        if (!opened.has_value()) {
+            return std::unexpected(opened.error());
+        }
+        info_ = opened.value();
+        if (info_.width <= 0 || info_.height <= 0) {
+            return err(ErrorCode::InvalidArgument, "demuxer reported an invalid video geometry");
+        }
+        if (shimCodec(info_.codec) == RTX_CODEC_UNKNOWN) {
+            return err(ErrorCode::Unsupported, "unsupported input codec: " + info_.video_codec);
+        }
+
+        report.input_container = info_.container;
+        report.input_codec = info_.video_codec;
+        report.input_width = info_.width;
+        report.input_height = info_.height;
+        report.output_width = is_remaster ? target_width_ : info_.width;
+        report.output_height = is_remaster ? target_height_ : info_.height;
+        report.output_codec = options.codec == VideoCodec::HEVC ? "hevc" : "h264";
+        {
+            const auto ext = options.output_path.extension().string();
+            if (!ext.empty() && ext.front() == '.') {
+                report.output_container = ext.substr(1);
+            } else {
+                report.output_container = ext;
+            }
+            std::transform(report.output_container.begin(), report.output_container.end(),
+                           report.output_container.begin(),
+                           [](unsigned char c) { return static_cast<char>(c | 0x20); });
+        }
+
+        // Bridge must be queried before shim.probe() calls cuInit(0) to preserve DXGI anti-TDR
+        std::string shim_error;
+        if (is_remaster) {
+            if (!bridge_loader_.open(&shim_error)) {
+                return err(ErrorCode::DllMissing, "cannot load the NGX bridge", shim_error);
+            }
+            RtxNgxBridgeCaps caps{};
+            const RtxResult caps_res = bridge_loader_.queryCaps(&caps);
+            if (caps_res != RTX_OK || caps.vsr_available == 0 || caps.truehdr_available == 0) {
+                return err(ErrorCode::NgxFailure, "the RTX Video SDK is not fully available for remaster",
+                           caps_res == RTX_OK ? caps.diagnostics : describe("rtx_ngx_bridge_query_caps", caps_res, nullptr));
+            }
+        }
+
+        if (!shim_.open(&shim_error)) {
+            return err(ErrorCode::DllMissing, "cannot load the NVIDIA shim", shim_error);
+        }
+        if (shim_.probe(&diagnostics_) != RTX_OK || diagnostics_.device.name[0] == '\0') {
+            return err(ErrorCode::DllMissing, "no NVIDIA CUDA device is available to rtx_shim", diagnostics_.summary);
+        }
+        report.device = diagnostics_.device.name;
+
+        const int source_depth = info_.bit_depth > 8 ? 10 : 8;
+        int output_depth = 10;
+        if (!is_remaster) {
+            output_depth = chooseOutputDepth(options, info_);
+            if (output_depth != source_depth) {
+                return err(ErrorCode::Unsupported, "stage-1 zero-copy transcode preserves the source bit depth",
+                           "source bit depth is " + std::to_string(source_depth) + ", requested " + std::to_string(output_depth));
+            }
+            if (output_depth > 8 && options.codec == VideoCodec::H264) {
+                return err(ErrorCode::Unsupported, "H.264 NVENC does not support 10-bit encoding");
+            }
+        }
+        report.output_bit_depth = output_depth;
+
+        if (is_remaster) {
+            const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(TrueHdrParameters{});
+            if (!canonical.has_value()) {
+                return std::unexpected(canonical.error());
+            }
+            hdr_ = canonical.value();
+            applyHdrDefaults(hdr_);
+
+            RtxNgxBridgeConfig bridge_config{};
+            std::memcpy(bridge_config.luid, diagnostics_.device.luid, sizeof(bridge_config.luid));
+            bridge_config.luid_node_mask = diagnostics_.device.luid_node_mask;
+            bridge_config.input_width = info_.width;
+            bridge_config.input_height = info_.height;
+            bridge_config.output_width = target_width_;
+            bridge_config.output_height = target_height_;
+            bridge_config.vsr_quality = options.vsr_quality;
+            bridge_config.enable_truehdr = 1;
+            bridge_config.contrast = 0;
+            bridge_config.saturation = 0;
+            bridge_config.middle_gray = 0;
+            bridge_config.max_luminance = 0;
+            bridge_config.project_id = 0x52545831u;
+
+            RtxNgxBridge* raw_bridge = nullptr;
+            const RtxResult b_res = bridge_loader_.create(&bridge_config, &raw_bridge);
+            if (b_res != RTX_OK || raw_bridge == nullptr) {
+                return err(mapShimResult(b_res), describe("rtx_ngx_bridge_create", b_res, nullptr),
+                           bridge_loader_.lastError(nullptr));
+            }
+            bridge_ = BridgeHandle(raw_bridge, BridgeDeleter{&bridge_loader_});
+        } else {
+            if (options.hdr) {
+                hdr_ = info_.hdr;
+                if (!hdr_.enabled && info_.color.transfer != TransferFunction::BT709) {
+                    hdr_.enabled = true;
+                    hdr_.color = info_.color;
+                }
+                applyHdrDefaults(hdr_);
+            }
+        }
+
+        RtxDecoderConfig decoder_config{};
+        decoder_config.codec = shimCodec(info_.codec);
+        decoder_config.width = info_.width;
+        decoder_config.height = info_.height;
+        decoder_config.bit_depth = source_depth;
+        decoder_config.output_format = source_depth > 8 ? RTX_PIXEL_P010 : RTX_PIXEL_NV12;
+        decoder_config.clock_rate = 90000;
+        decoder_config.max_surfaces = 32;
+        decoder_config.pool_slots = 16;
+
+        RtxDecoder* raw_decoder = nullptr;
+        const RtxResult d_res = shim_.decoderCreate(&decoder_config, &raw_decoder);
+        if (d_res != RTX_OK) {
+            return err(mapShimResult(d_res), describe("rtx_shim_decoder_create", d_res, nullptr),
+                       shim_.decoderLastError(nullptr));
+        }
+        decoder_ = DecoderHandle(raw_decoder, DecoderDeleter{&shim_});
+
+        output_info_ = info_;
+        output_info_.time_base = Rational{1, 90000};
+        output_info_.codec = options.codec;
+        output_info_.video_codec = report.output_codec;
+        output_info_.format_name.clear();
+        output_info_.annex_b = true;
+        if (hdr_.enabled) {
+            output_info_.color = hdr_.color;
+            output_info_.bit_depth = output_depth;
+        }
+        frame_rate_ = chooseFrameRate(options, info_);
+        return {};
+    }
+
+    void shutdown() {
+        muxer_.reset();
+        encoder_.reset();
+        decoder_.reset();
+        bridge_.reset();
+        demuxer_.reset();
+        shim_.close();
+        bridge_loader_.close();
+    }
+
+    Result<void> createEncoder(const RtxFrameDesc& frame, HwTranscodeReport& report) {
+        RtxEncoderConfig config{};
+        config.codec = encoderCodec(options_.codec);
+        config.width = is_remaster_ ? target_width_ : frame.width;
+        config.height = is_remaster_ ? target_height_ : frame.height;
+        config.fps_num = static_cast<int32_t>(frame_rate_.num);
+        config.fps_den = static_cast<int32_t>(frame_rate_.den);
+        config.bitrate_kbps = options_.bitrate_kbps;
+        config.preset = std::clamp(options_.preset, 1, 7);
+        config.level = 0;
+        config.tier = 0;
+        config.hdr = toShimHdr(hdr_);
+        config.input_format = is_remaster_ ? RTX_PIXEL_P010 : frame.format;
+        config.gop_length = static_cast<int32_t>(std::max<int64_t>(
+            1, frame_rate_.num > 0 ? frame_rate_.den * 2 : 60));
+        config.rate_control = std::clamp(options_.rate_control, 0, 2);
+        config.qp = options_.qp;
+
+        RtxEncoder* raw = nullptr;
+        const RtxResult created = shim_.encoderCreate(&config, &raw);
+        if (created != RTX_OK || raw == nullptr) {
+            return err(mapShimResult(created), describe("rtx_shim_encoder_create", created, nullptr));
+        }
+        encoder_ = EncoderHandle(raw, EncoderDeleter{&shim_});
+        report.output_bit_depth = is_remaster_ ? 10 : frame.bit_depth;
+        output_info_.bit_depth = report.output_bit_depth;
+        output_info_.width = config.width;
+        output_info_.height = config.height;
+        report.output_width = config.width;
+        report.output_height = config.height;
+        return {};
+    }
+
+    Result<void> openMuxer() {
+        if (muxer_ != nullptr) {
+            return {};
+        }
+        size_t header_size = 0;
+        RtxResult header_result =
+            shim_.encoderSequenceHeader(encoder_.get(), nullptr, 0, &header_size);
+        if (header_result != RTX_OK || header_size == 0) {
+            return err(ErrorCode::Internal, "NVENC did not provide a sequence header",
+                       shim_.encoderLastError(encoder_.get()));
+        }
+        std::vector<uint8_t> sequence_header(header_size);
+        header_result = shim_.encoderSequenceHeader(encoder_.get(), sequence_header.data(),
+                                                   sequence_header.size(), &header_size);
+        if (header_result != RTX_OK) {
+            return err(ErrorCode::Internal, "cannot fetch the NVENC sequence header",
+                       shim_.encoderLastError(encoder_.get()));
+        }
+        sequence_header.resize(header_size);
+        output_info_.extradata =
+            options_.codec == VideoCodec::HEVC
+                ? makeHevcConfigRecord(sequence_header.data(), sequence_header.size())
+                : makeAvcConfigRecord(sequence_header.data(), sequence_header.size());
+        if (output_info_.extradata.empty()) {
+            return err(ErrorCode::Internal, "cannot build the ISO-BMFF codec configuration record");
+        }
+        muxer_ = makeFfmpegMuxer();
+        return muxer_->open(options_.output_path, output_info_, hdr_);
+    }
+
+    Result<void> writeEncodedPacket(const RtxPacketDesc& packet, int64_t fallback_pts, HwTranscodeReport& report) {
+        auto opened = openMuxer();
+        if (!opened.has_value()) {
+            return opened;
+        }
+        Packet out;
+        if (packet.size != 0) {
+            out.data.assign(packet.data, packet.data + packet.size);
+        }
+        out.pts = packet.pts != std::numeric_limits<int64_t>::min() ? packet.pts : fallback_pts;
+        out.dts = packet.dts != std::numeric_limits<int64_t>::min() ? packet.dts : out.pts;
+        out.duration = packet.duration;
+        out.keyframe = packet.keyframe != 0;
+        out.time_base = Rational{1, 90000};
+        auto written = muxer_->writePacket(out);
+        if (!written.has_value()) {
+            return written;
+        }
+        ++report.packets_written;
+        report.bitstream_bytes += packet.size;
+        return {};
+    }
+
+    Result<void> flushEncoder(HwTranscodeReport& report) {
+        if (encoder_ != nullptr) {
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                RtxPacketDesc packet{};
+                const RtxResult flushed = shim_.encoderFlush(encoder_.get(), &packet);
+                if (flushed == RTX_ERR_NOT_FOUND) {
+                    break;
+                }
+                if (flushed != RTX_OK) {
+                    return err(mapShimResult(flushed), describe("NvEncEncodePicture(EOS)", flushed,
+                                                              shim_.encoderLastError(encoder_.get())));
+                }
+                if (packet.size != 0) {
+                    auto res = writeEncodedPacket(packet, packet.pts, report);
+                    if (!res.has_value()) {
+                        return res;
+                    }
+                }
+            }
+        }
+        return {};
+    }
+
+    Result<void> finalize(HwTranscodeReport& report, Clock::time_point started) {
+        if (muxer_ == nullptr) {
+            return err(ErrorCode::Internal, "no frame was decoded; output was not created");
+        }
+        auto finalized = muxer_->finalize();
+        if (!finalized.has_value()) {
+            return finalized;
+        }
+
+        RtxHwStats decoder_stats{};
+        if (shim_.decoderStats(decoder_.get(), &decoder_stats) == RTX_OK) {
+            report.decoder_device_to_device_bytes = decoder_stats.device_to_device_bytes;
+            report.decoder_device_to_host_bytes = decoder_stats.device_to_host_pixel_bytes;
+            report.decoder_host_pixel_copies = decoder_stats.host_pixel_copies;
+        }
+        if (encoder_ != nullptr) {
+            RtxHwStats encoder_stats{};
+            if (shim_.encoderStats(encoder_.get(), &encoder_stats) == RTX_OK) {
+                report.encoder_host_to_device_bytes = encoder_stats.host_to_device_pixel_bytes;
+                report.encoder_host_pixel_copies = encoder_stats.host_pixel_copies;
+            }
+        }
+        report.zero_copy_main_loop =
+            report.decoder_host_pixel_copies == 0 && report.encoder_host_pixel_copies == 0 &&
+            report.decoder_device_to_host_bytes == 0 && report.encoder_host_to_device_bytes == 0;
+        report.elapsed_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+        return {};
+    }
+
+    NvidiaShim& shim() { return shim_; }
+    NgxRemasterBridge& bridgeLoader() { return bridge_loader_; }
+    RtxNgxBridge* bridge() const { return bridge_.get(); }
+    RtxDecoder* decoder() const { return decoder_.get(); }
+    RtxEncoder* encoder() const { return encoder_.get(); }
+    IDemuxer* demuxer() const { return demuxer_.get(); }
+    IMuxer* muxer() const { return muxer_.get(); }
+    const MediaInfo& info() const { return info_; }
+    const MediaInfo& outputInfo() const { return output_info_; }
+    const Rational& frameRate() const { return frame_rate_; }
+    const Hdr10Metadata& hdr() const { return hdr_; }
+
+private:
+    HwTranscodeOptions options_{};
+    bool is_remaster_ = false;
+    int target_width_ = 0;
+    int target_height_ = 0;
+    MediaInfo info_{};
+    MediaInfo output_info_{};
+    Rational frame_rate_{30, 1};
+    Hdr10Metadata hdr_{};
+    RtxDiagnostics diagnostics_{};
+
+    NgxRemasterBridge bridge_loader_;
+    BridgeHandle bridge_{nullptr, BridgeDeleter{nullptr}};
+    NvidiaShim shim_;
+    DecoderHandle decoder_{nullptr, DecoderDeleter{nullptr}};
+    EncoderHandle encoder_{nullptr, EncoderDeleter{nullptr}};
+    std::unique_ptr<IDemuxer> demuxer_;
+    std::unique_ptr<IMuxer> muxer_;
+};
+
+// ---------------------------------------------------------------------------
+// Pipeline implementations
+// ---------------------------------------------------------------------------
 
 Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& options) {
     if (options.input_path.empty() || options.output_path.empty()) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "container transcode requires input and output paths");
+        return err(ErrorCode::InvalidArgument, "container transcode requires input and output paths");
     }
     if (options.codec != VideoCodec::HEVC && options.codec != VideoCodec::H264) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::Unsupported, "stage-1 NVENC supports HEVC and H.264 output");
-    }
-
-    std::unique_ptr<IDemuxer> demuxer = makeFfmpegDemuxer();
-    Result<MediaInfo> opened = demuxer->open(options.input_path);
-    if (!opened.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(opened.status());
-    }
-    const MediaInfo info = opened.value();
-    if (info.width <= 0 || info.height <= 0) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "demuxer reported an invalid video geometry");
-    }
-    if (shimCodec(info.codec) == RTX_CODEC_UNKNOWN) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::Unsupported, "unsupported input codec: " + info.video_codec);
+        return err(ErrorCode::Unsupported, "stage-1 NVENC supports HEVC and H.264 output");
     }
 
     const Clock::time_point started = Clock::now();
     HwTranscodeReport report;
     report.path = "container";
-    report.input_container = info.container;
-    report.input_codec = info.video_codec;
-    report.input_width = info.width;
-    report.input_height = info.height;
-    report.output_width = info.width;
-    report.output_height = info.height;
-    report.output_codec = options.codec == VideoCodec::HEVC ? "hevc" : "h264";
-    {
-        const size_t dot = options.output_path.find_last_of('.');
-        if (dot != std::string::npos && dot + 1 < options.output_path.size()) {
-            report.output_container = options.output_path.substr(dot + 1);
-            std::transform(report.output_container.begin(), report.output_container.end(),
-                           report.output_container.begin(),
-                           [](unsigned char c) { return static_cast<char>(c | 0x20); });
-        }
+
+    NvidiaTranscodeSession session;
+    auto init_res = session.initialize(options, /*is_remaster=*/false, report);
+    if (!init_res.has_value()) {
+        return std::unexpected(init_res.error());
     }
 
-    NvidiaShim shim;
-    std::string shim_error;
-    if (!shim.open(&shim_error)) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::DllMissing,
-                                               "cannot load the NVIDIA shim", shim_error);
-    }
-    RtxDiagnostics diagnostics{};
-    if (shim.probe(&diagnostics) != RTX_OK || diagnostics.device.name[0] == '\0') {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::DllMissing, "no NVIDIA CUDA device is available to rtx_shim",
-            diagnostics.summary);
-    }
-    report.device = diagnostics.device.name;
-
-    // The decoder output depth drives the NVENC session: NVDEC can convert a
-    // 10-bit stream down to NV12, but the zero-copy stage-1 path cannot
-    // synthesise 10-bit samples from an 8-bit surface.
-    const int source_depth = info.bit_depth > 8 ? 10 : 8;
-    const int output_depth = chooseOutputDepth(options, info);
-    if (output_depth != source_depth) {
-        // NVDEC produces the stream's native depth; the stage-1 zero-copy path
-        // has no depth-conversion kernel, so the NVENC session must match the
-        // decoder surface exactly.
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::Unsupported,
-            "stage-1 zero-copy transcode preserves the source bit depth",
-            "source bit depth is " + std::to_string(source_depth) + ", requested " +
-                std::to_string(output_depth));
-    }
-    if (output_depth > 8 && options.codec == VideoCodec::H264) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::Unsupported, "H.264 NVENC does not support 10-bit encoding");
-    }
-    report.output_bit_depth = output_depth;
-
-    RtxDecoderConfig decoder_config{};
-    decoder_config.codec = shimCodec(info.codec);
-    decoder_config.width = info.width;
-    decoder_config.height = info.height;
-    decoder_config.bit_depth = output_depth;
-    decoder_config.output_format =
-        output_depth > 8 ? RTX_PIXEL_P010 : RTX_PIXEL_NV12;
-    decoder_config.clock_rate = 90000;
-    decoder_config.max_surfaces = 32;
-    decoder_config.pool_slots = 16;
-
-    RtxDecoder* raw_decoder = nullptr;
-    RtxResult result = shim.decoderCreate(&decoder_config, &raw_decoder);
-    if (result != RTX_OK) {
-        return Result<HwTranscodeReport>::fail(
-            mapShimResult(result), describe("rtx_shim_decoder_create", result, nullptr),
-            shim.decoderLastError(nullptr));
-    }
-    DecoderHandle decoder(raw_decoder, DecoderDeleter{&shim});
-
-    Hdr10Metadata hdr{};
-    if (options.hdr) {
-        hdr = info.hdr;
-        if (!hdr.enabled && info.color.transfer != TransferFunction::BT709) {
-            hdr.enabled = true;
-            hdr.color = info.color;
-        }
-        applyHdrDefaults(hdr);
-        // Stage 1 is a pass-through: an SDR source stays SDR.  HDR10 metadata
-        // is propagated only when the source carries it (or declares a PQ/HLG
-        // transfer), because stage 1 performs no inverse tone mapping.
-    }
-
-    EncoderHandle encoder(nullptr, EncoderDeleter{&shim});
-    std::unique_ptr<IMuxer> muxer;
-    MediaInfo output_info = info;
-    output_info.codec = options.codec;
-    output_info.video_codec = report.output_codec;
-    output_info.format_name.clear();
-    output_info.annex_b = true;
-    if (hdr.enabled) {
-        // The container must describe the same colour space as the bitstream
-        // VUI/SEI; otherwise the mdcv box and the NAL metadata disagree.
-        output_info.color = hdr.color;
-        output_info.bit_depth = output_depth;
-    }
-    // SDR pass-through still needs the source matrix/range in the NVENC VUI;
-    // the shim otherwise defaults to BT.709 and the bitstream would disagree
-    // with the container flags copied from the demuxer.
-    hdr.color = info.color;
-    // The CUVID parser clock and therefore every NVENC input timestamp are in
-    // the 90 kHz clock declared in RtxDecoderConfig::clock_rate.
+    const MediaInfo& info = session.info();
+    const Rational& frame_rate = session.frameRate();
     const Rational clock_time_base{1, 90000};
-    output_info.time_base = clock_time_base;
-    output_info.frame_rate = chooseFrameRate(options, info);
-    output_info.bit_depth = output_depth;
-    output_info.hdr = hdr;
-    if (options.bitrate_kbps > 0) {
-        output_info.bitrate = options.bitrate_kbps * 1000;
-    } else if (output_info.bitrate <= 0) {
-        output_info.bitrate =
-            static_cast<int>(std::max<int64_t>(500000, static_cast<int64_t>(info.width) *
-                                                              info.height * 3));
-    }
-
-    const Rational frame_rate = output_info.frame_rate;
     int64_t estimated_total_frames = 0;
     if (info.duration_ms > 0 && frame_rate.num > 0 && frame_rate.den > 0) {
         estimated_total_frames = info.duration_ms * frame_rate.num /
                                  (1000 * static_cast<int64_t>(frame_rate.den));
     }
+
+    std::mutex progress_mutex;
     auto reportProgress = [&]() {
-        if (!options.progress) {
-            return;
-        }
+        if (!options.progress) return;
         HwTranscodeProgress progress;
-        progress.frames_decoded = report.frames_decoded;
-        progress.frames_encoded = report.frames_encoded;
-        progress.total_frames = estimated_total_frames;
-        progress.elapsed_ms =
-            std::chrono::duration<double, std::milli>(Clock::now() - started).count();
-        options.progress(progress);
+        {
+            std::lock_guard<std::mutex> lock(progress_mutex);
+            progress.frames_decoded = report.frames_decoded;
+            progress.frames_encoded = report.frames_encoded;
+            progress.total_frames = estimated_total_frames;
+            progress.elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+            options.progress(progress);
+        }
     };
+
     auto cancelled = [&]() {
         return options.cancel != nullptr && options.cancel->load(std::memory_order_relaxed);
-    };
-    auto createEncoder = [&](const RtxFrameDesc& frame) -> Status {
-        RtxEncoderConfig config{};
-        config.codec = encoderCodec(options.codec);
-        config.width = frame.width;
-        config.height = frame.height;
-        config.fps_num = static_cast<int32_t>(frame_rate.num);
-        config.fps_den = static_cast<int32_t>(frame_rate.den);
-        config.bitrate_kbps = options.bitrate_kbps;
-        config.preset = std::clamp(options.preset, 1, 7);
-        config.level = 0;
-        config.tier = 0;
-        config.hdr = toShimHdr(hdr);
-        config.input_format = frame.format;
-        config.gop_length = static_cast<int32_t>(std::max<int64_t>(
-            1, frame_rate.num > 0 ? frame_rate.den * 2 : 60));
-        config.rate_control = std::clamp(options.rate_control, 0, 2);
-        config.qp = options.qp;
-
-        RtxEncoder* raw = nullptr;
-        const RtxResult created = shim.encoderCreate(&config, &raw);
-        if (created != RTX_OK || raw == nullptr) {
-            return Status::fail(mapShimResult(created),
-                                describe("rtx_shim_encoder_create", created, nullptr));
-        }
-        encoder.reset(raw);
-        report.output_bit_depth = frame.bit_depth;
-        output_info.bit_depth = frame.bit_depth;
-        // Trust the decoded geometry over the container metadata: NVDEC crops
-        // macroblock padding (1088 -> 1080) and the muxer must declare exactly
-        // what NVENC encoded.
-        output_info.width = frame.width;
-        output_info.height = frame.height;
-        report.output_width = frame.width;
-        report.output_height = frame.height;
-        return Status::success();
-    };
-
-    auto openMuxer = [&]() -> Status {
-        if (muxer != nullptr) {
-            return Status::success();
-        }
-        size_t header_size = 0;
-        RtxResult header_result =
-            shim.encoderSequenceHeader(encoder.get(), nullptr, 0, &header_size);
-        if (header_result != RTX_OK || header_size == 0) {
-            return Status::fail(ErrorCode::Internal,
-                                "NVENC did not provide a sequence header",
-                                shim.encoderLastError(encoder.get()));
-        }
-        std::vector<uint8_t> sequence_header(header_size);
-        header_result = shim.encoderSequenceHeader(encoder.get(), sequence_header.data(),
-                                                   sequence_header.size(), &header_size);
-        if (header_result != RTX_OK) {
-            return Status::fail(ErrorCode::Internal, "cannot fetch the NVENC sequence header",
-                                shim.encoderLastError(encoder.get()));
-        }
-        sequence_header.resize(header_size);
-        output_info.extradata =
-            options.codec == VideoCodec::HEVC
-                ? makeHevcConfigRecord(sequence_header.data(), sequence_header.size())
-                : makeAvcConfigRecord(sequence_header.data(), sequence_header.size());
-        if (output_info.extradata.empty()) {
-            return Status::fail(ErrorCode::Internal,
-                                "cannot build the ISO-BMFF codec configuration record");
-        }
-        muxer = makeFfmpegMuxer();
-        return muxer->open(options.output_path, output_info, hdr);
     };
 
     int64_t fallback_pts = 0;
@@ -546,63 +719,46 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
         frame_rate.num > 0 && frame_rate.den > 0
             ? std::max<int64_t>(1, static_cast<int64_t>(90000) * frame_rate.den / frame_rate.num)
             : 3000;
-    auto processFrame = [&](const RtxFrameDesc& frame) -> Status {
-        if (encoder == nullptr) {
-            const Status created = createEncoder(frame);
-            if (!created.ok()) {
-                (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
+
+    auto processFrame = [&](const RtxFrameDesc& frame) -> Result<void> {
+        if (session.encoder() == nullptr) {
+            auto created = session.createEncoder(frame, report);
+            if (!created.has_value()) {
+                (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
                 return created;
             }
         }
         RtxPacketDesc packet{};
-        const RtxResult encoded = shim.encoderEncode(encoder.get(), &frame, &packet);
+        const RtxResult encoded = session.shim().encoderEncode(session.encoder(), &frame, &packet);
         if (encoded != RTX_OK) {
-            (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
-            return Status::fail(mapShimResult(encoded), describe("NvEncEncodePicture", encoded,
-                                                                shim.encoderLastError(
-                                                                    encoder.get())));
+            (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
+            return err(mapShimResult(encoded), describe("NvEncEncodePicture", encoded,
+                                                       session.shim().encoderLastError(session.encoder())));
         }
-        (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
+        (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
 
-        const Status opened_mux = openMuxer();
-        if (!opened_mux.ok()) {
-            return opened_mux;
-        }
-        Packet out;
-        if (packet.size != 0) {
-            out.data.assign(packet.data, packet.data + packet.size);
-        }
-        out.pts = packet.pts != 0 ? packet.pts : fallback_pts;
-        out.dts = packet.dts;
-        out.duration = packet.duration;
-        out.keyframe = packet.keyframe != 0;
-        out.time_base = output_info.time_base;
-        const Status written = muxer->writePacket(out);
-        if (!written.ok()) {
+        auto written = session.writeEncodedPacket(packet, fallback_pts, report);
+        if (!written.has_value()) {
             return written;
         }
         ++report.frames_encoded;
-        ++report.packets_written;
-        report.bitstream_bytes += packet.size;
         fallback_pts += frame_ticks;
-        return Status::success();
+        return {};
     };
 
-    auto drainFrames = [&](bool end_of_stream) -> Status {
+    auto drainFrames = [&](bool end_of_stream) -> Result<void> {
         for (;;) {
             if (cancelled()) {
-                return Status::fail(ErrorCode::State, "transcode cancelled");
+                return err(ErrorCode::State, "transcode cancelled");
             }
-            // --frames N: once the limit is reached, return remaining decode
-            // slots without encoding so the count is exact.
             if (options.frame_limit > 0 && report.frames_decoded >= options.frame_limit) {
-                return Status::success();
+                return {};
             }
             RtxFrameDesc frame{};
-            const RtxResult received = shim.decoderReceive(decoder.get(), &frame);
+            const RtxResult received = session.shim().decoderReceive(session.decoder(), &frame);
             if (received == RTX_OK) {
-                const Status processed = processFrame(frame);
-                if (!processed.ok()) {
+                auto processed = processFrame(frame);
+                if (!processed.has_value()) {
                     return processed;
                 }
                 ++report.frames_decoded;
@@ -610,34 +766,32 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
                 continue;
             }
             if (received == RTX_ERR_NOT_FOUND) {
-                return Status::success();
+                return {};
             }
             if (received == RTX_ERR_IO && end_of_stream) {
-                return Status::success();
+                return {};
             }
-            return Status::fail(mapShimResult(received),
-                                describe("rtx_shim_decoder_receive", received,
-                                         shim.decoderLastError(decoder.get())));
+            return err(mapShimResult(received),
+                       describe("rtx_shim_decoder_receive", received,
+                                session.shim().decoderLastError(session.decoder())));
         }
     };
 
     int64_t packet_pts = 0;
-    const Rational input_time_base =
-        info.time_base.valid() ? info.time_base : clock_time_base;
+    const Rational input_time_base = info.time_base.valid() ? info.time_base : clock_time_base;
     for (;;) {
         if (cancelled()) {
-            return Result<HwTranscodeReport>::fail(ErrorCode::State,
-                                                   "transcode cancelled");
+            return err(ErrorCode::State, "transcode cancelled");
         }
         if (options.frame_limit > 0 && report.frames_decoded >= options.frame_limit) {
             break;
         }
-        Result<Packet> packet = demuxer->readPacket();
-        if (!packet.ok()) {
-            if (packet.code() == ErrorCode::NotFound) {
+        Result<Packet> packet = session.demuxer()->readPacket();
+        if (!packet.has_value()) {
+            if (packet.error().code == ErrorCode::NotFound) {
                 break;
             }
-            return Result<HwTranscodeReport>::fromStatus(packet.status());
+            return std::unexpected(packet.error());
         }
         ++report.packets_read;
         Packet& input = packet.value();
@@ -654,490 +808,201 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
             dts = rescaleQ(dts, input_time_base, clock_time_base);
         }
         const RtxResult submitted =
-            shim.decoderSubmit(decoder.get(), input.data.data(), input.data.size(), pts,
-                               dts, input.keyframe ? 1 : 0);
+            session.shim().decoderSubmit(session.decoder(), input.data.data(), input.data.size(), pts,
+                                         dts, input.keyframe ? 1 : 0);
         if (submitted != RTX_OK) {
-            return Result<HwTranscodeReport>::fail(
-                mapShimResult(submitted),
-                describe("cuvidParseVideoData", submitted, shim.decoderLastError(decoder.get())));
+            return err(mapShimResult(submitted),
+                       describe("cuvidParseVideoData", submitted, session.shim().decoderLastError(session.decoder())));
         }
-        const Status drained = drainFrames(false);
-        if (!drained.ok()) {
-            return Result<HwTranscodeReport>::fromStatus(drained);
+        auto drained = drainFrames(false);
+        if (!drained.has_value()) {
+            return std::unexpected(drained.error());
         }
         packet_pts += frame_ticks;
     }
 
-    const RtxResult flushed_decoder = shim.decoderFlush(decoder.get());
+    const RtxResult flushed_decoder = session.shim().decoderFlush(session.decoder());
     if (flushed_decoder != RTX_OK) {
-        return Result<HwTranscodeReport>::fail(
-            mapShimResult(flushed_decoder),
-            describe("cuvidParseVideoData(EOS)", flushed_decoder,
-                     shim.decoderLastError(decoder.get())));
+        return err(mapShimResult(flushed_decoder),
+                   describe("cuvidParseVideoData(EOS)", flushed_decoder,
+                            session.shim().decoderLastError(session.decoder())));
     }
-    Status drained = drainFrames(true);
-    if (!drained.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(drained);
-    }
-
-    if (encoder != nullptr) {
-        for (int attempt = 0; attempt < 8; ++attempt) {
-            RtxPacketDesc packet{};
-            const RtxResult flushed = shim.encoderFlush(encoder.get(), &packet);
-            if (flushed == RTX_ERR_NOT_FOUND) {
-                break;
-            }
-            if (flushed != RTX_OK) {
-                return Result<HwTranscodeReport>::fail(
-                    mapShimResult(flushed),
-                    describe("NvEncEncodePicture(EOS)", flushed,
-                             shim.encoderLastError(encoder.get())));
-            }
-            if (packet.size != 0) {
-                const Status opened_mux = openMuxer();
-                if (!opened_mux.ok()) {
-                    return Result<HwTranscodeReport>::fromStatus(opened_mux);
-                }
-                Packet out;
-                out.data.assign(packet.data, packet.data + packet.size);
-                out.pts = packet.pts;
-                out.dts = packet.dts;
-                out.duration = packet.duration;
-                out.keyframe = packet.keyframe != 0;
-                out.time_base = output_info.time_base;
-                const Status written = muxer->writePacket(out);
-                if (!written.ok()) {
-                    return Result<HwTranscodeReport>::fromStatus(written);
-                }
-                ++report.packets_written;
-                report.bitstream_bytes += packet.size;
-            }
-        }
+    auto drained = drainFrames(true);
+    if (!drained.has_value()) {
+        return std::unexpected(drained.error());
     }
 
-    if (muxer == nullptr) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::Internal,
-                                               "no frame was decoded; output was not created");
-    }
-    const Status finalized = muxer->finalize();
-    if (!finalized.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(finalized);
+    auto flushed_encoder = session.flushEncoder(report);
+    if (!flushed_encoder.has_value()) {
+        return std::unexpected(flushed_encoder.error());
     }
 
-    RtxHwStats decoder_stats{};
-    if (shim.decoderStats(decoder.get(), &decoder_stats) == RTX_OK) {
-        report.decoder_device_to_device_bytes = decoder_stats.device_to_device_bytes;
-        report.decoder_device_to_host_bytes = decoder_stats.device_to_host_pixel_bytes;
-        report.decoder_host_pixel_copies = decoder_stats.host_pixel_copies;
+    auto finalized = session.finalize(report, started);
+    if (!finalized.has_value()) {
+        return std::unexpected(finalized.error());
     }
-    if (encoder != nullptr) {
-        RtxHwStats encoder_stats{};
-        if (shim.encoderStats(encoder.get(), &encoder_stats) == RTX_OK) {
-            report.encoder_host_to_device_bytes = encoder_stats.host_to_device_pixel_bytes;
-            report.encoder_host_pixel_copies = encoder_stats.host_pixel_copies;
-        }
-    }
-    report.zero_copy_main_loop =
-        report.decoder_host_pixel_copies == 0 && report.encoder_host_pixel_copies == 0 &&
-        report.decoder_device_to_host_bytes == 0 && report.encoder_host_to_device_bytes == 0;
-    report.elapsed_ms =
-        std::chrono::duration<double, std::milli>(Clock::now() - started).count();
-    return Result<HwTranscodeReport>::ok(std::move(report));
+
+    return report;
 }
 
 Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& options) {
     if (options.input_path.empty() || options.output_path.empty()) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "remaster transcode requires input and output paths");
+        return err(ErrorCode::InvalidArgument, "remaster transcode requires input and output paths");
     }
     if (options.codec != VideoCodec::HEVC) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::Unsupported, "the VSR-remaster path outputs 10-bit HEVC Main10 only");
+        return err(ErrorCode::Unsupported, "the VSR-remaster path outputs 10-bit HEVC Main10 only");
     }
     if (options.vsr_quality < 1 || options.vsr_quality > 4) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "vsr_quality must be in 1..4");
+        return err(ErrorCode::InvalidArgument, "vsr_quality must be in 1..4");
     }
 
-    std::unique_ptr<IDemuxer> demuxer = makeFfmpegDemuxer();
-    Result<MediaInfo> opened = demuxer->open(options.input_path);
-    if (!opened.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(opened.status());
-    }
-    const MediaInfo info = opened.value();
-    if (info.width <= 0 || info.height <= 0) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "demuxer reported an invalid video geometry");
-    }
-    if (shimCodec(info.codec) == RTX_CODEC_UNKNOWN) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::Unsupported, "unsupported input codec: " + info.video_codec);
-    }
     const int target_width = options.target_width > 0 ? options.target_width : 3840;
     const int target_height = options.target_height > 0 ? options.target_height : 2160;
     if ((target_width & 1) != 0 || (target_height & 1) != 0) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "target geometry must be even");
-    }
-    if (target_width < info.width || target_height < info.height) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::InvalidArgument,
-            "remaster target geometry must not be smaller than the source");
+        return err(ErrorCode::InvalidArgument, "target geometry must be even");
     }
 
     const Clock::time_point started = Clock::now();
     HwTranscodeReport report;
     report.path = "vsr-remaster";
-    report.input_container = info.container;
-    report.input_codec = info.video_codec;
-    report.input_width = info.width;
-    report.input_height = info.height;
-    report.output_width = target_width;
-    report.output_height = target_height;
-    report.output_bit_depth = 10;
-    report.output_codec = "hevc";
     report.vsr_quality = options.vsr_quality;
-    {
-        const size_t dot = options.output_path.find_last_of('.');
-        if (dot != std::string::npos && dot + 1 < options.output_path.size()) {
-            report.output_container = options.output_path.substr(dot + 1);
-            std::transform(report.output_container.begin(), report.output_container.end(),
-                           report.output_container.begin(),
-                           [](unsigned char c) { return static_cast<char>(c | 0x20); });
-        }
+
+    NvidiaTranscodeSession session;
+    auto init_res = session.initialize(options, /*is_remaster=*/true, report, target_width, target_height);
+    if (!init_res.has_value()) {
+        return std::unexpected(init_res.error());
     }
 
-    // CRITICAL: Load and query the NGX bridge BEFORE shim.probe() calls cuInit(0).
-    // cuInit(0) initializes internal DXGI state in the NVIDIA driver, which causes
-    // a subsequent DXGIDeclareAdapterRemovalSupport() call to fail with
-    // DXGI_ERROR_INVALID_CALL and silently disables anti-TDR mechanism 4.
-    std::string shim_error;
-    NgxRemasterBridge bridge_loader;
-    if (!bridge_loader.open(&shim_error)) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::DllMissing,
-                                               "cannot load the NGX bridge", shim_error);
-    }
-    RtxNgxBridgeCaps caps{};
-    const RtxResult caps_result = bridge_loader.queryCaps(&caps);
-    if (caps_result != RTX_OK || caps.vsr_available == 0 || caps.truehdr_available == 0) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::NgxFailure, "the RTX Video SDK is not fully available for remaster",
-            caps_result == RTX_OK ? caps.diagnostics
-                                  : describe("rtx_ngx_bridge_query_caps", caps_result, nullptr));
+    const MediaInfo& info = session.info();
+    if (target_width < info.width || target_height < info.height) {
+        return err(ErrorCode::InvalidArgument, "remaster target geometry must not be smaller than the source");
     }
 
-    NvidiaShim shim;
-    if (!shim.open(&shim_error)) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::DllMissing,
-                                               "cannot load the NVIDIA shim", shim_error);
-    }
-    RtxDiagnostics diagnostics{};
-    if (shim.probe(&diagnostics) != RTX_OK || diagnostics.device.name[0] == '\0') {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::DllMissing, "no NVIDIA CUDA device is available to rtx_shim",
-            diagnostics.summary);
-    }
-    report.device = diagnostics.device.name;
-
-    // HDR10 metadata comes from the single source of truth (SeiSynthesizer):
-    // DCI-P3 D65 mastering, 1000 cd/m^2 peak, MaxCLL 1000 / MaxFALL 300, and
-    // the BT.2020 primaries + PQ transfer + BT.2020 NCL matrix the pack v2
-    // kernel actually produced.  The NVENC VUI, the SEI and the container
-    // boxes all read this one object.
-    const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(TrueHdrParameters{});
-    if (!canonical.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(canonical.status());
-    }
-    Hdr10Metadata hdr = canonical.value();
-    applyHdrDefaults(hdr);
-
-    // NVDEC emits the source's native depth; the preprocess kernel accepts
-    // both NV12 (8-bit SDR, the Gate 2.1 input) and P010 (10-bit source).
-    const int source_depth = info.bit_depth > 8 ? 10 : 8;
-    RtxDecoderConfig decoder_config{};
-    decoder_config.codec = shimCodec(info.codec);
-    decoder_config.width = info.width;
-    decoder_config.height = info.height;
-    decoder_config.bit_depth = source_depth;
-    decoder_config.output_format =
-        source_depth > 8 ? RTX_PIXEL_P010 : RTX_PIXEL_NV12;
-    decoder_config.clock_rate = 90000;
-    decoder_config.max_surfaces = 32;
-    decoder_config.pool_slots = 16;
-
-    // Destruction order matters: NVENC must unregister the bridge-owned P010
-    // buffer before the bridge frees it, so the bridge handle is declared
-    // first and destroyed last.
-    struct BridgeDeleter {
-        const NgxRemasterBridge* loader = nullptr;
-        void operator()(RtxNgxBridge* bridge) const {
-            if (loader != nullptr && bridge != nullptr) {
-                loader->destroy(bridge);
-            }
-        }
-    };
-
-    RtxNgxBridgeConfig bridge_config{};
-    std::memcpy(bridge_config.luid, diagnostics.device.luid, sizeof(bridge_config.luid));
-    bridge_config.luid_node_mask = diagnostics.device.luid_node_mask;
-    bridge_config.input_width = info.width;
-    bridge_config.input_height = info.height;
-    bridge_config.output_width = target_width;
-    bridge_config.output_height = target_height;
-    bridge_config.vsr_quality = options.vsr_quality;
-    bridge_config.enable_truehdr = 1;
-    bridge_config.contrast = 0;   // golden defaults inside the bridge
-    bridge_config.saturation = 0; // (125 / 75 / 44 / 1000 nit)
-    bridge_config.middle_gray = 0;
-    bridge_config.max_luminance = 0;
-    bridge_config.project_id = 0x52545831u;  // "RTX1": stable per-application id
-    RtxNgxBridge* raw_bridge = nullptr;
-    RtxResult result = bridge_loader.create(&bridge_config, &raw_bridge);
-    if (result != RTX_OK || raw_bridge == nullptr) {
-        return Result<HwTranscodeReport>::fail(
-            mapShimResult(result), describe("rtx_ngx_bridge_create", result, nullptr),
-            bridge_loader.lastError(nullptr));
-    }
-    std::unique_ptr<RtxNgxBridge, BridgeDeleter> bridge(raw_bridge,
-                                                        BridgeDeleter{&bridge_loader});
-
-    RtxDecoder* raw_decoder = nullptr;
-    result = shim.decoderCreate(&decoder_config, &raw_decoder);
-    if (result != RTX_OK) {
-        return Result<HwTranscodeReport>::fail(
-            mapShimResult(result), describe("rtx_shim_decoder_create", result, nullptr),
-            shim.decoderLastError(nullptr));
-    }
-    DecoderHandle decoder(raw_decoder, DecoderDeleter{&shim});
-
-    const Rational frame_rate = chooseFrameRate(options, info);
-    RtxEncoderConfig encoder_config{};
-    encoder_config.codec = encoderCodec(VideoCodec::HEVC);
-    encoder_config.width = target_width;
-    encoder_config.height = target_height;
-    encoder_config.fps_num = static_cast<int32_t>(frame_rate.num);
-    encoder_config.fps_den = static_cast<int32_t>(frame_rate.den);
-    encoder_config.bitrate_kbps = options.bitrate_kbps;
-    encoder_config.preset = std::clamp(options.preset, 1, 7);
-    encoder_config.hdr = toShimHdr(hdr);
-    encoder_config.input_format = RTX_PIXEL_P010;
-    encoder_config.gop_length = static_cast<int32_t>(std::max<int64_t>(
-        1, frame_rate.num > 0 ? frame_rate.den * 2 : 60));
-    encoder_config.rate_control = std::clamp(options.rate_control, 0, 2);
-    encoder_config.qp = options.qp;
-    RtxEncoder* raw_encoder = nullptr;
-    result = shim.encoderCreate(&encoder_config, &raw_encoder);
-    if (result != RTX_OK || raw_encoder == nullptr) {
-        return Result<HwTranscodeReport>::fail(
-            mapShimResult(result), describe("rtx_shim_encoder_create", result, nullptr),
-            shim.encoderLastError(nullptr));
-    }
-    EncoderHandle encoder(raw_encoder, EncoderDeleter{&shim});
-
-    // The container must describe the same colour volume as the bitstream
-    // VUI/SEI: 4K, 10-bit, BT.2020 PQ limited.
-    MediaInfo output_info = info;
-    output_info.codec = VideoCodec::HEVC;
-    output_info.video_codec = "hevc";
-    output_info.width = target_width;
-    output_info.height = target_height;
-    output_info.bit_depth = 10;
-    output_info.format_name.clear();
-    output_info.annex_b = true;
-    output_info.color = hdr.color;
-    output_info.hdr = hdr;
-    output_info.time_base = Rational{1, 90000};
-    output_info.frame_rate = frame_rate;
-    if (options.bitrate_kbps > 0) {
-        output_info.bitrate = options.bitrate_kbps * 1000;
-    } else if (output_info.bitrate <= 0) {
-        output_info.bitrate = static_cast<int>(std::max<int64_t>(
-            8000000, static_cast<int64_t>(target_width) * target_height * 4));
-    }
-
-    std::unique_ptr<IMuxer> muxer;
-    auto openMuxer = [&]() -> Status {
-        if (muxer != nullptr) {
-            return Status::success();
-        }
-        size_t header_size = 0;
-        RtxResult header_result =
-            shim.encoderSequenceHeader(encoder.get(), nullptr, 0, &header_size);
-        if (header_result != RTX_OK || header_size == 0) {
-            return Status::fail(ErrorCode::Internal,
-                                "NVENC did not provide a sequence header",
-                                shim.encoderLastError(encoder.get()));
-        }
-        std::vector<uint8_t> sequence_header(header_size);
-        header_result = shim.encoderSequenceHeader(encoder.get(), sequence_header.data(),
-                                                   sequence_header.size(), &header_size);
-        if (header_result != RTX_OK) {
-            return Status::fail(ErrorCode::Internal, "cannot fetch the NVENC sequence header",
-                                shim.encoderLastError(encoder.get()));
-        }
-        sequence_header.resize(header_size);
-        output_info.extradata =
-            makeHevcConfigRecord(sequence_header.data(), sequence_header.size());
-        if (output_info.extradata.empty()) {
-            return Status::fail(ErrorCode::Internal,
-                                "cannot build the ISO-BMFF codec configuration record");
-        }
-        muxer = makeFfmpegMuxer();
-        return muxer->open(options.output_path, output_info, hdr);
-    };
-
+    const Rational& frame_rate = session.frameRate();
+    const Rational clock_time_base{1, 90000};
     int64_t estimated_total_frames = 0;
     if (info.duration_ms > 0 && frame_rate.num > 0 && frame_rate.den > 0) {
         estimated_total_frames = info.duration_ms * frame_rate.num /
                                  (1000 * static_cast<int64_t>(frame_rate.den));
     }
-    if (options.frame_limit > 0) {
-        estimated_total_frames = options.frame_limit;
-    }
-    const int64_t frame_cap = options.frame_limit > 0 ? options.frame_limit : 0;
 
-    // The decoded frame's matrix/range drive the preprocess kernel so the
-    // YUV->RGB conversion matches what the source actually encoded.
-    const int32_t input_matrix = info.color.matrix == MatrixCoefficients::BT2020NC ? 1
-                                : info.color.matrix == MatrixCoefficients::BT709    ? 0
-                                                                                    : 2;
-    const int32_t input_full_range = info.color.range == ColorRange::Full ? 1 : 0;
-
-    RtxNgxRemasterStats previous_stats{};
-    double pack_max_ms = 0.0;
-    const int64_t frame_ticks =
-        frame_rate.num > 0 && frame_rate.den > 0
-            ? std::max<int64_t>(1, static_cast<int64_t>(90000) * frame_rate.den / frame_rate.num)
-            : 3000;
-    // Encode pipeline: NVENC sits on an engine independent of the NGX/CUDA
-    // stages, so encoding frame i overlaps the remaster of frame i+1.  The
-    // bridge hands out a two-buffer P010 ring; the producer therefore waits
-    // until at most one encode is outstanding before issuing the next
-    // remaster, which is exactly the ring-depth contract (frame i may only
-    // be issued after frame i-2 completed encoding).
-    struct PendingEncode {
-        RtxNgxRemasterOutput out{};
-        int64_t pts = 0;
+    std::mutex progress_mutex;
+    auto reportProgress = [&]() {
+        if (!options.progress) return;
+        HwTranscodeProgress progress;
+        {
+            std::lock_guard<std::mutex> lock(progress_mutex);
+            progress.frames_decoded = report.frames_decoded;
+            progress.frames_encoded = report.frames_encoded;
+            progress.total_frames = estimated_total_frames;
+            progress.elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+            options.progress(progress);
+        }
     };
-    std::mutex pipeline_mutex;
-    std::condition_variable queue_ready;
-    std::condition_variable slot_free;
-    std::deque<PendingEncode> encode_queue;
-    uint64_t remasters_issued = 0;
-    uint64_t encodes_completed = 0;
-    bool producer_done = false;
-    Status consumer_error = Status::success();
-    bool consumer_failed = false;
+
     auto cancelled = [&]() {
         return options.cancel != nullptr && options.cancel->load(std::memory_order_relaxed);
     };
-    auto consumerStopped = [&]() { return consumer_failed || cancelled(); };
-    auto reportProgress = [&]() {
-        if (!options.progress) {
-            return;
-        }
-        HwTranscodeProgress progress;
-        {
-            // Snapshot under the pipeline lock: the encode thread updates
-            // frames_encoded while the producer updates frames_decoded.
-            std::lock_guard<std::mutex> lock(pipeline_mutex);
-            progress.frames_decoded = report.frames_decoded;
-            progress.frames_encoded = report.frames_encoded;
-        }
-        progress.total_frames = estimated_total_frames;
-        progress.elapsed_ms =
-            std::chrono::duration<double, std::milli>(Clock::now() - started).count();
-        options.progress(progress);
+
+    const int input_full_range = info.color.range == ColorRange::Full ? 1 : 0;
+    int input_matrix = 1;
+    if (info.color.matrix == MatrixCoefficients::BT709) input_matrix = 1;
+    else if (info.color.matrix == MatrixCoefficients::BT2020NC) input_matrix = 9;
+
+    RtxNgxRemasterStats previous_stats{};
+    double pack_max_ms = 0.0;
+
+    struct PendingEncode {
+        RtxNgxRemasterOutput remaster_out{};
+        int64_t pts = 0;
+    };
+    std::deque<PendingEncode> encode_queue;
+    std::mutex pipeline_mutex;
+    std::condition_variable queue_ready;
+    std::condition_variable slot_free;
+    bool producer_done = false;
+    bool consumer_failed = false;
+    Result<void> consumer_error;
+    uint64_t remasters_issued = 0;
+    uint64_t encodes_completed = 0;
+
+    auto consumerStopped = [&]() {
+        return consumer_failed || cancelled();
     };
 
     std::thread encode_thread([&]() {
-        int64_t local_fallback_pts = 0;
         for (;;) {
-            std::unique_lock<std::mutex> lock(pipeline_mutex);
-            queue_ready.wait(lock, [&] { return !encode_queue.empty() || producer_done; });
-            if (encode_queue.empty()) {
-                if (producer_done) {
-                    break;
+            PendingEncode item;
+            {
+                std::unique_lock<std::mutex> lock(pipeline_mutex);
+                queue_ready.wait(lock, [&] {
+                    return !encode_queue.empty() || producer_done || consumerStopped();
+                });
+                if (consumerStopped()) return;
+                if (encode_queue.empty()) {
+                    if (producer_done) return;
+                    continue;
                 }
-                continue;
+                item = encode_queue.front();
+                encode_queue.pop_front();
             }
-            const PendingEncode pending = encode_queue.front();
-            encode_queue.pop_front();
-            lock.unlock();
 
-            RtxFrameDesc encode_frame{};
-            encode_frame.planes[0] = pending.out.y_plane;
-            encode_frame.planes[1] = pending.out.uv_plane;
-            encode_frame.pitches[0] = pending.out.y_pitch;
-            encode_frame.pitches[1] = pending.out.uv_pitch;
-            encode_frame.width = pending.out.width;
-            encode_frame.height = pending.out.height;
-            encode_frame.format = pending.out.format;
-            encode_frame.bit_depth = 10;
-            encode_frame.pts = pending.pts;
-            encode_frame.slot_index = 0;  // bridge-owned ring buffer
             RtxPacketDesc packet{};
-            const RtxResult encoded = shim.encoderEncode(encoder.get(), &encode_frame, &packet);
+            RtxFrameDesc encode_frame{};
+            encode_frame.width = item.remaster_out.width;
+            encode_frame.height = item.remaster_out.height;
+            encode_frame.format = item.remaster_out.format;
+            encode_frame.planes[0] = item.remaster_out.y_plane;
+            encode_frame.planes[1] = item.remaster_out.uv_plane;
+            encode_frame.pitches[0] = item.remaster_out.y_pitch;
+            encode_frame.pitches[1] = item.remaster_out.uv_pitch;
+            encode_frame.bit_depth = 10;
+            encode_frame.pts = item.pts;
+            encode_frame.slot_index = 0;
+            const RtxResult encoded = session.shim().encoderEncode(session.encoder(), &encode_frame, &packet);
             if (encoded != RTX_OK) {
-                std::lock_guard<std::mutex> fail_lock(pipeline_mutex);
-                consumer_error = Status::fail(
-                    mapShimResult(encoded),
-                    describe("NvEncEncodePicture", encoded, shim.encoderLastError(encoder.get())));
+                std::lock_guard<std::mutex> lock(pipeline_mutex);
                 consumer_failed = true;
+                consumer_error = err(mapShimResult(encoded), describe("NvEncEncodePicture", encoded,
+                                                                     session.shim().encoderLastError(session.encoder())));
                 slot_free.notify_all();
-                queue_ready.notify_all();
                 return;
             }
-            const Status opened_mux = openMuxer();
-            if (!opened_mux.ok()) {
-                std::lock_guard<std::mutex> fail_lock(pipeline_mutex);
-                consumer_error = opened_mux;
+
+            auto written = session.writeEncodedPacket(packet, item.pts, report);
+            if (!written.has_value()) {
+                std::lock_guard<std::mutex> lock(pipeline_mutex);
                 consumer_failed = true;
-                slot_free.notify_all();
-                queue_ready.notify_all();
-                return;
-            }
-            Packet out;
-            if (packet.size != 0) {
-                out.data.assign(packet.data, packet.data + packet.size);
-            }
-            out.pts = packet.pts != 0 ? packet.pts : local_fallback_pts;
-            out.dts = packet.dts;
-            out.duration = packet.duration;
-            out.keyframe = packet.keyframe != 0;
-            out.time_base = output_info.time_base;
-            const Status written = muxer->writePacket(out);
-            if (!written.ok()) {
-                std::lock_guard<std::mutex> fail_lock(pipeline_mutex);
                 consumer_error = written;
-                consumer_failed = true;
                 slot_free.notify_all();
-                queue_ready.notify_all();
                 return;
             }
-            ++report.frames_encoded;
-            ++report.packets_written;
-            report.bitstream_bytes += packet.size;
-            local_fallback_pts += frame_ticks;
+
             {
                 std::lock_guard<std::mutex> done_lock(pipeline_mutex);
                 ++encodes_completed;
+                ++report.frames_encoded;
             }
             slot_free.notify_all();
             reportProgress();
         }
     });
 
-    auto processFrame = [&](const RtxFrameDesc& frame) -> Status {
-        // Ring-depth contract: block until at most one encode is outstanding.
+    auto processFrame = [&](const RtxFrameDesc& frame) -> Result<void> {
+        if (session.encoder() == nullptr) {
+            auto created = session.createEncoder(frame, report);
+            if (!created.has_value()) {
+                (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
+                return created;
+            }
+        }
         {
             std::unique_lock<std::mutex> lock(pipeline_mutex);
             slot_free.wait(lock, [&] {
                 return remasters_issued - encodes_completed < 2 || consumerStopped();
             });
             if (consumerStopped()) {
-                return consumer_failed ? consumer_error
-                                       : Status::fail(ErrorCode::State, "transcode cancelled");
+                return consumer_failed ? consumer_error : err(ErrorCode::State, "transcode cancelled");
             }
         }
         RtxNgxRemasterInput remaster_in{};
@@ -1151,13 +1016,11 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         RtxNgxRemasterOutput remaster_out{};
         RtxNgxRemasterStats frame_stats{};
         const RtxResult remastered =
-            bridge_loader.remaster(bridge.get(), &remaster_in, &remaster_out, &frame_stats);
+            session.bridgeLoader().remaster(session.bridge(), &remaster_in, &remaster_out, &frame_stats);
         if (remastered != RTX_OK) {
-            (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
-            return Status::fail(
-                mapShimResult(remastered),
-                describe("rtx_ngx_bridge_remaster", remastered, nullptr),
-                bridge_loader.lastError(bridge.get()));
+            (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
+            return err(mapShimResult(remastered), describe("rtx_ngx_bridge_remaster", remastered, nullptr),
+                       session.bridgeLoader().lastError(session.bridge()));
         }
         const double pack_delta =
             static_cast<double>(frame_stats.pack_kernel_ms - previous_stats.pack_kernel_ms);
@@ -1165,16 +1028,17 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         if (pack_delta > pack_max_ms) {
             pack_max_ms = pack_delta;
         }
-        (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
+        (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
         {
             std::lock_guard<std::mutex> lock(pipeline_mutex);
             encode_queue.push_back(PendingEncode{remaster_out, frame.pts});
             ++remasters_issued;
         }
         queue_ready.notify_all();
-        return Status::success();
+        return {};
     };
-    auto finishPipeline = [&]() -> Status {
+
+    auto finishPipeline = [&]() -> Result<void> {
         {
             std::lock_guard<std::mutex> lock(pipeline_mutex);
             producer_done = true;
@@ -1184,23 +1048,22 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         if (consumer_failed) {
             return consumer_error;
         }
-        return Status::success();
+        return {};
     };
-    auto drainFrames = [&](bool end_of_stream) -> Status {
+
+    auto drainFrames = [&](bool end_of_stream) -> Result<void> {
         for (;;) {
-            if (cancelled() || consumer_failed) {
-                return Status::fail(ErrorCode::State,
-                                    consumer_failed ? "encode thread failed"
-                                                    : "transcode cancelled");
+            if (cancelled()) {
+                return err(ErrorCode::State, "transcode cancelled");
             }
-            if (frame_cap > 0 && report.frames_decoded >= frame_cap) {
-                return Status::success();
+            if (options.frame_limit > 0 && report.frames_decoded >= options.frame_limit) {
+                return {};
             }
             RtxFrameDesc frame{};
-            const RtxResult received = shim.decoderReceive(decoder.get(), &frame);
+            const RtxResult received = session.shim().decoderReceive(session.decoder(), &frame);
             if (received == RTX_OK) {
-                const Status processed = processFrame(frame);
-                if (!processed.ok()) {
+                auto processed = processFrame(frame);
+                if (!processed.has_value()) {
                     return processed;
                 }
                 ++report.frames_decoded;
@@ -1208,530 +1071,119 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
                 continue;
             }
             if (received == RTX_ERR_NOT_FOUND) {
-                return Status::success();
+                return {};
             }
             if (received == RTX_ERR_IO && end_of_stream) {
-                return Status::success();
+                return {};
             }
-            return Status::fail(mapShimResult(received),
-                                describe("rtx_shim_decoder_receive", received,
-                                         shim.decoderLastError(decoder.get())));
+            return err(mapShimResult(received),
+                       describe("rtx_shim_decoder_receive", received,
+                                session.shim().decoderLastError(session.decoder())));
         }
     };
 
+    const Clock::time_point main_loop_started = Clock::now();
     int64_t packet_pts = 0;
-    const Rational input_time_base =
-        info.time_base.valid() ? info.time_base : Rational{1, 90000};
-    // The steady-state throughput metric excludes demuxer open, bridge/NGX
-    // creation and the NVENC session: Gate 2.1 measures the loop, not setup.
-    // Every early exit inside the lambda flows through finishPipeline(), so
-    // the encode thread is always joined before the function returns.
-    const Clock::time_point main_started = Clock::now();
-    const Status pipeline_status = [&]() -> Status {
-        for (;;) {
-            if (cancelled() || consumer_failed) {
-                return Status::fail(ErrorCode::State,
-                                    consumer_failed ? "encode thread failed"
-                                                    : "transcode cancelled");
-            }
-            if (frame_cap > 0 && report.frames_decoded >= frame_cap) {
-                return Status::success();
-            }
-            Result<Packet> packet = demuxer->readPacket();
-            if (!packet.ok()) {
-                if (packet.code() == ErrorCode::NotFound) {
-                    return Status::success();
-                }
-                return Result<HwTranscodeReport>::fromStatus(packet.status()).status();
-            }
-            ++report.packets_read;
-            Packet& input = packet.value();
-            int64_t pts = input.pts;
-            if (pts == std::numeric_limits<int64_t>::min()) {
-                pts = packet_pts;
-            } else {
-                pts = rescaleQ(pts, input_time_base, Rational{1, 90000});
-            }
-            int64_t dts = input.dts;
-            if (dts == std::numeric_limits<int64_t>::min()) {
-                dts = pts;
-            } else {
-                dts = rescaleQ(dts, input_time_base, Rational{1, 90000});
-            }
-            const RtxResult submitted =
-                shim.decoderSubmit(decoder.get(), input.data.data(), input.data.size(), pts,
-                                   dts, input.keyframe ? 1 : 0);
-            if (submitted != RTX_OK) {
-                return Status::fail(
-                    mapShimResult(submitted),
-                    describe("cuvidParseVideoData", submitted,
-                             shim.decoderLastError(decoder.get())));
-            }
-            const Status drained = drainFrames(false);
-            if (!drained.ok()) {
-                return drained;
-            }
-            packet_pts += frame_ticks;
-        }
-    }();
+    const int64_t frame_ticks =
+        frame_rate.num > 0 && frame_rate.den > 0
+            ? std::max<int64_t>(1, static_cast<int64_t>(90000) * frame_rate.den / frame_rate.num)
+            : 3000;
+    const Rational input_time_base = info.time_base.valid() ? info.time_base : clock_time_base;
 
-    if (pipeline_status.ok()) {
-        const RtxResult flushed_decoder = shim.decoderFlush(decoder.get());
-        if (flushed_decoder != RTX_OK) {
-            const Status joined = finishPipeline();
-            (void)joined;
-            return Result<HwTranscodeReport>::fail(
-                mapShimResult(flushed_decoder),
-                describe("cuvidParseVideoData(EOS)", flushed_decoder,
-                         shim.decoderLastError(decoder.get())));
-        }
-    }
-    if (pipeline_status.ok()) {
-        const Status drained = drainFrames(true);
-        if (!drained.ok()) {
-            const Status joined = finishPipeline();
-            (void)joined;
-            return Result<HwTranscodeReport>::fromStatus(drained);
-        }
-    }
-    report.main_loop_ms =
-        std::chrono::duration<double, std::milli>(Clock::now() - main_started).count();
-    {
-        const Status finished = finishPipeline();
-        if (!pipeline_status.ok()) {
-            return Result<HwTranscodeReport>::fromStatus(pipeline_status);
-        }
-        if (!finished.ok()) {
-            return Result<HwTranscodeReport>::fromStatus(finished);
-        }
-    }
-
-    if (encoder != nullptr) {
-        for (int attempt = 0; attempt < 8; ++attempt) {
-            RtxPacketDesc packet{};
-            const RtxResult flushed = shim.encoderFlush(encoder.get(), &packet);
-            if (flushed == RTX_ERR_NOT_FOUND) {
-                break;
-            }
-            if (flushed != RTX_OK) {
-                return Result<HwTranscodeReport>::fail(
-                    mapShimResult(flushed),
-                    describe("NvEncEncodePicture(EOS)", flushed,
-                             shim.encoderLastError(encoder.get())));
-            }
-            if (packet.size != 0) {
-                const Status opened_mux = openMuxer();
-                if (!opened_mux.ok()) {
-                    return Result<HwTranscodeReport>::fromStatus(opened_mux);
-                }
-                Packet out;
-                out.data.assign(packet.data, packet.data + packet.size);
-                out.pts = packet.pts;
-                out.dts = packet.dts;
-                out.duration = packet.duration;
-                out.keyframe = packet.keyframe != 0;
-                out.time_base = output_info.time_base;
-                const Status written = muxer->writePacket(out);
-                if (!written.ok()) {
-                    return Result<HwTranscodeReport>::fromStatus(written);
-                }
-                ++report.packets_written;
-                report.bitstream_bytes += packet.size;
-            }
-        }
-    }
-
-    if (muxer == nullptr) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::Internal,
-                                               "no frame was decoded; output was not created");
-    }
-    const Status finalized = muxer->finalize();
-    if (!finalized.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(finalized);
-    }
-
-    RtxHwStats decoder_stats{};
-    if (shim.decoderStats(decoder.get(), &decoder_stats) == RTX_OK) {
-        report.decoder_device_to_device_bytes = decoder_stats.device_to_device_bytes;
-        report.decoder_device_to_host_bytes = decoder_stats.device_to_host_pixel_bytes;
-        report.decoder_host_pixel_copies = decoder_stats.host_pixel_copies;
-    }
-    if (encoder != nullptr) {
-        RtxHwStats encoder_stats{};
-        if (shim.encoderStats(encoder.get(), &encoder_stats) == RTX_OK) {
-            report.encoder_host_to_device_bytes = encoder_stats.host_to_device_pixel_bytes;
-            report.encoder_host_pixel_copies = encoder_stats.host_pixel_copies;
-        }
-    }
-    // NVENC is destroyed (EncoderHandle) only after these counters were read;
-    // the bridge handle declared before it outlives it, so the P010 buffer is
-    // freed after NVENC unregistered it.
-    report.zero_copy_main_loop =
-        report.decoder_host_pixel_copies == 0 && report.encoder_host_pixel_copies == 0 &&
-        report.decoder_device_to_host_bytes == 0 && report.encoder_host_to_device_bytes == 0;
-    RtxNgxRemasterStats bridge_stats{};
-    if (bridge_loader.getRemasterStats(bridge.get(), &bridge_stats) == RTX_OK &&
-        bridge_stats.frames > 0) {
-        const double frames = static_cast<double>(bridge_stats.frames);
-        report.remaster_preprocess_ms = bridge_stats.preprocess_ms / frames;
-        report.remaster_ngx_ms = bridge_stats.ngx_ms / frames;
-        report.remaster_pack_kernel_ms = bridge_stats.pack_kernel_ms / frames;
-        report.remaster_frame_ms = bridge_stats.frame_ms / frames;
-        report.remaster_pack_kernel_max_ms = pack_max_ms;
-        report.remaster_pack_launches = bridge_stats.pack_launches;
-    }
-    report.elapsed_ms =
-        std::chrono::duration<double, std::milli>(Clock::now() - started).count();
-    return Result<HwTranscodeReport>::ok(std::move(report));
-}
-
-namespace {
-
-void nv12ToP010(const uint8_t* nv12, int width, int height, int nv12_pitch,
-                std::vector<uint8_t>& p010) {    const size_t output_pitch = static_cast<size_t>(width) * 2;
-    p010.resize(output_pitch * static_cast<size_t>(height) * 3 / 2);
-    for (int y = 0; y < height; ++y) {
-        const uint8_t* source = nv12 + static_cast<size_t>(y) * nv12_pitch;
-        auto* destination = reinterpret_cast<uint16_t*>(p010.data() + output_pitch * y);
-        for (int x = 0; x < width; ++x) {
-            destination[x] = static_cast<uint16_t>(source[x]) << 8;
-        }
-    }
-    const int chroma_height = (height + 1) / 2;
-    for (int y = 0; y < chroma_height; ++y) {
-        const uint8_t* source =
-            nv12 + static_cast<size_t>(nv12_pitch) * height +
-            static_cast<size_t>(y) * nv12_pitch;
-        auto* destination = reinterpret_cast<uint16_t*>(
-            p010.data() + output_pitch * static_cast<size_t>(height) +
-            output_pitch * y);
-        for (int x = 0; x < width; ++x) {
-            destination[x] = static_cast<uint16_t>(source[x]) << 8;
-        }
-    }
-}
-
-Frame p010View(std::vector<uint8_t>& buffer, int width, int height) {
-    Frame frame;
-    frame.width = width;
-    frame.height = height;
-    frame.format = PixelFormat::P010;
-    frame.bit_depth = 10;
-    frame.chroma_width = width / 2;
-    frame.chroma_height = (height + 1) / 2;
-    frame.planes[0] = buffer.data();
-    frame.planes[1] = buffer.data() + static_cast<size_t>(width) * 2 * height;
-    frame.pitches[0] = width * 2;
-    frame.pitches[1] = width * 2;
-    frame.plane_sizes[0] = static_cast<size_t>(width) * 2 * height;
-    frame.plane_sizes[1] = static_cast<size_t>(width) * 2 * ((height + 1) / 2);
-    return frame;
-}
-
-}  // namespace
-
-Result<HwTranscodeReport> runNvidiaRawTranscode(const HwTranscodeOptions& options) {
-    if (options.input_path.empty() || options.output_path.empty()) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "raw transcode requires input and output paths");
-    }
-    if (options.width <= 0 || options.height <= 0) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::InvalidArgument,
-                                               "raw transcode requires --width and --height");
-    }
-    if (options.codec != VideoCodec::HEVC && options.codec != VideoCodec::H264) {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::Unsupported, "stage-1 NVENC supports HEVC and H.264 output");
-    }
-
-    const Clock::time_point started = Clock::now();
-    HwTranscodeReport report;
-    report.path = "raw-artifact";
-    report.input_container = "raw-nv12";
-    report.output_container = "raw-p010";
-    report.input_codec = "nv12";
-    report.input_width = options.width;
-    report.input_height = options.height;
-    report.output_width = options.width;
-    report.output_height = options.height;
-    report.output_codec = options.codec == VideoCodec::HEVC ? "hevc" : "h264";
-
-    NvidiaShim shim;
-    std::string shim_error;
-    if (!shim.open(&shim_error)) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::DllMissing,
-                                               "cannot load the NVIDIA shim", shim_error);
-    }
-    RtxDiagnostics diagnostics{};
-    if (shim.probe(&diagnostics) != RTX_OK || diagnostics.device.name[0] == '\0') {
-        return Result<HwTranscodeReport>::fail(
-            ErrorCode::DllMissing, "no NVIDIA CUDA device is available to rtx_shim",
-            diagnostics.summary);
-    }
-    report.device = diagnostics.device.name;
-
-    RawNv12Reader reader;
-    const Status opened = reader.open(options.input_path, options.width, options.height);
-    if (!opened.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(opened);
-    }
-    RawP010Writer writer;
-    const Status output_opened = writer.open(options.output_path, options.width, options.height);
-    if (!output_opened.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(output_opened);
-    }
-
-    const Rational frame_rate =
-        options.fps.valid() && options.fps.num > 0 ? options.fps : Rational{30, 1};
-    const bool prefer_ten_bit = options.bit_depth != 8 && options.codec == VideoCodec::HEVC;
-
-    struct Attempt {
-        VideoCodec codec;
-        int bit_depth;
-        int32_t format;
-    };
-    std::vector<Attempt> attempts;
-    if (prefer_ten_bit) {
-        attempts.push_back({VideoCodec::HEVC, 10, RTX_PIXEL_P010});
-    }
-    if (options.codec == VideoCodec::HEVC) {
-        attempts.push_back({VideoCodec::HEVC, 8, RTX_PIXEL_NV12});
-    }
-    attempts.push_back({VideoCodec::H264, 8, RTX_PIXEL_NV12});
-    if (!options.allow_encoder_fallback) {
-        attempts.resize(1);
-    }
-
-    EncoderHandle encoder(nullptr, EncoderDeleter{&shim});
-    DecoderHandle decoder(nullptr, DecoderDeleter{&shim});
-    Attempt chosen = attempts.front();
-    RtxResult last_create = RTX_ERR_UNSUPPORTED;
-    std::string last_detail;
-    for (const Attempt& attempt : attempts) {
-        RtxEncoderConfig config{};
-        config.codec = encoderCodec(attempt.codec);
-        config.width = options.width;
-        config.height = options.height;
-        config.fps_num = static_cast<int32_t>(frame_rate.num);
-        config.fps_den = static_cast<int32_t>(frame_rate.den);
-        config.bitrate_kbps = options.bitrate_kbps;
-        config.preset = std::clamp(options.preset, 1, 7);
-        config.tier = 0;
-        config.input_format = attempt.format;
-        config.gop_length =
-            static_cast<int32_t>(std::max<int64_t>(1, frame_rate.den * 2));
-        config.rate_control = std::clamp(options.rate_control, 0, 2);
-        config.qp = options.qp;
-
-        RtxEncoder* raw = nullptr;
-        const RtxResult created = shim.encoderCreate(&config, &raw);
-        if (created != RTX_OK || raw == nullptr) {
-            last_create = created;
-            last_detail = shim.encoderLastError(nullptr);
-            continue;
-        }
-
-        // The artefact path verifies the bitstream by decoding it again, so the
-        // NVDEC engine must accept the same codec.  Maxwell GM204 has no HEVC
-        // decoder, for example: fall back to H.264 instead of failing late.
-        RtxDecoderConfig decoder_config{};
-        decoder_config.codec = shimCodec(attempt.codec);
-        decoder_config.width = options.width;
-        decoder_config.height = options.height;
-        decoder_config.bit_depth = attempt.bit_depth;
-        decoder_config.output_format = attempt.format;
-        decoder_config.clock_rate = 90000;
-        decoder_config.max_surfaces = 32;
-        decoder_config.pool_slots = 8;
-
-        RtxDecoder* raw_decoder = nullptr;
-        const RtxResult decoder_created = shim.decoderCreate(&decoder_config, &raw_decoder);
-        if (decoder_created != RTX_OK || raw_decoder == nullptr) {
-            shim.encoderDestroy(raw);
-            last_create = decoder_created;
-            last_detail = shim.decoderLastError(nullptr);
-            continue;
-        }
-        encoder.reset(raw);
-        decoder.reset(raw_decoder);
-        chosen = attempt;
-        last_create = RTX_OK;
-        break;
-    }
-    if (encoder == nullptr || decoder == nullptr) {
-        return Result<HwTranscodeReport>::fail(
-            mapShimResult(last_create),
-            describe("no usable NVDEC + NVENC pair for the raw artefact path", last_create,
-                     last_detail.c_str()));
-    }
-    report.output_codec = chosen.codec == VideoCodec::HEVC ? "hevc" : "h264";
-    report.output_bit_depth = chosen.bit_depth;
-    if (chosen.codec != options.codec) {
-        std::fprintf(stderr,
-                     "warning: %s is unavailable on this GPU; the raw artefact path "
-                     "fell back to %s\n",
-                     options.codec == VideoCodec::HEVC ? "HEVC" : "H.264",
-                     report.output_codec.c_str());
-    }
-
-    std::vector<uint8_t> p010_encode;
-    std::vector<uint8_t> download;
-    std::vector<uint8_t> p010_decode;
-    int64_t frame_index = 0;
-
-    auto drainDecoded = [&](bool end_of_stream) -> Status {
-        for (;;) {
-            RtxFrameDesc frame{};
-            const RtxResult received = shim.decoderReceive(decoder.get(), &frame);
-            if (received == RTX_ERR_NOT_FOUND) {
-                return Status::success();
-            }
-            if (received == RTX_ERR_IO && end_of_stream) {
-                return Status::success();
-            }
-            if (received != RTX_OK) {
-                return Status::fail(mapShimResult(received),
-                                    describe("rtx_shim_decoder_receive", received,
-                                             shim.decoderLastError(decoder.get())));
-            }
-            const size_t sample_bytes = frame.format == RTX_PIXEL_P010 ? 2u : 1u;
-            const size_t pitch = static_cast<size_t>(frame.width) * sample_bytes;
-            download.resize(pitch * static_cast<size_t>(frame.height) * 3 / 2);
-            const RtxResult downloaded =
-                shim.decoderDownload(decoder.get(), &frame, download.data(), pitch);
-            if (downloaded != RTX_OK) {
-                (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
-                return Status::fail(mapShimResult(downloaded),
-                                    describe("rtx_shim_decoder_download", downloaded, nullptr));
-            }
-            if (frame.format == RTX_PIXEL_P010) {
-                Frame view = p010View(download, frame.width, frame.height);
-                const Status written = writer.write(view);
-                if (!written.ok()) {
-                    (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
-                    return written;
-                }
-            } else {
-                nv12ToP010(download.data(), frame.width, frame.height,
-                           static_cast<int>(pitch), p010_decode);
-                Frame view = p010View(p010_decode, frame.width, frame.height);
-                const Status written = writer.write(view);
-                if (!written.ok()) {
-                    (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
-                    return written;
-                }
-            }
-            (void)shim.decoderReleaseFrame(decoder.get(), frame.slot_index);
-            ++report.frames_decoded;
-        }
-    };
-
-    auto submitEncoded = [&](const RtxPacketDesc& packet) -> Status {
-        if (packet.size == 0) {
-            return Status::success();
-        }
-        const RtxResult submitted =
-            shim.decoderSubmit(decoder.get(), packet.data, packet.size, packet.pts, packet.dts,
-                               packet.keyframe);
-        if (submitted != RTX_OK) {
-            return Status::fail(mapShimResult(submitted),
-                                describe("cuvidParseVideoData", submitted,
-                                         shim.decoderLastError(decoder.get())));
-        }
-        report.bitstream_bytes += packet.size;
-        return drainDecoded(false);
-    };
-
-    while (options.frame_limit <= 0 || frame_index < options.frame_limit) {
-        Result<Frame> frame = reader.read(frame_index, Rational{frame_rate.den, frame_rate.num});
-        if (!frame.ok()) {
-            if (frame.code() == ErrorCode::NotFound) {
-                break;
-            }
-            return Result<HwTranscodeReport>::fromStatus(frame.status());
-        }
-        Frame& source = frame.value();
-        const uint8_t* pixels = source.planes[0];
-        uint32_t pitch = static_cast<uint32_t>(source.pitches[0]);
-        int32_t format = RTX_PIXEL_NV12;
-        if (chosen.format == RTX_PIXEL_P010) {
-            nv12ToP010(source.planes[0], options.width, options.height, source.pitches[0],
-                       p010_encode);
-            pixels = p010_encode.data();
-            pitch = static_cast<uint32_t>(options.width) * 2;
-            format = RTX_PIXEL_P010;
-        }
-
-        RtxPacketDesc packet{};
-        const RtxResult encoded =
-            shim.encoderEncodeHost(encoder.get(), pixels, pitch, format, frame_index, &packet);
-        if (encoded != RTX_OK) {
-            return Result<HwTranscodeReport>::fail(
-                mapShimResult(encoded),
-                describe("NvEncEncodePicture(host)", encoded,
-                         shim.encoderLastError(encoder.get())));
-        }
-        ++report.frames_encoded;
-        const Status submitted = submitEncoded(packet);
-        if (!submitted.ok()) {
-            return Result<HwTranscodeReport>::fromStatus(submitted);
-        }
-        ++frame_index;
-    }
-
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        RtxPacketDesc packet{};
-        const RtxResult flushed = shim.encoderFlush(encoder.get(), &packet);
-        if (flushed == RTX_ERR_NOT_FOUND) {
+    Result<void> pipeline_status;
+    for (;;) {
+        if (cancelled()) {
+            pipeline_status = err(ErrorCode::State, "transcode cancelled");
             break;
         }
-        if (flushed != RTX_OK) {
-            return Result<HwTranscodeReport>::fail(
-                mapShimResult(flushed),
-                describe("NvEncEncodePicture(EOS)", flushed,
-                         shim.encoderLastError(encoder.get())));
+        if (options.frame_limit > 0 && report.frames_decoded >= options.frame_limit) {
+            break;
         }
-        const Status submitted = submitEncoded(packet);
-        if (!submitted.ok()) {
-            return Result<HwTranscodeReport>::fromStatus(submitted);
+        Result<Packet> packet = session.demuxer()->readPacket();
+        if (!packet.has_value()) {
+            if (packet.error().code == ErrorCode::NotFound) {
+                break;
+            }
+            pipeline_status = std::unexpected(packet.error());
+            break;
+        }
+        ++report.packets_read;
+        Packet& input = packet.value();
+        int64_t pts = input.pts;
+        if (pts == std::numeric_limits<int64_t>::min()) {
+            pts = packet_pts;
+        } else {
+            pts = rescaleQ(pts, input_time_base, clock_time_base);
+        }
+        int64_t dts = input.dts;
+        if (dts == std::numeric_limits<int64_t>::min()) {
+            dts = pts;
+        } else {
+            dts = rescaleQ(dts, input_time_base, clock_time_base);
+        }
+        const RtxResult submitted =
+            session.shim().decoderSubmit(session.decoder(), input.data.data(), input.data.size(), pts,
+                                         dts, input.keyframe ? 1 : 0);
+        if (submitted != RTX_OK) {
+            pipeline_status = err(mapShimResult(submitted),
+                                  describe("cuvidParseVideoData", submitted, session.shim().decoderLastError(session.decoder())));
+            break;
+        }
+        auto drained = drainFrames(false);
+        if (!drained.has_value()) {
+            pipeline_status = drained;
+            break;
+        }
+        packet_pts += frame_ticks;
+    }
+
+    if (pipeline_status.has_value()) {
+        const RtxResult flushed_decoder = session.shim().decoderFlush(session.decoder());
+        if (flushed_decoder != RTX_OK) {
+            pipeline_status = err(mapShimResult(flushed_decoder),
+                                  describe("cuvidParseVideoData(EOS)", flushed_decoder,
+                                           session.shim().decoderLastError(session.decoder())));
+        }
+    }
+    if (pipeline_status.has_value()) {
+        auto drained = drainFrames(true);
+        if (!drained.has_value()) {
+            pipeline_status = drained;
         }
     }
 
-    const RtxResult flushed_decoder = shim.decoderFlush(decoder.get());
-    if (flushed_decoder != RTX_OK) {
-        return Result<HwTranscodeReport>::fail(
-            mapShimResult(flushed_decoder),
-            describe("cuvidParseVideoData(EOS)", flushed_decoder,
-                     shim.decoderLastError(decoder.get())));
+    auto finished = finishPipeline();
+    if (!pipeline_status.has_value()) {
+        return std::unexpected(pipeline_status.error());
     }
-    const Status drained = drainDecoded(true);
-    if (!drained.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(drained);
-    }
-    const Status finalized = writer.finalize();
-    if (!finalized.ok()) {
-        return Result<HwTranscodeReport>::fromStatus(finalized);
-    }
-    if (report.frames_decoded == 0) {
-        return Result<HwTranscodeReport>::fail(ErrorCode::Internal,
-                                               "NVDEC produced no frames from the NVENC bitstream");
+    if (!finished.has_value()) {
+        return std::unexpected(finished.error());
     }
 
-    RtxHwStats decoder_stats{};
-    if (shim.decoderStats(decoder.get(), &decoder_stats) == RTX_OK) {
-        report.decoder_device_to_device_bytes = decoder_stats.device_to_device_bytes;
-        report.decoder_device_to_host_bytes = decoder_stats.device_to_host_pixel_bytes;
-        report.decoder_host_pixel_copies = decoder_stats.host_pixel_copies;
+    report.main_loop_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - main_loop_started).count();
+
+    auto flushed_encoder = session.flushEncoder(report);
+    if (!flushed_encoder.has_value()) {
+        return std::unexpected(flushed_encoder.error());
     }
-    RtxHwStats encoder_stats{};
-    if (shim.encoderStats(encoder.get(), &encoder_stats) == RTX_OK) {
-        report.encoder_host_to_device_bytes = encoder_stats.host_to_device_pixel_bytes;
-        report.encoder_host_pixel_copies = encoder_stats.host_pixel_copies;
+
+    auto finalized = session.finalize(report, started);
+    if (!finalized.has_value()) {
+        return std::unexpected(finalized.error());
     }
-    report.zero_copy_main_loop = false;
-    report.elapsed_ms =
-        std::chrono::duration<double, std::milli>(Clock::now() - started).count();
-    return Result<HwTranscodeReport>::ok(std::move(report));
+
+    if (report.frames_encoded > 0) {
+        const double n = static_cast<double>(report.frames_encoded);
+        report.remaster_preprocess_ms = previous_stats.preprocess_ms / n;
+        report.remaster_ngx_ms = previous_stats.ngx_ms / n;
+        report.remaster_pack_kernel_ms = previous_stats.pack_kernel_ms / n;
+        report.remaster_frame_ms = report.main_loop_ms / n;
+        report.remaster_pack_kernel_max_ms = pack_max_ms;
+        report.remaster_pack_launches = previous_stats.pack_launches;
+    }
+
+    return report;
 }
 
 }  // namespace rtx

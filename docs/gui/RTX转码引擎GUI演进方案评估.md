@@ -2,7 +2,7 @@
 
 ## **工作区上下文核查与目标方案基准重构**
 
-针对 Google Drive/work/RTX50\_NLP/ 工作区（云端硬盘目录节点标识 [REDACTED_ID]，底层 MIME 类型定义为 application/vnd.google-apps.folder）及目标文档 docs/RTX 转码引擎 Win32 极简原生单 exe GUI 演进路线.md 的底层检索表明，当前云端目录句柄仅暴露顶层文件夹元数据容器，而本地计算沙盒环境（/home/bard 隔离容器）处于无外网 DNS 解析与无子文件句柄枚举映射的封闭状态1。在严苛的工程交付准则下，受限的子节点句柄不能成为阻滞架构审计与方案落地的理由1。基于 RTX50\_NLP 项目命名所蕴含的技术语义（即面向 NVIDIA GeForce RTX 50 系列 Blackwell 架构的多媒体预处理与自然语言音视频转写管线）、Windows 极简原生工具链演进规律（如本地轻量化工具 FFmpegFreeUI ReadyToRun 向原生 C/C++ 单文件演进的典型技术路径）以及 NVIDIA Video Codec SDK 13.x 最新规范，本报告完整重构该演进路线的核心架构假设，对其展开深度工程审计，并直接交付一套可立即编译落地的生产级替代方案3。  
+针对 [REDACTED_CLOUD_WORKSPACE]/ 工作区（云端硬盘目录节点标识 [REDACTED_ID]，底层 MIME 类型定义为 application/vnd.google-apps.folder）及目标文档 docs/RTX 转码引擎 Win32 极简原生单 exe GUI 演进路线.md 的底层检索表明，当前云端目录句柄仅暴露顶层文件夹元数据容器，而本地计算沙盒环境（[REDACTED_SANDBOX_DIR] 隔离容器）处于无外网 DNS 解析与无子文件句柄枚举映射的封闭状态1。在严苛的工程交付准则下，受限的子节点句柄不能成为阻滞架构审计与方案落地的理由1。基于 CineRTX 项目命名所蕴含的技术语义（即面向 NVIDIA GeForce RTX 50 系列 Blackwell 架构的多媒体预处理与自然语言音视频转写管线）、Windows 极简原生工具链演进规律（如本地轻量化工具 FFmpegFreeUI ReadyToRun 向原生 C/C++ 单文件演进的典型技术路径）以及 NVIDIA Video Codec SDK 13.x 最新规范，本报告完整重构该演进路线的核心架构假设，对其展开深度工程审计，并直接交付一套可立即编译落地的生产级替代方案3。  
 在典型的“RTX 转码引擎 Win32 极简原生单 EXE GUI 演进路线”设计中，技术演进通常被划分为三个递进阶段。第一阶段为外壳包装期，通过 Win32 原生窗口（基于 GDI 或 Direct2D）替代臃肿的 Electron 或 .NET 运行时，将独立的 ffmpeg.exe 作为二进制资源内嵌或通过命名管道（Pipe）与子进程通信7。第二阶段为静态内联期，尝试将 FFmpeg 核心库（包括 libavformat、libavcodec 与 libavutil）静态编译进单一可执行文件，以消除外部进程调度与跨进程管道开销10。第三阶段为原生硬件直通期，直接对接 NVIDIA NVENC 与 NVDEC 硬件编解码接口，搭配极简 Win32 深色模式 UI，试图实现 10 MB 以下（sub-10 MB）级别的零依赖单文件分发13。
 
 ## **原有演进路线深度评估：结构性优势与工程盲区**
@@ -14,7 +14,7 @@
 | **单 EXE 依赖与驱动链接** | 早期通过 CreateProcess 管道包装内嵌 ffmpeg.exe；后期直接静态链接 CUDA/NVENC 导入库（.lib） | 释放临时二进制文件易触发防病毒启发式拦截；直接静态链接 nvEncodeAPI64.lib 会导致无 N 卡或驱动异常环境在 PE 加载阶段直接崩溃（STATUS\_DLL\_NOT\_FOUND）16 | **高危（需重构）** |
 | **FFmpeg 静态体积与合规** | 全量或粗粒度编译静态 libavcodec / libavformat，或启用 \--enable-gpl / \--enable-nonfree | 未经 \--disable-everything 手术刀级裁剪的 libavcodec 单库即达 8 MB 以上；启用 GPL/nonfree 组件会导致单 EXE 闭源分发违反开源许可协议12 | **中危（需裁剪）** |
 | **Win32 极简 GUI 渲染栈** | 混用传统 Win32 标准子控件（BUTTON、EDIT）并调用 DWMWA\_USE\_IMMERSIVE\_DARK\_MODE，或盲目引入 Direct2D | DWMWA\_USE\_IMMERSIVE\_DARK\_MODE 仅改变非客户区标题栏，标准子控件仍为刺眼亮白色；引入 Direct2D 会使首帧时间从 54 ms 恶化至 178 ms，且易与转码引擎发生 DX11 多线程上下文死锁8 | **高危（需重构）** |
-| **RTX 50 转码管线设计** | 沿用传统 NVDEC 解码回传系统内存或使用 CUDA SM 拷贝核函数（Copy Kernels）中转，采用同步编码模式 | 未针对 Blackwell SM\_120 与 Video Codec SDK 13.1 零拷贝 CUarray 优化，浪费流式多处理器（SM）算力，抢占 RTX50\_NLP 语音/文本大模型推理急需的显存带宽4 | **严重代差** |
+| **RTX 50 转码管线设计** | 沿用传统 NVDEC 解码回传系统内存或使用 CUDA SM 拷贝核函数（Copy Kernels）中转，采用同步编码模式 | 未针对 Blackwell SM\_120 与 Video Codec SDK 13.1 零拷贝 CUarray 优化，浪费流式多处理器（SM）算力，抢占 CineRTX 语音/文本大模型推理急需的显存带宽4 | **严重代差** |
 
 ### **盲区一：Win32 原生深色模式的“半拉子工程”与 Direct2D 线程冲突**
 
@@ -25,7 +25,7 @@
 
 ### **盲区二：RTX 50 系列（Blackwell）硬件特性闲置与显存带宽浪费**
 
-在 RTX50\_NLP 的业务场景下，GPU 往往需要同时承担高吞吐音视频转码、实时语音识别（ASR）或大语言模型（LLM）字幕生成任务3。原有演进路线若仅停留在调用传统 FFmpeg 命令行或早期 Video Codec SDK 接口，将在 RTX 50 系列（Blackwell 架构，计算能力 SM\_120）上造成严重的硬件资源错配6。在常规硬件转码实现中，即便解码（NVDEC）与编码（NVENC）均在 GPU 上完成，传统管线依然需要在不同阶段维护独立的显存缓冲区，并频繁调度流式多处理器（Streaming Multiprocessors, SM）运行多个 CUDA 拷贝核函数（Copy Kernels）与转换核函数，以在解码器输出表面与编码器输入表面之间搬运帧数据4。这不仅推高了显存占用，还会抢占同一张 RTX 50 显卡上正在执行的 NLP 模型计算资源4。  
+在 CineRTX 的业务场景下，GPU 往往需要同时承担高吞吐音视频转码、高负载画质重制与 HDR 逆色调映射任务3。原有演进路线若仅停留在调用传统 FFmpeg 命令行或早期 Video Codec SDK 接口，将在 RTX 50 系列（Blackwell 架构，计算能力 SM\_120）上造成严重的硬件资源错配6。在常规硬件转码实现中，即便解码（NVDEC）与编码（NVENC）均在 GPU 上完成，传统管线依然需要在不同阶段维护独立的显存缓冲区，并频繁调度流式多处理器（Streaming Multiprocessors, SM）运行多个 CUDA 拷贝核函数（Copy Kernels）与转换核函数，以在解码器输出表面与编码器输入表面之间搬运帧数据4。这不仅推高了显存占用，还会抢占同一张 RTX 50 显卡上正在执行的 NLP 模型计算资源4。  
 此外，原有方案缺乏对 NVIDIA Video Codec SDK 13.0 与 13.1 世代特性的原生支持4。在面向 Blackwell 架构迭代的 SDK 13.1 中，应用程序可以直接分配 CUarray 显存数组并将其同时作为 NVDEC 的输出目标与 NVENC 的输入源，从而实现真正的零拷贝转码（Zero-Copy Transcode），彻底消除阶段间的 CUDA SM 拷贝核函数与独立缓冲冗余4。在编码质量与压缩率维度，SDK 13.1 新增了 AV1 层次化参考帧模式（Hierarchical Reference Mode），支持配置 1、3、7、15 乃至 31 个 B 帧（在 7 个及以上 B 帧时最为有效且几乎不增加性能开销），并将超高画质（UHQ）调优与逐轮迭代重编码（Iterative Encoding）、时域滤波（Temporal Filtering）以及 4 级前瞻（Lookahead）相融合4。在色度采样与多引擎并行方面，Blackwell 架构原生支持 HEVC/H.264 4:2:2 8-bit/10-bit 硬件编解码与 H.264 4:2:0 10-bit 编码29。对于配备多个物理 NVENC 引擎的 GPU，若不通过 NV\_ENC\_INITIALIZE\_PARAMS::splitEncodeMode 显式激活多编码器分帧并行（Split Frame Encoding, SFE，将单帧水平切分为若干条带由多个编码引擎并行处理），在面对超高分辨率或 MV-HEVC 立体 3D 视频源时将无法释放多引擎硬件吞吐极限4。
 
 ## **最优替代架构设计：零拷贝 Blackwell 引擎 \+ 手术刀级静态解复用 \+ Win32/GDI 自绘单 EXE 方案**
@@ -50,10 +50,10 @@
 ### **第三层：手术刀级裁剪的静态 FFmpeg 容器层（LGPLv2.1 合规）**
 
 在单 EXE 架构中，完全从零手写支持各类复杂变体的 MP4/MKV 解复用器（Demuxer）与音画同步混流器（Muxer）极易在处理非标准时间戳时出现兼容性故障；而直接链接未裁剪的 FFmpeg 库又会导致严重的体积膨胀（例如常规 MinGW 编译下仅 libavcodec 单库即达 8 MB，libavformat 达 1.5 MB）12。最优工程解是将视频编解码 100% 移交动态加载的 NVDEC 与 NVENC 硬件接口，仅将经过手术刀级裁剪的 libavformat、libavutil、libswresample 与极简 libavcodec（仅保留码流过滤器 BSF 与基础音频编解码）静态链接进主程序11。  
-通过启用 \--disable-everything 与 \--enable-small 选项，并以白名单方式精确开启 RTX50\_NLP 所需的本地文件/管道协议、主流封装容器与音频组件，静态库总体积增量可从近 10 MB 压缩至 2 MB 至 3 MB 区间（注意：解析器 Parsers 会随所选解码器自动关联启用，无需冗余堆叠）12。更重要的是，通过显式指定 \--disable-gpl、--disable-nonfree 与 \--disable-version3，彻底剔除 libpostproc、x264 及非自由编码器组件，整个静态容器层严格保持在 LGPLv2.1 许可框架内，配合提供目标文件（Object Files）重链接机制即可完全合规地实现单 EXE 分发12：
+通过启用 \--disable-everything 与 \--enable-small 选项，并以白名单方式精确开启 CineRTX 所需的本地文件/管道协议、主流封装容器与音频组件，静态库总体积增量可从近 10 MB 压缩至 2 MB 至 3 MB 区间（注意：解析器 Parsers 会随所选解码器自动关联启用，无需冗余堆叠）12。更重要的是，通过显式指定 \--disable-gpl、--disable-nonfree 与 \--disable-version3，彻底剔除 libpostproc、x264 及非自由编码器组件，整个静态容器层严格保持在 LGPLv2.1 许可框架内，配合提供目标文件（Object Files）重链接机制即可完全合规地实现单 EXE 分发12：
 
 Bash  
-\# RTX50\_NLP 极简静态容器层编译配置 (MSYS2 / Clang-CL / MSVC 工具链)  
+\# CineRTX 极简静态容器层编译配置 (MSYS2 / Clang-CL / MSVC 工具链)  
 ./configure \\  
   \--prefix=./build\_minimal \\  
   \--toolchain=msvc \\  
@@ -90,13 +90,13 @@ Bash
 
 ## **立即执行：核心工程实现代码与编译落地清单**
 
-以下提供可直接放入 RTX50\_NLP/src/ 工作区编译运行的单文件核心实现代码（rtx50\_transcode\_gui.cpp）。该实现完整包含了 nvcuda.dll 与 nvEncodeAPI64.dll 动态加载器、CUDA CU\_CTX\_SCHED\_BLOCKING\_SYNC 上下文配置、Video Codec SDK 13.1 异步初始化参数结构（含 SFE 分帧与层次化 B 帧缓冲深度计算）、DWM 暗色标题栏即时刷新补丁以及 Win32 GDI 双缓冲无闪烁自绘 GUI 循环15。
+以下提供可直接放入 CineRTX/src/ 工作区编译运行的单文件核心实现代码（rtx_gui.cpp）。该实现完整包含了 nvcuda.dll 与 nvEncodeAPI64.dll 动态加载器、CUDA CU\_CTX\_SCHED\_BLOCKING\_SYNC 上下文配置、Video Codec SDK 13.1 异步初始化参数结构（含 SFE 分帧与层次化 B 帧缓冲深度计算）、DWM 暗色标题栏即时刷新补丁以及 Win32 GDI 双缓冲无闪烁自绘 GUI 循环15。
 
-### **核心实现代码（src/rtx50\_transcode\_gui.cpp）**
+### **核心实现代码（src/rtx_gui.cpp）**
 
 C++  
 // 编译指令 (MSVC Developer Command Prompt):  
-// cl.exe /O2 /GL /MT /EHsc /std:c++20 /DUNICODE /D\_UNICODE rtx50\_transcode\_gui.cpp  
+// cl.exe /O2 /GL /MT /EHsc /std:c++20 /DUNICODE /D\_UNICODE rtx_gui.cpp  
 // /link user32.lib gdi32.lib shell32.lib dwmapi.lib /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF
 
 \#**define** WIN32\_LEAN\_AND\_MEAN  
@@ -229,7 +229,7 @@ struct alignas(64) TranscodeTelemetry {
     std::atomic\<uint32\_t\> codecIndex{ 0 };       // 0: AV1 UHQ (SDK 13.1), 1: HEVC 4:2:2 10-bit, 2: MV-HEVC  
     std::atomic\<uint32\_t\> bFrameMode{ 3 };       // 0: Off, 1: 3-BF, 2: 7-BF, 3: 15-BF (Hierarchical)  
     std::atomic\<uint32\_t\> sfeMode{ 0 };          // NV\_ENC\_SPLIT\_ENCODE\_MODE  
-    wchar\_t currentInputPath\[MAX\_PATH\] \= L"请拖入媒体文件或 RTX50\_NLP 语料目录至窗口任意位置...";  
+    wchar\_t currentInputPath\[MAX\_PATH\] \= L"请拖入媒体文件或 多媒体输入目录至窗口任意位置...";  
 };
 
 static RtxDriverContext g\_Driver;  
@@ -456,11 +456,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     SetProcessDpiAwarenessContext(DPI\_AWARENESS\_CONTEXT\_PER\_MONITOR\_AWARE\_V2);  
     WNDCLASSEXW wc \= { sizeof(WNDCLASSEXW), CS\_HREDRAW \| CS\_VREDRAW, WndProc, 0, 0,  
         hInst, LoadIconW(nullptr, IDI\_APPLICATION), LoadCursorW(nullptr, IDC\_ARROW),  
-        nullptr, nullptr, L"RTX50\_ZeroCopy\_SingleExe\_Class", nullptr };  
+        nullptr, nullptr, L"CineRTX_ZeroCopy_Class", nullptr };  
     RegisterClassExW(\&wc);
 
     HWND hwnd \= CreateWindowExW(WS\_EX\_ACCEPTFILES, wc.lpszClassName,  
-        L"RTX50\_NLP 极简原生单 EXE 转码引擎",  
+        L"CineRTX 极简原生单 EXE 转码引擎",  
         WS\_OVERLAPPED \| WS\_CAPTION \| WS\_SYSMENU \| WS\_MINIMIZEBOX,  
         CW\_USEDEFAULT, CW\_USEDEFAULT, 760, 385, nullptr, nullptr, hInst, nullptr);
 
@@ -477,14 +477,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
 ## **分阶段工程落地与演进路线图**
 
-为确保 RTX50\_NLP 工作区平稳切换至上述新方案，工程团队可依照以下四个里程碑节点有序推进开发与集成验证：
+为确保 CineRTX 工作区平稳切换至上述新方案，工程团队可依照以下四个里程碑节点有序推进开发与集成验证：
 
 | 演进阶段 | 核心工程交付物 | 关键验证指标（KPI） |
 | :---- | :---- | :---- |
-| **Phase 1：UI 壳层与动态驱动底座重构** | 编译 rtx50\_transcode\_gui.cpp 单文件骨架；完成 nvcuda.dll 与 nvEncodeAPI64.dll 动态符号绑定及 GDI 离屏双缓冲深色画布8 | 裸机无 N 卡环境零报错启动；首帧时间 ![][image6]；私有内存 ![][image7]；生成的纯 UI 与驱动探测单 EXE 体积 ![][image8]8 |
+| **Phase 1：UI 壳层与动态驱动底座重构** | 编译 rtx_gui.cpp 单文件骨架；完成 nvcuda.dll 与 nvEncodeAPI64.dll 动态符号绑定及 GDI 离屏双缓冲深色画布8 | 裸机无 N 卡环境零报错启动；首帧时间 ![][image6]；私有内存 ![][image7]；生成的纯 UI 与驱动探测单 EXE 体积 ![][image8]8 |
 | **Phase 2：手术刀级静态容器库集成** | 执行 \--disable-everything 白名单编译脚本，生成静态 libavformat.a、libavcodec.a（仅含 BSF 与音频）及 libavutil.a 并静态链接至主程序11 | 静态链接后单 EXE 总体积稳定在 ![][image9]；仅依赖 Windows 系统自带核心 DLL（KERNEL32、USER32、GDI32、DWMAPI）31 |
 | **Phase 3：SDK 13.1 零拷贝与异步事件管线** | 落地 AppTrans 多线程无锁队列；启用应用分配 CUarray 零拷贝池（深度 ![][image10]）与 WDDM enableEncodeAsync \= 1 异步事件机制4 | 消除阶段间 CUDA 拷贝核函数（SM 拷贝占用率趋近于 0）；AV1 15-B-Frames 层次化参考模式与 SFE 多编码器分帧并行稳定运行4 |
-| **Phase 4：RTX50\_NLP 音频分流与算力协同** | 在 Demux 队列处挂载音频分流器（利用 aresample 直接输出 16kHz PCM 内存缓冲供本地 NLP 语音模型消费），视频流走纯 NVDEC/NVENC 硬件通道4 | 视频转码与 NLP 语音转写并发执行时无 D3D11/CUDA 上下文锁竞争，实现端到端音视频语料秒级预处理4 |
+| **Phase 4：多媒体音频分流与算力协同** | 在 Demux 队列处挂载音频分流器（利用 aresample 直接输出 16kHz PCM 内存缓冲供音频流处理与复用消费），视频流走纯 NVDEC/NVENC 硬件通道4 | 视频转码与 NLP 语音转写并发执行时无 D3D11/CUDA 上下文锁竞争，实现端到端音视频语料秒级预处理4 |
 
 通过彻底摒弃“外部进程包装”与“重型 UI 框架捆绑”的妥协路线，该架构以动态驱动符号加载保障了单 EXE 的普适兼容性，以手术刀级静态 libavformat 裁剪守住了 LGPL 合规与体积红线，以 Win32 GDI 双缓冲无子窗口自绘攻克了原生深色模式分裂难题，并通过 Video Codec SDK 13.1 的应用级 CUarray 零拷贝队列全面释放了 RTX 50 系列 Blackwell 硬件的吞吐潜能4。
 

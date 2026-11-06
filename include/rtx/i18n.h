@@ -110,6 +110,7 @@ Result<Language> parseLanguage(std::string_view tag);
 // Zero-allocation accessor for the Win32 paint path.  Never returns nullptr;
 // an out-of-range id yields L"".
 const wchar_t* trW(StrId id) noexcept;
+std::wstring_view trWView(StrId id) noexcept;
 
 // UTF-8 accessor for the CLI and for logs.  Allocates a std::string, so it is
 // deliberately kept off the per-frame paint path.
@@ -117,6 +118,7 @@ std::string tr(StrId id);
 
 // Convenience for diagnostics: the stable identifier of an enumerator.
 const char* strIdName(StrId id) noexcept;
+std::string_view strIdNameView(StrId id) noexcept;
 
 // Maps an engine error code onto the localised message.
 StrId strIdForError(ErrorCode code) noexcept;

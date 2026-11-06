@@ -3,11 +3,13 @@
 
 #include "test_framework.h"
 
-#include <chrono>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "rtx/types.h"
@@ -53,7 +55,7 @@ RTX_TEST(vram_pool_default_plan_fits_8gb) {
     const PoolBudget budget = computeBudget(specs);
     RTX_CHECK(budget.total_bytes > 0);
     RTX_CHECK(budget.total_bytes < 8ull * 1024ull * 1024ull * 1024ull);
-    RTX_CHECK(validateBudget(budget, 8ull * 1024ull * 1024ull * 1024ull).ok());
+    RTX_CHECK(validateBudget(budget, 8ull * 1024ull * 1024ull * 1024ull).has_value());
     RTX_CHECK(budget.find("Pool_Encode_4K_P010") != nullptr);
     RTX_CHECK(budget.find("Pool_Interp_1080p") != nullptr);
 }
@@ -72,26 +74,26 @@ RTX_TEST(vram_pool_encode_depth_covers_b_frames) {
     }
     RTX_REQUIRE(encode != nullptr);
     RTX_CHECK_EQ(encode->slots, 19);
-    RTX_CHECK(validateBudget(computeBudget(specs), 8ull * 1024ull * 1024ull * 1024ull).ok());
+    RTX_CHECK(validateBudget(computeBudget(specs), 8ull * 1024ull * 1024ull * 1024ull).has_value());
 }
 
 RTX_TEST(vram_budget_validation) {
     PoolSpec spec = smallSpec(2);
     const PoolBudget budget = computeBudget({spec});
-    RTX_CHECK_EQ(validateBudget(budget, 0).code(), ErrorCode::InvalidArgument);
-    RTX_CHECK_EQ(validateBudget(budget, budget.total_bytes).code(), ErrorCode::OutOfMemory);
-    RTX_CHECK_EQ(validateBudget(budget, budget.total_bytes + 100, 384ull * 1024 * 1024).code(),
+    RTX_CHECK_EQ(validateBudget(budget, 0).error().code, ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(validateBudget(budget, budget.total_bytes).error().code, ErrorCode::OutOfMemory);
+    RTX_CHECK_EQ(validateBudget(budget, budget.total_bytes + 100, 384ull * 1024 * 1024).error().code,
                  ErrorCode::OutOfMemory);
-    RTX_CHECK(validateBudget(budget, budget.total_bytes + 384ull * 1024 * 1024).ok());
-    RTX_CHECK(validateBudget(budget, budget.total_bytes + 1024, 1024).ok());
-    RTX_CHECK(validateBudget(budget, budget.total_bytes + 1023, 1024).ok() == false);
+    RTX_CHECK(validateBudget(budget, budget.total_bytes + 384ull * 1024 * 1024).has_value());
+    RTX_CHECK(validateBudget(budget, budget.total_bytes + 1024, 1024).has_value());
+    RTX_CHECK(validateBudget(budget, budget.total_bytes + 1023, 1024).has_value() == false);
 }
 
 RTX_TEST(vram_surface_pool_lifecycle) {
     SurfacePool pool;
-    RTX_CHECK_EQ(pool.initialize(PoolSpec{}).code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(pool.initialize(PoolSpec{}).error().code, ErrorCode::InvalidArgument);
     const PoolSpec spec = smallSpec(4);
-    RTX_REQUIRE(pool.initialize(spec).ok());
+    RTX_REQUIRE(pool.initialize(spec).has_value());
     RTX_CHECK_EQ(pool.capacity(), static_cast<size_t>(4));
     RTX_CHECK_EQ(pool.available(), static_cast<size_t>(4));
     RTX_CHECK_EQ(pool.used(), static_cast<size_t>(0));
@@ -150,12 +152,12 @@ RTX_TEST(vram_surface_pool_lifecycle) {
     pool.shutdown();
     RTX_CHECK_EQ(pool.capacity(), static_cast<size_t>(0));
     RTX_CHECK(!pool.acquire());
-    RTX_CHECK_EQ(pool.initialize(PoolSpec{}).code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(pool.initialize(PoolSpec{}).error().code, ErrorCode::InvalidArgument);
 }
 
 RTX_TEST(vram_surface_lease_move_semantics) {
     SurfacePool pool;
-    RTX_REQUIRE(pool.initialize(smallSpec(2)).ok());
+    RTX_REQUIRE(pool.initialize(smallSpec(2)).has_value());
     SurfaceLease first = pool.acquire();
     RTX_REQUIRE(static_cast<bool>(first));
     const uint32_t id = first.slotId();
@@ -169,6 +171,35 @@ RTX_TEST(vram_surface_lease_move_semantics) {
     first.reset();
     RTX_CHECK(!first);
     RTX_CHECK_EQ(pool.used(), static_cast<size_t>(0));
+}
+
+RTX_TEST(vram_surface_pool_concurrent_acquire_release) {
+    SurfacePool pool;
+    RTX_REQUIRE(pool.initialize(smallSpec(8)).has_value());
+
+    constexpr size_t kWorkerCount = 4;
+    constexpr size_t kIterationsPerWorker = 10000;
+    std::vector<std::thread> workers;
+    workers.reserve(kWorkerCount);
+    for (size_t worker = 0; worker < kWorkerCount; ++worker) {
+        workers.emplace_back([&pool]() {
+            for (size_t i = 0; i < kIterationsPerWorker; ++i) {
+                SurfaceLease lease;
+                while (!(lease = pool.acquire())) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    constexpr size_t kTotalAcquires = kWorkerCount * kIterationsPerWorker;
+    RTX_CHECK_EQ(pool.used(), static_cast<size_t>(0));
+    RTX_CHECK_EQ(pool.available(), static_cast<size_t>(8));
+    RTX_CHECK_EQ(pool.acquireCount(), static_cast<uint64_t>(kTotalAcquires));
+    RTX_CHECK_EQ(pool.releaseCount(), static_cast<uint64_t>(kTotalAcquires));
 }
 
 RTX_TEST(vram_backpressure_hysteresis) {
@@ -255,6 +286,32 @@ RTX_TEST(vram_tdr_queue_depth_cap) {
     RTX_CHECK_EQ(guard.queueDepth(), static_cast<size_t>(1));
 }
 
+RTX_TEST(vram_tdr_guard_concurrent_max_frame_time) {
+    TdrGuard guard;
+    constexpr size_t kWorkerCount = 4;
+    constexpr size_t kCompletionsPerWorker = 1000;
+    std::vector<std::thread> workers;
+    workers.reserve(kWorkerCount);
+
+    for (size_t worker = 0; worker < kWorkerCount; ++worker) {
+        workers.emplace_back([&guard, worker]() {
+            for (size_t i = 0; i < kCompletionsPerWorker; ++i) {
+                const int64_t elapsed_us = static_cast<int64_t>(worker * kCompletionsPerWorker + i);
+                guard.completed(std::chrono::microseconds(elapsed_us));
+            }
+        });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    constexpr int64_t kExpectedMax =
+        static_cast<int64_t>(kWorkerCount * kCompletionsPerWorker - 1);
+    RTX_CHECK_EQ(guard.maxFrameTime(), std::chrono::microseconds(kExpectedMax));
+    RTX_CHECK_EQ(guard.completedTotal(),
+                 static_cast<uint64_t>(kWorkerCount * kCompletionsPerWorker));
+}
+
 RTX_TEST(vram_surface_pool_device_backed) {
     struct AllocatorState {
         size_t allocations = 0;
@@ -282,9 +339,9 @@ RTX_TEST(vram_surface_pool_device_backed) {
 
     const PoolSpec spec = smallSpec(4);
     SurfacePool pool;
-    RTX_CHECK_EQ(pool.initializeDevice(spec, DeviceAllocator{}).code(),
+    RTX_CHECK_EQ(pool.initializeDevice(spec, DeviceAllocator{}).error().code,
                  ErrorCode::InvalidArgument);
-    RTX_REQUIRE(pool.initializeDevice(spec, allocator).ok());
+    RTX_REQUIRE(pool.initializeDevice(spec, allocator).has_value());
     RTX_CHECK(pool.deviceBacked());
     RTX_CHECK_EQ(pool.capacity(), static_cast<size_t>(4));
     RTX_CHECK_EQ(state.allocations, static_cast<size_t>(4));
@@ -327,7 +384,7 @@ RTX_TEST(vram_watermarks_65_percent) {
     // 12-slot encode pool: pause at 8/12 (66.7%), critical at 11/12 (91.7%).
     const PoolSpec spec = smallSpec(12);
     SurfacePool pool;
-    RTX_REQUIRE(pool.initialize(spec).ok());
+    RTX_REQUIRE(pool.initialize(spec).has_value());
     std::vector<SurfaceLease> leases;
     for (int i = 0; i < 7; ++i) {
         leases.push_back(pool.acquire());
@@ -343,5 +400,78 @@ RTX_TEST(vram_watermarks_65_percent) {
     leases.push_back(pool.acquire());
     RTX_CHECK_EQ(pool.used(), static_cast<size_t>(11));
     RTX_CHECK(pool.criticalWatermark());
+}
+
+RTX_TEST(scheduler_vram_watermark_tiers) {
+    BackpressureController controller;
+    uint64_t fallbacks = 0;
+    uint64_t restores = 0;
+    controller.setEmergencyFallback([&fallbacks]() { ++fallbacks; });
+    controller.setRestorePreferred([&restores]() { ++restores; });
+
+    constexpr uint64_t kTotal = 8ull * 1024 * 1024 * 1024;  // 8 GB
+    // Round up so byte granularity cannot place the sample below its threshold.
+    const auto bytes = [](double ratio) {
+        return static_cast<uint64_t>(std::ceil(static_cast<double>(kTotal) * ratio));
+    };
+
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Low);
+    controller.updateVramState(bytes(0.50), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Low);
+
+    // Low -> High at 70 %.
+    controller.updateVramState(bytes(0.69), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Low);
+    controller.updateVramState(bytes(0.70), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::High);
+    RTX_CHECK_EQ(fallbacks, static_cast<uint64_t>(0));
+    controller.updateVramState(bytes(0.81), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::High);
+
+    // High -> Critical at 82 %: the TensorRT RIFE engine is unloaded here.
+    controller.updateVramState(bytes(0.82), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Critical);
+    RTX_CHECK_EQ(fallbacks, static_cast<uint64_t>(1));
+
+    // A single dip below 55 % is not enough to restore: 300 consecutive
+    // samples (about 5 s at 60 Hz) are required.
+    controller.updateVramState(bytes(0.50), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Critical);
+    for (int sample = 0; sample < 298; ++sample) {
+        controller.updateVramState(bytes(0.50), kTotal);
+    }
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Critical);
+    RTX_CHECK_EQ(restores, static_cast<uint64_t>(0));
+    controller.updateVramState(bytes(0.50), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Low);
+    RTX_CHECK_EQ(restores, static_cast<uint64_t>(1));
+
+    // Any spike inside the stable window restarts the counter.
+    controller.updateVramState(bytes(0.90), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::High);
+    controller.updateVramState(bytes(0.81), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::High);
+    controller.updateVramState(bytes(0.82), kTotal);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Critical);
+    RTX_CHECK_EQ(fallbacks, static_cast<uint64_t>(2));
+    for (int sample = 0; sample < 200; ++sample) {
+        controller.updateVramState(bytes(0.40), kTotal);
+    }
+    controller.updateVramState(bytes(0.70), kTotal);  // > 55 %: reset
+    for (int sample = 0; sample < 200; ++sample) {
+        controller.updateVramState(bytes(0.40), kTotal);
+    }
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Critical);
+    RTX_CHECK_EQ(restores, static_cast<uint64_t>(1));
+
+    // A zero total (a driver that reports nothing) must not divide by zero.
+    controller.updateVramState(1024, 0);
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Critical);
+
+    RTX_CHECK_EQ(std::string(watermarkTierName(WatermarkTier::Low)), std::string("Low"));
+    RTX_CHECK_EQ(std::string(watermarkTierName(WatermarkTier::Critical)),
+                 std::string("Critical"));
+    controller.reset();
+    RTX_CHECK(controller.vramTier() == WatermarkTier::Low);
 }
 

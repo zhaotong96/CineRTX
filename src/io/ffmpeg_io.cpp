@@ -21,15 +21,15 @@
 
 #include "rtx/io.h"
 
-#include "bitstream.h"
-#include "memory_avio.h"
-#include "rtx/rational.h"
-
 #include <algorithm>
 #include <climits>
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <format>
+#include <limits>
+#include <memory>
 #include <sstream>
 #include <utility>
 
@@ -47,6 +47,11 @@ extern "C" {
 #include <libswresample/swresample.h>
 }
 
+#include "bitstream.h"
+#include "memory_avio.h"
+#include "rtx/rational.h"
+#include "rtx/status.h"
+
 namespace rtx {
 namespace {
 
@@ -58,15 +63,11 @@ std::string avErrorString(int error) {
     return buffer;
 }
 
-std::string pathExtension(const std::string& path) {
-    const size_t dot = path.find_last_of('.');
-    if (dot == std::string::npos) {
-        return {};
-    }
-    std::string extension = path.substr(dot);
-    std::transform(extension.begin(), extension.end(), extension.begin(),
+std::string pathExtension(const std::filesystem::path& p) {
+    std::string ext = p.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return static_cast<char>(c | 0x20); });
-    return extension;
+    return ext;
 }
 
 VideoCodec codecFromAv(AVCodecID id) {
@@ -180,8 +181,12 @@ Hdr10Metadata hdrFromSideData(const AVCodecParameters& parameters) {
                    side.size >= sizeof(AVContentLightMetadata)) {
             AVContentLightMetadata light{};
             std::memcpy(&light, side.data, sizeof(light));
-            hdr.cll.max_cll = light.MaxCLL;
-            hdr.cll.max_fall = light.MaxFALL;
+            const auto toContentLightLevel = [](std::uint32_t value) {
+                return static_cast<std::uint16_t>(std::min<std::uint32_t>(
+                    value, std::numeric_limits<std::uint16_t>::max()));
+            };
+            hdr.cll.max_cll = toContentLightLevel(light.MaxCLL);
+            hdr.cll.max_fall = toContentLightLevel(light.MaxFALL);
             hdr.enabled = true;
         }
     }
@@ -314,7 +319,7 @@ public:
 
     ~FfmpegDemuxer() override { close(); }
 
-    Result<MediaInfo> open(const std::string& path) override {
+    Result<MediaInfo> open(const std::filesystem::path& path) override {
         close();
         if (memory_source_) {
             // Zero-disk path: `path` is a container-name hint only.  No file is
@@ -323,8 +328,8 @@ public:
                 std::span<const uint8_t>(memory_bytes_.data(), memory_bytes_.size()));
             if (!memory_avio_->valid()) {
                 close();
-                return Result<MediaInfo>::fail(ErrorCode::OutOfMemory,
-                                               "cannot allocate the in-memory AVIO context");
+                return err(ErrorCode::OutOfMemory,
+                           "cannot allocate the in-memory AVIO context");
             }
             // The AVIO context must be attached to a freshly allocated
             // AVFormatContext *before* avformat_open_input(); passing it
@@ -332,24 +337,25 @@ public:
             format_ = avformat_alloc_context();
             if (format_ == nullptr) {
                 close();
-                return Result<MediaInfo>::fail(ErrorCode::OutOfMemory,
-                                               "cannot allocate AVFormatContext");
+                return err(ErrorCode::OutOfMemory,
+                           "cannot allocate AVFormatContext");
             }
             format_->pb = memory_avio_->raw();
             format_->flags |= AVFMT_FLAG_CUSTOM_IO;
             const int memory_status = avformat_open_input(&format_, nullptr, nullptr, nullptr);
             if (memory_status < 0) {
                 close();
-                return Result<MediaInfo>::fail(ErrorCode::Io,
-                                               "cannot open in-memory media container",
-                                               avErrorString(memory_status));
+                return err(ErrorCode::Io,
+                           "cannot open in-memory media container",
+                           avErrorString(memory_status));
             }
         } else {
-            const int status = avformat_open_input(&format_, path.c_str(), nullptr, nullptr);
+            const std::string path_str = path.string();
+            const int status = avformat_open_input(&format_, path_str.c_str(), nullptr, nullptr);
             if (status < 0) {
-                return Result<MediaInfo>::fail(ErrorCode::Io,
-                                               "cannot open media container: " + path,
-                                               avErrorString(status));
+                return err(ErrorCode::Io,
+                           "cannot open media container: " + path_str,
+                           avErrorString(status));
             }
         }
         return finishOpen(path);
@@ -357,16 +363,16 @@ public:
 
     Result<Packet> readPacket() override {
         if (format_ == nullptr || video_stream_ < 0) {
-            return Result<Packet>::fail(ErrorCode::State, "demuxer is not open");
+            return err(ErrorCode::State, "demuxer is not open");
         }
         for (;;) {
             if (!pending_.empty()) {
                 Packet packet = std::move(pending_.front());
                 pending_.pop_front();
-                return Result<Packet>::ok(std::move(packet));
+                return packet;
             }
             if (drained_) {
-                return Result<Packet>::fail(ErrorCode::NotFound, "end of stream");
+                return err(ErrorCode::NotFound, "end of stream");
             }
             int status = av_read_frame(format_, packet_);
             if (status == AVERROR_EOF) {
@@ -377,11 +383,11 @@ public:
                     drainBitstreamFilter();
                     continue;
                 }
-                return Result<Packet>::fail(ErrorCode::NotFound, "end of stream");
+                return err(ErrorCode::NotFound, "end of stream");
             }
             if (status < 0) {
-                return Result<Packet>::fail(ErrorCode::Io, "cannot read packet",
-                                            avErrorString(status));
+                return err(ErrorCode::Io, "cannot read packet",
+                           avErrorString(status));
             }
             if (packet_->stream_index == audio_stream_) {
                 // Multi-track audio is delivered to the phase-3 audio pipeline;
@@ -401,8 +407,8 @@ public:
                 status = av_bsf_send_packet(bitstream_filter_, packet_);
                 av_packet_unref(packet_);
                 if (status < 0) {
-                    return Result<Packet>::fail(ErrorCode::Io, "bitstream filter rejected packet",
-                                                avErrorString(status));
+                    return err(ErrorCode::Io, "bitstream filter rejected packet",
+                               avErrorString(status));
                 }
                 drainBitstreamFilter();
                 continue;
@@ -417,20 +423,20 @@ public:
     int audioStreamIndex() const noexcept override { return audio_stream_; }
 
 private:
-    Result<MediaInfo> finishOpen(const std::string& path) {
+    Result<MediaInfo> finishOpen(const std::filesystem::path& path) {
         int status = avformat_find_stream_info(format_, nullptr);
         if (status < 0) {
             close();
-            return Result<MediaInfo>::fail(ErrorCode::Io, "cannot read stream information",
-                                           avErrorString(status));
+            return err(ErrorCode::Io, "cannot read stream information",
+                       avErrorString(status));
         }
 
         const int stream_index = av_find_best_stream(format_, AVMEDIA_TYPE_VIDEO, -1, -1,
                                                      nullptr, 0);
         if (stream_index < 0) {
             close();
-            return Result<MediaInfo>::fail(ErrorCode::InvalidArgument,
-                                           "container has no decodable video stream");
+            return err(ErrorCode::InvalidArgument,
+                       "container has no decodable video stream");
         }
         video_stream_ = stream_index;
         audio_stream_ = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
@@ -488,13 +494,13 @@ private:
         packet_ = av_packet_alloc();
         if (packet_ == nullptr) {
             close();
-            return Result<MediaInfo>::fail(ErrorCode::Io, "out of memory for AVPacket");
+            return err(ErrorCode::Io, "out of memory for AVPacket");
         }
 
         AVPacket* probe = av_packet_alloc();
         if (probe == nullptr) {
             close();
-            return Result<MediaInfo>::fail(ErrorCode::Io, "out of memory for AVPacket");
+            return err(ErrorCode::Io, "out of memory for AVPacket");
         }
         bool packets_are_annex_b = false;
         bool probe_valid = false;
@@ -537,7 +543,7 @@ private:
             }
         }
         av_packet_free(&probe);
-        return Result<MediaInfo>::ok(info_);
+        return info_;
     }
 
     void configureBitstreamFilter(const char* name) {
@@ -576,8 +582,8 @@ private:
     }
 
     // Projects a container timestamp onto the Flicks axis and repairs a
-    // regression.  Returns the (possibly repaired) Flicks value; `valid` is
-    // false when the container supplies no timestamp at all.
+    // regression for monotonic streams (e.g. audio). Returns the (possibly repaired)
+    // Flicks value; `valid` is false when the container supplies no timestamp at all.
     int64_t projectWithTimebase(const AVPacket& source, Rational time_base,
                                 FlicksDriftCompensator& drift, FlicksMonotonicGuard& guard,
                                 bool* valid) {
@@ -591,6 +597,22 @@ private:
             static_cast<uint32_t>(time_base.den)));
     }
 
+    // Projects a video packet presentation timestamp (PTS) onto the Flicks timeline.
+    // In demuxed packet streams with B-frames, packet delivery strictly follows
+    // decoding order (DTS), causing valid presentation timestamps (PTS) to be non-monotonic.
+    // Video PTS must be preserved without monotonic clamping.
+    int64_t projectVideoPtsToFlicks(int64_t pts, Rational time_base,
+                                    FlicksDriftCompensator& drift, bool* valid) {
+        if (pts == AV_NOPTS_VALUE || !time_base.valid()) {
+            *valid = false;
+            return 0;
+        }
+        *valid = true;
+        return drift.rescaleToFlicks(
+            pts, static_cast<uint32_t>(time_base.num),
+            static_cast<uint32_t>(time_base.den));
+    }
+
     Packet convertPacket(const AVPacket& source) {
         Packet packet;
         packet.data.assign(source.data, source.data + source.size);
@@ -600,8 +622,8 @@ private:
         packet.keyframe = (source.flags & AV_PKT_FLAG_KEY) != 0;
         packet.stream_index = source.stream_index;
         packet.time_base = info_.time_base;
-        packet.pts_flicks = projectWithTimebase(source, info_.time_base, video_drift_,
-                                                video_guard_, &packet.flicks_valid);
+        packet.pts_flicks = projectVideoPtsToFlicks(source.pts, info_.time_base, video_drift_,
+                                                    &packet.flicks_valid);
         return packet;
     }
 
@@ -663,15 +685,16 @@ public:
 
     ~FfmpegMuxer() override { (void)finalize(); }
 
-    Status open(const std::string& path, const MediaInfo& info,
-                const Hdr10Metadata& hdr) override {
+    Result<void> open(const std::filesystem::path& path, const MediaInfo& info,
+                      const Hdr10Metadata& hdr) override {
+        const std::string path_str = path.string();
         if (format_ != nullptr) {
-            return Status::fail(ErrorCode::State, "muxer is already open", path);
+            return err(ErrorCode::State, "muxer is already open", path_str);
         }
         const AVCodecID codec = codecToAv(info.codec);
         if (codec == AV_CODEC_ID_NONE) {
-            return Status::fail(ErrorCode::InvalidArgument,
-                                "unsupported output video codec", path);
+            return err(ErrorCode::InvalidArgument,
+                       "unsupported output video codec", path_str);
         }
         const bool in_memory = memory_target_ != nullptr;
         int status = in_memory
@@ -680,15 +703,15 @@ public:
                                memory_format_.empty() ? "matroska" : memory_format_.c_str(),
                                nullptr)
                          : avformat_alloc_output_context2(&format_, nullptr, nullptr,
-                                                          path.c_str());
+                                                          path_str.c_str());
         if (format_ == nullptr) {
-            return Status::fail(ErrorCode::Io, "cannot create output context",
-                                avErrorString(status));
+            return err(ErrorCode::Io, "cannot create output context",
+                       avErrorString(status));
         }
         stream_ = avformat_new_stream(format_, nullptr);
         if (stream_ == nullptr) {
             close();
-            return Status::fail(ErrorCode::Io, "cannot create output stream");
+            return err(ErrorCode::Io, "cannot create output stream");
         }
         AVCodecParameters* parameters = stream_->codecpar;
         parameters->codec_type = AVMEDIA_TYPE_VIDEO;
@@ -700,14 +723,14 @@ public:
         colorToAv(info.color, *parameters);
         if (info.extradata.empty()) {
             close();
-            return Status::fail(ErrorCode::InvalidArgument,
-                                "muxer requires a codec configuration record", path);
+            return err(ErrorCode::InvalidArgument,
+                       "muxer requires a codec configuration record", path_str);
         }
         parameters->extradata = static_cast<uint8_t*>(
             av_mallocz(info.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
         if (parameters->extradata == nullptr) {
             close();
-            return Status::fail(ErrorCode::OutOfMemory, "cannot allocate codec extradata");
+            return err(ErrorCode::OutOfMemory, "cannot allocate codec extradata");
         }
         std::memcpy(parameters->extradata, info.extradata.data(), info.extradata.size());
         parameters->extradata_size = static_cast<int>(info.extradata.size());
@@ -728,8 +751,8 @@ public:
         // side data of the output stream.  Adding it here (before
         // avformat_write_header) is the only point where movenc will emit it.
         if (hdr.enabled) {
-            const Status side = applyHdrSideData(hdr);
-            if (!side.ok()) {
+            const Result<void> side = applyHdrSideData(hdr);
+            if (!side.has_value()) {
                 close();
                 return side;
             }
@@ -739,29 +762,29 @@ public:
             memory_avio_ = std::make_unique<io::MemoryAvioContext>(memory_target_);
             if (!memory_avio_->valid()) {
                 close();
-                return Status::fail(ErrorCode::OutOfMemory,
-                                    "cannot allocate the in-memory AVIO context");
+                return err(ErrorCode::OutOfMemory,
+                           "cannot allocate the in-memory AVIO context");
             }
             format_->pb = memory_avio_->raw();
             format_->flags |= AVFMT_FLAG_CUSTOM_IO;
         } else {
-            status = avio_open(&format_->pb, path.c_str(), AVIO_FLAG_WRITE);
+            status = avio_open(&format_->pb, path_str.c_str(), AVIO_FLAG_WRITE);
             if (status < 0) {
                 close();
-                return Status::fail(ErrorCode::Io, "cannot open output file",
-                                    path + ": " + avErrorString(status));
+                return err(ErrorCode::Io, "cannot open output file",
+                           path_str + ": " + avErrorString(status));
             }
         }
         status = avformat_write_header(format_, nullptr);
         if (status < 0) {
             close();
-            return Status::fail(ErrorCode::Io, "cannot write container header",
-                                avErrorString(status));
+            return err(ErrorCode::Io, "cannot write container header",
+                       avErrorString(status));
         }
         packet_ = av_packet_alloc();
         if (packet_ == nullptr) {
             close();
-            return Status::fail(ErrorCode::OutOfMemory, "cannot allocate output packet");
+            return err(ErrorCode::OutOfMemory, "cannot allocate output packet");
         }
         annex_b_ = info.annex_b;
         container_ = info.format_name.empty()
@@ -769,12 +792,12 @@ public:
                          : info.format_name;
         hdr_ = hdr;
         opened_ = true;
-        return Status::success();
+        return {};
     }
 
-    Status writePacket(const Packet& packet) override {
+    Result<void> writePacket(const Packet& packet) override {
         if (!opened_ || format_ == nullptr || stream_ == nullptr) {
-            return Status::fail(ErrorCode::State, "muxer is not open");
+            return err(ErrorCode::State, "muxer is not open");
         }
         const bool native_annexb = container_.find("mpegts") != std::string::npos ||
                                    container_.find("m2ts") != std::string::npos ||
@@ -793,12 +816,12 @@ public:
             size = converted.size();
         }
         if (size > static_cast<size_t>(INT_MAX)) {
-            return Status::fail(ErrorCode::InvalidArgument, "packet is too large");
+            return err(ErrorCode::InvalidArgument, "packet is too large");
         }
         av_packet_unref(packet_);
         int status = av_new_packet(packet_, static_cast<int>(size));
         if (status < 0) {
-            return Status::fail(ErrorCode::OutOfMemory, "cannot allocate output packet");
+            return err(ErrorCode::OutOfMemory, "cannot allocate output packet");
         }
         std::memcpy(packet_->data, data, size);
         packet_->stream_index = stream_->index;
@@ -812,19 +835,19 @@ public:
         status = av_interleaved_write_frame(format_, packet_);
         av_packet_unref(packet_);
         if (status < 0) {
-            return Status::fail(ErrorCode::Io, "cannot write video packet",
-                                avErrorString(status));
+            return err(ErrorCode::Io, "cannot write video packet",
+                       avErrorString(status));
         }
-        return Status::success();
+        return {};
     }
 
-    Status finalize() override {
-        Status result = Status::success();
+    Result<void> finalize() override {
+        Result<void> result;
         if (format_ != nullptr && opened_) {
             const int status = av_write_trailer(format_);
             if (status < 0) {
-                result = Status::fail(ErrorCode::Io, "cannot finalise container",
-                                      avErrorString(status));
+                result = err(ErrorCode::Io, "cannot finalise container",
+                             avErrorString(status));
             }
             if (memory_avio_ != nullptr) {
                 avio_flush(memory_avio_->raw());
@@ -835,22 +858,14 @@ public:
     }
 
 private:
-    // Serialises the canonical HDR10 metadata into the two side-data structs
-    // movenc turns into the mdcv and clli boxes.  Chromaticity is stored in
-    // 0.00002 units and luminance in 0.0001 cd/m^2, so 50000 / 10000 are the
-    // exact rational denominators.
-    //
-    // Failure is fatal for an HDR10 output: shipping a PQ bitstream whose
-    // container has no mdcv/clli would produce a file that most players refuse
-    // to badge as HDR10, which is exactly the failure this engine must prevent.
-    Status applyHdrSideData(const Hdr10Metadata& hdr) {
+    Result<void> applyHdrSideData(const Hdr10Metadata& hdr) {
         AVCodecParameters* parameters = stream_->codecpar;
         size_t size = 0;
         AVMasteringDisplayMetadata* mastering =
             av_mastering_display_metadata_alloc_size(&size);
         if (mastering == nullptr) {
-            return Status::fail(ErrorCode::OutOfMemory,
-                                "cannot allocate mastering-display side data");
+            return err(ErrorCode::OutOfMemory,
+                       "cannot allocate mastering-display side data");
         }
         const MasteringDisplay& m = hdr.mastering;
         mastering->display_primaries[0][0] = av_make_q(m.red_x, 50000);
@@ -870,14 +885,14 @@ private:
                                     AV_PKT_DATA_MASTERING_DISPLAY_METADATA, mastering, size,
                                     0) == nullptr) {
             av_free(mastering);
-            return Status::fail(ErrorCode::OutOfMemory,
-                                "cannot attach mastering-display side data");
+            return err(ErrorCode::OutOfMemory,
+                       "cannot attach mastering-display side data");
         }
 
         AVContentLightMetadata* light = av_content_light_metadata_alloc(&size);
         if (light == nullptr) {
-            return Status::fail(ErrorCode::OutOfMemory,
-                                "cannot allocate content-light side data");
+            return err(ErrorCode::OutOfMemory,
+                       "cannot allocate content-light side data");
         }
         light->MaxCLL = hdr.cll.max_cll;
         light->MaxFALL = hdr.cll.max_fall;
@@ -886,10 +901,10 @@ private:
                                     AV_PKT_DATA_CONTENT_LIGHT_LEVEL, light, size, 0) ==
             nullptr) {
             av_free(light);
-            return Status::fail(ErrorCode::OutOfMemory,
-                                "cannot attach content-light side data");
+            return err(ErrorCode::OutOfMemory,
+                       "cannot attach content-light side data");
         }
-        return Status::success();
+        return {};
     }
 
     void close() {

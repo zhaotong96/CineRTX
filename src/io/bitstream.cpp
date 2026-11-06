@@ -4,7 +4,10 @@
 #include "bitstream.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <span>
+#include <vector>
 
 namespace rtx {
 namespace {
@@ -519,9 +522,10 @@ void appendBe32(std::vector<uint8_t>& out, uint32_t value) {
 
 }  // namespace
 
-std::vector<std::vector<uint8_t>> splitAnnexB(const uint8_t* data, size_t size) {
+std::vector<std::vector<uint8_t>> splitAnnexB(std::span<const uint8_t> data) {
     std::vector<std::vector<uint8_t>> units;
-    if (data == nullptr || size < 3) {
+    const size_t size = data.size();
+    if (size < 3) {
         return units;
     }
     size_t nal_start = kNoPosition;
@@ -534,7 +538,7 @@ std::vector<std::vector<uint8_t>> splitAnnexB(const uint8_t* data, size_t size) 
                     --end;
                 }
                 if (end > nal_start) {
-                    units.emplace_back(data + nal_start, data + end);
+                    units.emplace_back(data.begin() + nal_start, data.begin() + end);
                 }
             }
             i += 3;
@@ -549,18 +553,28 @@ std::vector<std::vector<uint8_t>> splitAnnexB(const uint8_t* data, size_t size) 
             --end;
         }
         if (end > nal_start) {
-            units.emplace_back(data + nal_start, data + end);
+            units.emplace_back(data.begin() + nal_start, data.begin() + end);
         }
     }
     return units;
 }
 
-bool looksLikeAnnexB(const uint8_t* data, size_t size) {
-    if (data == nullptr || size < 3) {
+std::vector<std::vector<uint8_t>> splitAnnexB(const uint8_t* data, size_t size) {
+    if (data == nullptr || size == 0) return {};
+    return splitAnnexB(std::span<const uint8_t>(data, size));
+}
+
+bool looksLikeAnnexB(std::span<const uint8_t> data) {
+    if (data.size() < 3) {
         return false;
     }
     return (data[0] == 0 && data[1] == 0 && data[2] == 1) ||
-           (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1);
+           (data.size() >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1);
+}
+
+bool looksLikeAnnexB(const uint8_t* data, size_t size) {
+    if (data == nullptr || size == 0) return false;
+    return looksLikeAnnexB(std::span<const uint8_t>(data, size));
 }
 
 std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {

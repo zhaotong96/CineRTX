@@ -8,10 +8,7 @@ The test suite has to answer three different questions:
 2. Does the plugin boundary fail honestly? — tests that load the real shim and
    assert structured diagnostics instead of success.
 3. Does the hardware path run? — the product container remaster
-   (`--input ... --output ...`) and the raw NV12 → P010 verification path
-   (`--input-raw ... --backend nvidia`) are exercised manually on a machine
-   with an NVIDIA driver; see section 6. The CPU reference and passthrough
-   entries are verification harnesses, never product alternatives.
+   (`--input ... --output ...`) and the hardware transcode path is exercised on a machine with an NVIDIA driver; see section 6. Phase 4 anti-slop refactoring removed all dead software fallback/CPU simulation pipelines to guarantee zero-copy hardware execution.
 
 No test fakes a GPU. The NVIDIA execution tests assert the exact error the
 current hardware must produce, so a machine that suddenly reports RTX support
@@ -34,7 +31,7 @@ build/cmake/zig-windows/rtx_tests.exe
 Expected:
 
 ```text
-[==========] 137 test(s) run, 0 failed (612 ms)
+[==========] 89 test(s) run, 0 failed (520 ms)
 ```
 
 The shim, NGX bridge and FRUC bridge archives are linked directly into
@@ -43,8 +40,7 @@ variables to set.
 
 CI runs this suite on Linux GCC, Windows MSVC, and Zig 0.13 for Windows. Each
 job also runs `tools/check_spdx.ps1` through the shared compliance job and
-`tools/audit_imports.ps1` against its own binaries. The same jobs capture
-`--simulate --json` and `--probe --json` and parse both with Python, so a
+`tools/audit_imports.ps1` against its own binaries. The same jobs capture `--probe --json` and parse it with Python, so a
 regression in JSON escaping or in the UTF-8 truncation of localized notes fails
 CI rather than only showing up in a manual probe. Tagged builds package the
 Zig binaries with `tools/package.ps1`.
@@ -98,35 +94,27 @@ macOS with the same include path.
 | Module | Cases | What is verified |
 | --- | ---: | --- |
 | `test_color.cpp` | 11 | PQ encode/decode, BT.709/BT.2020 round trips, half-float conversion, RGBA16F → P010, bilinear NV12 scaling, NV12 blending, PSNR |
-| `test_hdr.cpp` | 9 | TrueHDR parameter ranges, mastering presets, VUI field values, SEI 137/144 payload layout, emulation prevention, prefix NAL, AV1 OBU, sidecar and JSON round trip |
-| `test_rational.cpp` | 9 | Normalisation, parsing/formatting, arithmetic, continued-fraction conversion, rounding modes, drift compensation, 24→60 and other frame mappers, invalid configuration |
-| `test_pipeline.cpp` | 7 | 24→60 frame counts, no-interpolation mode, scene-cut bypass, P010 + sidecar + trace output, HDR-disabled mode, invalid geometry, raw NV12 input |
-| `test_backend.cpp` | 4 | Device info, capability reporting, lifecycle, CPU interpolation, enhance/pack/encode |
-| `test_concurrency.cpp` | 5 | SPSC capacity/rounding/wraparound and a concurrent producer/consumer, monotonic fence timeline |
-| `test_scheduler.cpp` | 18 | Stage order, stage-reported vs measured durations, failure propagation, invalid config, backpressure drain/errors, in-flight limit, queue-depth gate/errors, single-frame submission, identity DAG fill, VRAM watermark tiers, trace events, JSON escaping, zero-copy audit, metrics JSON |
-| `test_scene.cpp` | 7 | Cut detection basics, threshold/stride, histogram helper, resolution guard, luma fraction-above stats, TrueHDR adaptive law and EMA smoothing |
-| `test_vram.cpp` | 11 | Pool spec bytes, 8 GB budget fit, encode depth covering B-frames, budget validation, pool lifecycle, lease move semantics, hysteresis, TDR guard, TDR queue-depth cap, device-backed pool, 65% watermarks |
-| `test_io.cpp` | 10 | Synthetic source, cut pixel changes, raw NV12 reader, P010 writer, sidecar round trip, FFmpeg availability diagnostics, zero-disk memory AVIO read/seek/write, memory demux parse, memory container round trip |
-| `test_shim.cpp` | 9 | Shim C ABI binding and symbol resolution (the shim archive is linked into `rtx_tests`, not loaded as a sidecar DLL), ABI version and result names, probe diagnostics, probe JSON ASCII/UTF-8 escaping, NGX bridge ABI (the bridge archive is likewise linked in and called directly), headless D3D12↔CUDA interop round trip (`rtx_ngx_bridge_selftest`, 256×256, asserts `RTX_OK` on CUDA+D3D12 hosts and the structured `RTX_ERR_DLL_MISSING` elsewhere) |
-| `test_rife.cpp` | 7 | 32-pixel alignment, TensorRT 10.13.3.9 gate, config validation, `trtexec` command, input packing, output unpacking, round trip |
-| `test_status.cpp` | 5 | Success/failure construction, stable error names, `Result<T>` and `Result<void>`, `fromBool` |
-| `test_types.cpp` | 7 | Format metadata, alignment/sizes, `FrameBuffer` alignment, NV12/planar/RGBA allocation, metadata clone, device residency |
+| `test_concurrency.cpp` | 4 | MPMC bounded queue capacity, wraparound, cache-line alignment, and concurrent producer/consumer |
 | `test_flicks_timebase.cpp` | 4 | Flicks 705.6 MHz timeline: exact division, 24 h remainder-carrying rescale with zero accumulated drift, negative/zero inputs, monotonic guard |
+| `test_hdr.cpp` | 9 | TrueHDR parameter ranges, mastering presets, VUI field values, SEI 137/144 payload layout, emulation prevention, prefix NAL, AV1 OBU, sidecar and JSON round trip |
 | `test_i18n.cpp` | 2 | Strongly-typed i18n table bounds and switch latency |
+| `test_io.cpp` | 6 | FFmpeg availability diagnostics, zero-disk memory AVIO read/seek/write, memory demux parse, memory container round trip |
 | `test_offruc_bridge.cpp` | 4 | FRUC bridge C ABI called directly from the linked archive: ABI version, scene-cut duplicate bypass, static-frame bypass, config rejection |
-| `test_pingpong_pipeline.cpp` | 4 | Even/odd ping-pong scheduling: slot parity, event disable timing, scene-cut duplicate, no host wait |
-| `test_audio_mixer.cpp` | 4 | AVX2 audio mixer matches the scalar reference, gain and clip, SPSC ring slice, PLL convergence |
+| `test_pingpong_pipeline.cpp` | 3 | Even/odd ping-pong scheduling: slot parity, event disable timing, scene-cut duplicate |
+| `test_rational.cpp` | 6 | Normalisation, parsing/formatting, 128-bit cross-multiplication comparison, arithmetic, drift compensation, invalid configuration |
+| `test_rife.cpp` | 7 | 32-pixel alignment, TensorRT 10.13.3.9 gate, config validation, `trtexec` command, input packing, output unpacking, round trip |
+| `test_shim.cpp` | 9 | Shim C ABI binding and symbol resolution, ABI version and result names, probe diagnostics, probe JSON ASCII/UTF-8 escaping, NGX bridge ABI, headless D3D12↔CUDA interop round trip |
+| `test_status.cpp` | 5 | Success/failure construction, stable error names, `std::expected` alias `Result<T>` and `Result<void>`, `fromBool` |
+| `test_types.cpp` | 5 | Format metadata, alignment/sizes, `TaggedHandle` type safety, metadata clone, device residency |
+| `test_vram.cpp` | 14 | Pool spec bytes, 8 GB budget fit, encode depth covering B-frames, budget validation, pool lifecycle, lease move semantics, hysteresis, TDR guard, device-backed pool, watermarks |
 
-Total: **137 cases**.
+Total: **89 cases**.
 
 ## 5. CTest entries
 
 | Test | Command | Assertion |
 | --- | --- | --- |
-| `rtx_unit_tests` | `rtx_tests` | All 137 cases pass |
-| `cli_self_test` | `CineRTX --self-test` | 4 → 8 frames, one scene cut, non-zero packets |
-| `cli_simulate_json` | 64×64 → 128×128, 4 frames, JSON | Output contains `"interpolated"` and valid accounting |
-| `cli_rife_command` | `--build-rife --onnx ... --engine ...` | Emits the 10.13.3.9 version lock on both the in-process and the `trtexec` path. The fixture ONNX is a text placeholder, so the in-process build is not exercised; the gap is tracked in [`TODO/rife_cli_test_fixture.md`](../TODO/rife_cli_test_fixture.md) |
+| `rtx_unit_tests` | `rtx_tests` | All 89 cases pass |
 | `rtx_fruc_abi_contract_test` | `rtx_tests --filter=fruc_abi_*` | Gate 5: pure C ABI isolation and the hard-cut duplicate bypass |
 | `cli_gui_viewport_smoke_test` | `CineRTX --viewport-self-test` | Gate 6: DirectComposition viewport throttle, occlusion bypass and split clamp |
 

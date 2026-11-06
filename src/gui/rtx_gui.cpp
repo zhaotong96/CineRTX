@@ -1,24 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
-//
-// Immediate-mode Win32 GUI for the single-exe build.  The window owns no child
-// controls: every frame is composed into one off-screen bitmap and blitted in a
-// single BitBlt.  The transcode worker and the message pump only share the
-// cache-line aligned telemetry blocks below.
-//
-// Phase-3 additions (W7-3, W9-1, W9-2):
-//   * every user-visible string comes from rtx::trW(); there is not one literal
-//     CJK character left in this file;
-//   * Ctrl+L flips the language atomically and repaints;
-//   * a four-slot status bar (hardware / NGX / FRUC / telemetry) sits at the
-//     bottom edge and is fed only by lock-free atomic reads;
-//   * the DirectComposition viewport is created lazily and is opt-in
-//     (RTX_GUI_ENABLE_VIEWPORT=1) because the shipping single-EXE build has no
-//     video texture source until the NGX bridge hands one over.
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -28,6 +10,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
 #endif
@@ -35,8 +20,20 @@
 #define WINVER 0x0A00
 #endif
 
+#if defined(RTX_HAVE_DCOMP_VIEWPORT)
+#include "dcomp_viewport.h"
+#endif
+#include "rtx/hw_transcode.h"
+#include "rtx/i18n.h"
+#include "rtx/runtime_env.h"
+#include "rtx/ngx_remaster.h"
+#include "rtx/nvidia_shim.h"
+#include "rtx/types.h"
+#include "rtx/vram_pool.h"
+
 #include <windows.h>
 #include <windowsx.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 
@@ -44,27 +41,23 @@
 #undef small
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
 #include <cwchar>
+#include <filesystem>
+#include <format>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
-#include "rtx/hw_transcode.h"
-#include "rtx/i18n.h"
-#include "rtx/ngx_remaster.h"
-#include "rtx/nvidia_shim.h"
-#include "rtx/scheduler.h"
-#include "rtx/types.h"
-
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-#include "dcomp_viewport.h"
-#endif
 
 int rtxCliMain(int argc, char** argv);
 
@@ -79,10 +72,60 @@ constexpr UINT kMsgAutostart = WM_APP + 3;
 // so a healthy system never wakes the paint path (FMEA-03).
 constexpr UINT kMsgDiagnostics = WM_APP + 4;
 
+}  // namespace
+
+namespace rtx {
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
+struct alignas(64) TelemetrySnapshot {
+    std::atomic<uint64_t> frames_decoded{0};
+    std::atomic<uint64_t> frames_interpolated{0};
+    std::atomic<uint64_t> frames_encoded{0};
+    std::atomic<uint64_t> scene_cuts_bypassed{0};
+    std::atomic<uint64_t> vram_used_bytes{0};
+    std::atomic<uint64_t> vram_total_bytes{0};
+    std::atomic<uint64_t> device_to_host_bytes{0};
+    std::atomic<uint32_t> ewma_fps_x10{0};
+    std::atomic<uint32_t> pack_stage_us{0};
+    std::atomic<int32_t> av_sync_drift_us{0};
+    std::atomic<uint8_t> active_fruc_mode{0};
+    std::atomic<uint8_t> watermark_tier{0};
+    std::atomic<uint8_t> ngx_ready{0};
+    std::atomic<uint8_t> hardware_ready{0};
+
+    void reset() noexcept {
+        frames_decoded.store(0, std::memory_order_relaxed);
+        frames_interpolated.store(0, std::memory_order_relaxed);
+        frames_encoded.store(0, std::memory_order_relaxed);
+        scene_cuts_bypassed.store(0, std::memory_order_relaxed);
+        vram_used_bytes.store(0, std::memory_order_relaxed);
+        device_to_host_bytes.store(0, std::memory_order_relaxed);
+        ewma_fps_x10.store(0, std::memory_order_relaxed);
+        pack_stage_us.store(0, std::memory_order_relaxed);
+        av_sync_drift_us.store(0, std::memory_order_relaxed);
+        active_fruc_mode.store(0, std::memory_order_relaxed);
+        watermark_tier.store(0, std::memory_order_relaxed);
+    }
+};
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+}  // namespace rtx
+
+namespace {
+
 // Phase-3 lock-free telemetry block (rtx::TelemetrySnapshot) plus the handful
 // of job-state counters the window owns.
 rtx::TelemetrySnapshot g_telemetry;
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324) // Intentional cache-line isolation for job telemetry.
+#endif
 struct alignas(64) JobTelemetry {
     std::atomic<uint32_t> running{0};
     std::atomic<uint32_t> progressPermille{0};
@@ -91,6 +134,9 @@ struct alignas(64) JobTelemetry {
     std::atomic<uint64_t> totalFrames{0};
     std::atomic<uint64_t> elapsedMs{0};
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 static_assert(sizeof(JobTelemetry) % 64 == 0,
               "job telemetry must not share a cache line with unrelated state");
@@ -398,10 +444,6 @@ void enableDarkTitleBar(HWND hwnd) {
     SendMessageW(hwnd, WM_NCACTIVATE, TRUE, 0);
 }
 
-bool environmentFlag(const wchar_t* name) {
-    wchar_t value[8] = {};
-    return GetEnvironmentVariableW(name, value, 8) > 0 && value[0] == L'1';
-}
 
 bool componentPresent(const RtxDiagnostics& diagnostics, const char* needle) {
     for (uint32_t index = 0; index < diagnostics.component_count &&
@@ -534,37 +576,36 @@ double millisecondsSinceCreation() {
                : 0.0;
 }
 
-void writeStartupLog(HWND hwnd, bool painted) {
-    wchar_t logPath[1024] = {};
-    if (GetEnvironmentVariableW(L"RTX_GUI_STARTUP_LOG", logPath, 1024) > 0) {
-        const double elapsedMs = millisecondsSinceCreation();
+inline void debugTrace(const wchar_t* format, ...) {
+#if defined(_WIN32)
+    wchar_t buffer[1024];
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(buffer, sizeof(buffer) / sizeof(wchar_t), _TRUNCATE, format, args);
+    va_end(args);
+    ::OutputDebugStringW(buffer);
+#endif
+}
 
-        RECT client{};
-        GetClientRect(hwnd, &client);
-        char line[512] = {};
-        const int length =
-            painted ? std::snprintf(
-                          line, sizeof(line),
-                          "startup_ms=%.3f\r\ndpi=%u\r\nclient=%dx%d\r\nheadless=%d\r\n"
-                          "phases=main:%.2f,create:%.2f,update:%.2f\r\n"
-                          "paint=buffer:%.2f,draw:%.2f,blit:%.2f\r\n",
-                          elapsedMs, g_theme.dpi, static_cast<int>(client.right - client.left),
-                          static_cast<int>(client.bottom - client.top), g_headlessPaint ? 1 : 0,
-                          g_mainEntryMs, g_windowCreatedMs, g_updateMs,
-                          g_paintBufferMs, g_paintDrawMs, g_paintBlitMs)
-                    : std::snprintf(
-                          line, sizeof(line),
-                          "startup_ms=NA\r\npainted=0\r\ndpi=%u\r\nclient=%dx%d\r\nvisible=%d\r\n",
-                          g_theme.dpi, static_cast<int>(client.right - client.left),
-                          static_cast<int>(client.bottom - client.top),
-                          IsWindowVisible(hwnd) ? 1 : 0);
-        HANDLE file = CreateFileW(logPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file != INVALID_HANDLE_VALUE) {
-            DWORD written = 0;
-            WriteFile(file, line, static_cast<DWORD>(length), &written, nullptr);
-            CloseHandle(file);
-        }
+void writeStartupLog(HWND hwnd, bool painted) {
+    const double elapsedMs = millisecondsSinceCreation();
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    if (painted) {
+        debugTrace(
+            L"[CineRTX:GUI] startup_ms=%.3f dpi=%u client=%dx%d headless=%d "
+            L"phases=main:%.2f,create:%.2f,update:%.2f "
+            L"paint=buffer:%.2f,draw:%.2f,blit:%.2f\n",
+            elapsedMs, g_theme.dpi, static_cast<int>(client.right - client.left),
+            static_cast<int>(client.bottom - client.top), g_headlessPaint ? 1 : 0,
+            g_mainEntryMs, g_windowCreatedMs, g_updateMs,
+            g_paintBufferMs, g_paintDrawMs, g_paintBlitMs);
+    } else {
+        debugTrace(
+            L"[CineRTX:GUI] startup_ms=NA painted=0 dpi=%u client=%dx%d visible=%d\n",
+            g_theme.dpi, static_cast<int>(client.right - client.left),
+            static_cast<int>(client.bottom - client.top),
+            IsWindowVisible(hwnd) ? 1 : 0);
     }
 }
 
@@ -636,7 +677,7 @@ void drawStatusBar(HDC dc, const RECT& bar) {
     wchar_t telemetry[192] = {};
     std::swprintf(telemetry, 192, L"D2H: %llu B · VRAM: %ls (%ls) · %ls",
                   static_cast<unsigned long long>(d2h), formatVram(vram_used, vram_total).c_str(),
-                  utf8ToWide(rtx::watermarkTierName(tier)).c_str(), formatFps(fps).c_str());
+                  utf8ToWide(rtx::watermarkTierName(static_cast<rtx::WatermarkTier>(tier))).c_str(), formatFps(fps).c_str());
 
     RECT cell{bar.left, bar.top, bar.left + cellWidth, bar.bottom};
     drawStatusSlot(dc, cell, rtx::StrId::StatusHardware, hardware, kText);
@@ -862,31 +903,13 @@ struct JobSnapshot {
 };
 
 void writeResultLog(const WorkerResult& result, const JobSnapshot& job) {
-    wchar_t path[1024] = {};
-    if (GetEnvironmentVariableW(L"RTX_GUI_RESULT_LOG", path, 1024) == 0) {
-        return;
-    }
-    const std::string title = wideToUtf8(result.title);
-    const std::string detail = wideToUtf8(result.detail);
-    const std::string input = wideToUtf8(job.input);
-    const std::string output = wideToUtf8(job.output);
-    char line[4096] = {};
-    const int length = std::snprintf(
-        line, sizeof(line),
-        "ok=%d\r\ncancelled=%d\r\nframes=%llu\r\nelapsed_ms=%.3f\r\nzero_copy=%d\r\n"
-        "d2h_bytes=%llu\r\nh2d_bytes=%llu\r\ninput=%s\r\noutput=%s\r\ntitle=%s\r\n"
-        "detail=%s\r\n",
+    debugTrace(
+        L"[CineRTX:Bench] ok=%d cancelled=%d frames=%llu elapsed_ms=%.3f zero_copy=%d "
+        L"d2h_bytes=%llu h2d_bytes=%llu input=%s output=%s title=%s detail=%s\n",
         result.ok ? 1 : 0, result.cancelled ? 1 : 0,
         static_cast<unsigned long long>(result.frames), result.elapsedMs, result.zeroCopy,
         static_cast<unsigned long long>(result.d2h), static_cast<unsigned long long>(result.h2d),
-        input.c_str(), output.c_str(), title.c_str(), detail.c_str());
-    HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        WriteFile(file, line, static_cast<DWORD>(length), &written, nullptr);
-        CloseHandle(file);
-    }
+        job.input.c_str(), job.output.c_str(), result.title.c_str(), result.detail.c_str());
 }
 
 void runJob(JobSnapshot job) {
@@ -922,7 +945,7 @@ void runJob(JobSnapshot job) {
 
     const auto result = rtx::runNvidiaRemasterTranscode(options);
     WorkerResult completed;
-    if (result.ok()) {
+    if (result.has_value()) {
         const rtx::HwTranscodeReport& report = result.value();
         completed.ok = true;
         completed.zeroCopy = report.zero_copy_main_loop;
@@ -948,7 +971,7 @@ void runJob(JobSnapshot job) {
                                                std::memory_order_relaxed);
         g_telemetry.ewma_fps_x10.store(static_cast<uint32_t>(fps * 10.0),
                                        std::memory_order_relaxed);
-    } else if (result.code() == rtx::ErrorCode::State && g_cancel.load()) {
+    } else if (!result.has_value() && result.error().code == rtx::ErrorCode::State && g_cancel.load()) {
         completed.cancelled = true;
         completed.title = rtx::trW(rtx::StrId::StatusCancelled);
         completed.detail = job.input;
@@ -1030,6 +1053,28 @@ void setInput(const std::wstring& path) {
     setStatus(rtx::trW(rtx::StrId::StatusReady));
 }
 
+void chooseFile(HWND hwnd) {
+    if (g_job.running.load() != 0) {
+        return;
+    }
+    wchar_t filePath[32768] = {};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = static_cast<DWORD>(sizeof(filePath) / sizeof(wchar_t));
+    ofn.lpstrFilter =
+        L"Video Files (*.mp4;*.mkv;*.mov;*.avi;*.ts;*.webm)\0*.mp4;*.mkv;*.mov;*.avi;*.ts;*.webm\0All Files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (GetOpenFileNameW(&ofn) != 0) {
+        setInput(filePath);
+        startHardwareProbe();
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+}
+
 void updateFps() {
     static ULONGLONG lastTick = 0;
     static uint64_t lastFrames = 0;
@@ -1079,6 +1124,52 @@ void toggleLanguage(HWND hwnd) {
     g_dirty = true;
     InvalidateRect(hwnd, nullptr, FALSE);
 }
+
+namespace ui {
+
+struct StartJobEvent { HWND hwnd = nullptr; };
+struct CancelJobEvent {};
+struct NextPresetEvent {};
+struct ToggleLanguageEvent { HWND hwnd = nullptr; };
+struct JobCompletedEvent {};
+
+using EventMsg = std::variant<
+    StartJobEvent,
+    CancelJobEvent,
+    NextPresetEvent,
+    ToggleLanguageEvent,
+    JobCompletedEvent
+>;
+
+template <class... Ts>
+struct Overloaded : Ts... {
+    using Ts::operator()...;
+};
+template <class... Ts>
+Overloaded(Ts...) -> Overloaded<Ts...>;
+
+inline void dispatchEvent(const EventMsg& event) {
+    std::visit(Overloaded{
+        [](const StartJobEvent& ev) {
+            startJob(ev.hwnd);
+        },
+        [](const CancelJobEvent&) {
+            cancelJob();
+        },
+        [](const NextPresetEvent&) {
+            g_presetIndex = (g_presetIndex + 1) % 3;
+            g_dirty = true;
+        },
+        [](const ToggleLanguageEvent& ev) {
+            toggleLanguage(ev.hwnd);
+        },
+        [](const JobCompletedEvent&) {
+            showCompletedResult();
+        }
+    }, event);
+}
+
+}  // namespace ui
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -1169,13 +1260,16 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             if (g_zones.hit(g_zones.start, point)) {
                 if (g_job.running.load() != 0) {
-                    cancelJob();
+                    ui::dispatchEvent(ui::CancelJobEvent{});
+                } else if (g_inputPath.empty()) {
+                    chooseFile(hwnd);
                 } else {
-                    startJob(hwnd);
+                    ui::dispatchEvent(ui::StartJobEvent{hwnd});
                 }
             } else if (g_job.running.load() == 0 && g_zones.hit(g_zones.preset, point)) {
-                g_presetIndex = (g_presetIndex + 1) % 3;
-                g_dirty = true;
+                ui::dispatchEvent(ui::NextPresetEvent{});
+            } else if (g_job.running.load() == 0 && g_zones.hit(g_zones.drop, point)) {
+                chooseFile(hwnd);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -1192,7 +1286,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         case WM_KEYDOWN: {
             // Ctrl+L: atomic language flip, no restart, no re-layout.
             if (wParam == 'L' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
-                toggleLanguage(hwnd);
+                ui::dispatchEvent(ui::ToggleLanguageEvent{hwnd});
                 return 0;
             }
             break;
@@ -1203,7 +1297,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                 GetCursorPos(&point);
                 ScreenToClient(hwnd, &point);
                 if (g_zones.hit(g_zones.start, point) || g_zones.hit(g_zones.codec, point) ||
-                    g_zones.hit(g_zones.preset, point)) {
+                    g_zones.hit(g_zones.preset, point) || g_zones.hit(g_zones.drop, point)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
                 }
@@ -1239,11 +1333,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             }
             break;
         case kMsgDone:
-            showCompletedResult();
+            ui::dispatchEvent(ui::JobCompletedEvent{});
             InvalidateRect(hwnd, nullptr, FALSE);
-            if (environmentFlag(L"RTX_GUI_EXIT_ON_DONE")) {
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
             return 0;
         case kMsgAutostart:
             if (!g_autostartPath.empty()) {
@@ -1295,13 +1386,20 @@ int attachParentConsole() {
         }
         SetConsoleOutputCP(CP_UTF8);
         SetConsoleCP(CP_UTF8);
+        FILE* consoleStream = nullptr;
         if (!outputRedirected) {
-            std::freopen("CONOUT$", "w", stdout);
+            if (freopen_s(&consoleStream, "CONOUT$", "w", stdout) != 0) {
+                return -1;
+            }
         }
         if (!errorRedirected) {
-            std::freopen("CONOUT$", "w", stderr);
+            if (freopen_s(&consoleStream, "CONOUT$", "w", stderr) != 0) {
+                return -1;
+            }
         }
-        std::freopen("CONIN$", "r", stdin);
+        if (freopen_s(&consoleStream, "CONIN$", "r", stdin) != 0) {
+            return -1;
+        }
     }
     return 0;
 }
@@ -1309,22 +1407,12 @@ int attachParentConsole() {
 }  // namespace
 
 extern "C" int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    rtx::initRuntimeEnvironment();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_mainEntryMs = millisecondsSinceCreation();
-    g_selfTest = environmentFlag(L"RTX_GUI_SELFTEST");
-    wchar_t dpiValue[16] = {};
-    if (GetEnvironmentVariableW(L"RTX_GUI_FORCE_DPI", dpiValue, 16) > 0) {
-        const long parsed = std::wcstol(dpiValue, nullptr, 10);
-        if (parsed >= 72 && parsed <= 480) {
-            g_forcedDpi = static_cast<UINT>(parsed);
-        }
-    }
-    wchar_t autostartValue[1024] = {};
-    if (GetEnvironmentVariableW(L"RTX_GUI_AUTOSTART", autostartValue, 1024) > 0) {
-        g_autostartPath = autostartValue;
-    }
+    g_selfTest = false;
 #if defined(RTX_HAVE_DCOMP_VIEWPORT)
-    g_viewportRequested = environmentFlag(L"RTX_GUI_ENABLE_VIEWPORT");
+    g_viewportRequested = false;
 #endif
     g_gpuText = rtx::trW(rtx::StrId::StatusGpuProbing);
 
@@ -1336,6 +1424,12 @@ extern "C" int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCom
         for (int index = 0; index < argumentCount; ++index) {
             if (index > 0 && std::wcscmp(arguments[index], L"--gui") == 0) {
                 forceGui = true;
+                continue;
+            }
+            if (index > 0 && std::wcscmp(arguments[index], L"--viewport") == 0) {
+#if defined(RTX_HAVE_DCOMP_VIEWPORT)
+                g_viewportRequested = true;
+#endif
                 continue;
             }
             if (index > 0) {
@@ -1417,15 +1511,7 @@ extern "C" int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCom
         }
     }
     if (g_selfTest) {
-        UINT holdMs = 3000;
-        wchar_t holdValue[16] = {};
-        if (GetEnvironmentVariableW(L"RTX_GUI_SELFTEST_MS", holdValue, 16) > 0) {
-            const long parsed = std::wcstol(holdValue, nullptr, 10);
-            if (parsed >= 1000 && parsed <= 600000) {
-                holdMs = static_cast<UINT>(parsed);
-            }
-        }
-        SetTimer(hwnd, kExitTimer, holdMs, nullptr);
+        SetTimer(hwnd, kExitTimer, 3000, nullptr);
     }
     if (!g_autostartPath.empty()) {
         PostMessageW(hwnd, kMsgAutostart, 0, 0);

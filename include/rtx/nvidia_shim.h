@@ -39,8 +39,6 @@ public:
     RtxResult decoderReceive(RtxDecoder* decoder, RtxFrameDesc* frame) const;
     RtxResult decoderFlush(RtxDecoder* decoder) const;
     RtxResult decoderReleaseFrame(RtxDecoder* decoder, uint64_t slot_index) const;
-    RtxResult decoderDownload(RtxDecoder* decoder, const RtxFrameDesc* frame, uint8_t* destination,
-                              size_t destination_pitch) const;
     RtxResult decoderStats(RtxDecoder* decoder, RtxHwStats* stats) const;
     const char* decoderLastError(RtxDecoder* decoder) const;
 
@@ -48,8 +46,6 @@ public:
     void encoderDestroy(RtxEncoder* encoder) const;
     RtxResult encoderEncode(RtxEncoder* encoder, const RtxFrameDesc* frame,
                             RtxPacketDesc* packet) const;
-    RtxResult encoderEncodeHost(RtxEncoder* encoder, const uint8_t* data, uint32_t pitch,
-                                int32_t format, int64_t pts, RtxPacketDesc* packet) const;
     RtxResult encoderFlush(RtxEncoder* encoder, RtxPacketDesc* packet) const;
     RtxResult encoderSequenceHeader(RtxEncoder* encoder, uint8_t* buffer, size_t capacity,
                                     size_t* size) const;
@@ -77,8 +73,6 @@ private:
     RtxResult(RTX_SHIM_CALL* decoder_receive_)(RtxDecoder*, RtxFrameDesc*) = nullptr;
     RtxResult(RTX_SHIM_CALL* decoder_flush_)(RtxDecoder*) = nullptr;
     RtxResult(RTX_SHIM_CALL* decoder_release_)(RtxDecoder*, uint64_t) = nullptr;
-    RtxResult(RTX_SHIM_CALL* decoder_download_)(RtxDecoder*, const RtxFrameDesc*, uint8_t*,
-                                                size_t) = nullptr;
     RtxResult(RTX_SHIM_CALL* decoder_stats_)(RtxDecoder*, RtxHwStats*) = nullptr;
     const char*(RTX_SHIM_CALL* decoder_last_error_)(RtxDecoder*) = nullptr;
 
@@ -86,8 +80,6 @@ private:
     void(RTX_SHIM_CALL* encoder_destroy_)(RtxEncoder*) = nullptr;
     RtxResult(RTX_SHIM_CALL* encoder_encode_)(RtxEncoder*, const RtxFrameDesc*,
                                               RtxPacketDesc*) = nullptr;
-    RtxResult(RTX_SHIM_CALL* encoder_encode_host_)(RtxEncoder*, const uint8_t*, uint32_t, int32_t,
-                                                   int64_t, RtxPacketDesc*) = nullptr;
     RtxResult(RTX_SHIM_CALL* encoder_flush_)(RtxEncoder*, RtxPacketDesc*) = nullptr;
     RtxResult(RTX_SHIM_CALL* encoder_sequence_header_)(RtxEncoder*, uint8_t*, size_t,
                                                        size_t*) = nullptr;

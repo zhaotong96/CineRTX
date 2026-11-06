@@ -7,11 +7,12 @@
 
 #pragma once
 
+#include "rtx/status.h"
+
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
-
-#include "rtx/status.h"
 
 namespace rtx {
 
@@ -49,8 +50,8 @@ Result<void> validateTensorRtVersion(const std::string& version);
 Result<void> validateRifeConfig(const RifeConfig& config);
 
 // Produces the exact trtexec invocation documented in the implementation plan.
-std::string buildTrtexecCommand(const RifeConfig& config, const std::string& onnx_path,
-                                const std::string& engine_path);
+std::string buildTrtexecCommand(const RifeConfig& config, const std::filesystem::path& onnx_file,
+                                const std::filesystem::path& engine_file);
 
 struct RifeNv12Pair {
     const uint8_t* previous = nullptr;

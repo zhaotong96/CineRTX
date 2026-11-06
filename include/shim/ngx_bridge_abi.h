@@ -213,8 +213,8 @@ RTX_SHIM_API uint32_t RTX_SHIM_CALL rtx_ngx_bridge_abi_version(void);
 /* ------------------------------------------------------------------------- */
 
 typedef struct RtxNgxRifeBuildParams {
-    const char* onnx_path;       /* UTF-8 ONNX model path */
-    const char* engine_path;     /* UTF-8 destination engine path */
+    const char* onnx_file;       /* UTF-8 ONNX model path */
+    const char* engine_file;     /* UTF-8 destination engine path */
     int32_t width;
     int32_t height;
     int32_t fp16;                /* 1 to enable FP16 */

@@ -8,15 +8,16 @@
 
 #pragma once
 
-#include <atomic>
-#include <cstdint>
-#include <functional>
-#include <string>
-
 #include "rtx/io.h"
 #include "rtx/rational.h"
 #include "rtx/status.h"
 #include "rtx/types.h"
+
+#include <atomic>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <string>
 
 namespace rtx {
 
@@ -30,8 +31,8 @@ struct HwTranscodeProgress {
 };
 
 struct HwTranscodeOptions {
-    std::string input_path;
-    std::string output_path;
+    std::filesystem::path input_path;
+    std::filesystem::path output_path;
 
     // Raw NV12 input geometry.  Container mode reads geometry from the demuxer.
     int width = 0;
@@ -54,9 +55,7 @@ struct HwTranscodeOptions {
     int target_height = 0;  // 0 = 2160 default
     int vsr_quality = 2;    // 1..4, NGX VSR quality level
 
-    // Allows the raw artefact path to retry with HEVC 8-bit / H.264 when the
-    // installed encoder cannot do HEVC Main10 (for example Maxwell GM204).
-    bool allow_encoder_fallback = true;
+
     bool verbose = false;
 
     // Polled once per frame by the container path.  A set flag aborts the
@@ -124,9 +123,6 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
 // "vsr-remaster" with zero host pixel copies.
 Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& options);
 
-// Verification-only raw NV12 -> NVENC -> Annex-B -> NVDEC -> host P010
-// artefact.  Both hardware codecs are exercised, but the host staging counters
-// are reported separately and zero_copy_main_loop is false.
-Result<HwTranscodeReport> runNvidiaRawTranscode(const HwTranscodeOptions& options);
+
 
 }  // namespace rtx

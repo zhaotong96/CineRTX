@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -211,10 +212,10 @@ bool tensorRtBuilderAvailable() noexcept {
     return false;
 }
 
-Result<std::string> computeFileSha256(const std::string& path) {
+Result<std::string> computeFileSha256(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
-        return Result<std::string>::fail(ErrorCode::Io, "cannot open file for hashing", path);
+        return err(ErrorCode::Io, "cannot open file for hashing", path.string());
     }
     Sha256 hasher;
     std::array<char, 64 * 1024> buffer{};
@@ -227,42 +228,43 @@ Result<std::string> computeFileSha256(const std::string& path) {
         }
     }
     if (!stream.eof()) {
-        return Result<std::string>::fail(ErrorCode::Io, "cannot read file for hashing", path);
+        return err(ErrorCode::Io, "cannot read file for hashing", path.string());
     }
-    return Result<std::string>::ok(hasher.hexDigest());
+    return hasher.hexDigest();
 }
 
-std::string engineSidecarPath(const std::string& engine_path) {
-    return engine_path + ".sha256";
+std::filesystem::path engineSidecarPath(const std::filesystem::path& engine_path) {
+    return std::filesystem::path(engine_path).concat(".sha256");
 }
 
-Status writeEngineSidecar(const std::string& engine_path, const std::string& onnx_sha256) {
-    const std::string sidecar = engineSidecarPath(engine_path);
-    const std::string temporary = sidecar + ".tmp";
+Result<void> writeEngineSidecar(const std::filesystem::path& engine_path, const std::string& onnx_sha256) {
+    const std::filesystem::path sidecar = engineSidecarPath(engine_path);
+    const std::filesystem::path temporary = std::filesystem::path(sidecar).concat(".tmp");
     {
         std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
         if (!stream) {
-            return Status::fail(ErrorCode::Io, "cannot create the engine sidecar", temporary);
+            return err(ErrorCode::Io, "cannot create the engine sidecar", temporary.string());
         }
         stream << onnx_sha256 << "\n";
         if (!stream) {
-            return Status::fail(ErrorCode::Io, "cannot write the engine sidecar", temporary);
+            return err(ErrorCode::Io, "cannot write the engine sidecar", temporary.string());
         }
     }
-    std::remove(sidecar.c_str());
-    if (std::rename(temporary.c_str(), sidecar.c_str()) != 0) {
-        std::remove(temporary.c_str());
-        return Status::fail(ErrorCode::Io, "cannot publish the engine sidecar", sidecar);
+    std::error_code ec;
+    std::filesystem::remove(sidecar, ec);
+    std::filesystem::rename(temporary, sidecar, ec);
+    if (ec) {
+        std::filesystem::remove(temporary, ec);
+        return err(ErrorCode::Io, "cannot publish the engine sidecar", sidecar.string());
     }
-    return Status::success();
+    return {};
 }
 
-Result<std::string> readEngineSidecar(const std::string& engine_path) {
-    const std::string sidecar = engineSidecarPath(engine_path);
+Result<std::string> readEngineSidecar(const std::filesystem::path& engine_path) {
+    const std::filesystem::path sidecar = engineSidecarPath(engine_path);
     std::ifstream stream(sidecar, std::ios::binary);
     if (!stream) {
-        return Result<std::string>::fail(ErrorCode::NotFound,
-                                         "engine integrity sidecar is missing", sidecar);
+        return err(ErrorCode::NotFound, "engine integrity sidecar is missing", sidecar.string());
     }
     std::string digest;
     std::getline(stream, digest);
@@ -271,17 +273,15 @@ Result<std::string> readEngineSidecar(const std::string& engine_path) {
         digest.pop_back();
     }
     if (digest.size() != 64) {
-        return Result<std::string>::fail(ErrorCode::InvalidArgument,
-                                         "engine sidecar does not hold a SHA-256 digest",
-                                         sidecar);
+        return err(ErrorCode::InvalidArgument,
+                   "engine sidecar does not hold a SHA-256 digest", sidecar.string());
     }
-    return Result<std::string>::ok(digest);
+    return digest;
 }
 
 Result<RifeEngineBuildReport> buildRifeEngine(const RifeEngineBuildRequest& request) {
     if (request.onnx_path.empty() || request.engine_path.empty()) {
-        return Result<RifeEngineBuildReport>::fail(
-            ErrorCode::InvalidArgument, "engine build requires an ONNX input and an engine output");
+        return err(ErrorCode::InvalidArgument, "engine build requires an ONNX input and an engine output");
     }
 
     RifeConfig config;
@@ -292,18 +292,18 @@ Result<RifeEngineBuildReport> buildRifeEngine(const RifeEngineBuildRequest& requ
     config.tensor_height = shape.h;
     config.fp16 = request.fp16;
     const Result<void> valid = validateRifeConfig(config);
-    if (!valid.ok()) {
-        return Result<RifeEngineBuildReport>::fromStatus(valid.status());
+    if (!valid.has_value()) {
+        return std::unexpected(valid.error());
     }
 
     const Result<void> version = validateTensorRtVersion(kRifeTensorRtBaseline);
-    if (!version.ok()) {
-        return Result<RifeEngineBuildReport>::fromStatus(version.status());
+    if (!version.has_value()) {
+        return std::unexpected(version.error());
     }
 
     const Result<std::string> digest = computeFileSha256(request.onnx_path);
-    if (!digest.ok()) {
-        return Result<RifeEngineBuildReport>::fail(digest.error());
+    if (!digest.has_value()) {
+        return std::unexpected(digest.error());
     }
 
     RifeEngineBuildReport report;
@@ -320,8 +320,10 @@ Result<RifeEngineBuildReport> buildRifeEngine(const RifeEngineBuildRequest& requ
             ::GetProcAddress(bridge, "rtx_ngx_build_rife_engine"));
         if (fn != nullptr) {
             RtxNgxRifeBuildParams params{};
-            params.onnx_path = request.onnx_path.c_str();
-            params.engine_path = request.engine_path.c_str();
+            const std::string onnx_str = request.onnx_path.string();
+            const std::string engine_str = request.engine_path.string();
+            params.onnx_file = onnx_str.c_str();
+            params.engine_file = engine_str.c_str();
             params.width = request.width;
             params.height = request.height;
             params.fp16 = request.fp16 ? 1 : 0;
@@ -345,11 +347,11 @@ Result<RifeEngineBuildReport> buildRifeEngine(const RifeEngineBuildRequest& requ
     }
 #endif
 
-    const Status sidecar = writeEngineSidecar(request.engine_path, report.onnx_sha256);
-    if (!sidecar.ok()) {
-        return Result<RifeEngineBuildReport>::fromStatus(sidecar);
+    const Result<void> sidecar = writeEngineSidecar(request.engine_path, report.onnx_sha256);
+    if (!sidecar.has_value()) {
+        return std::unexpected(sidecar.error());
     }
-    return Result<RifeEngineBuildReport>::ok(std::move(report));
+    return report;
 }
 
 }  // namespace rtx

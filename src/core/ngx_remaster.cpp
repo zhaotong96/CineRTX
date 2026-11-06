@@ -80,10 +80,6 @@ std::string bridgeFileName() {
 
 std::vector<std::string> candidatePaths() {
     std::vector<std::string> paths;
-    const char* configured = std::getenv("RTX_NGX_BRIDGE_PATH");
-    if (configured != nullptr && configured[0] != '\0') {
-        paths.emplace_back(configured);
-    }
     const std::string directory = executableDirectory();
     if (!directory.empty()) {
         const std::filesystem::path root(directory);

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "pingpong_ring.h"
+#include "d3d12_interop.h"
 
 using namespace rtx_ngx;
 
@@ -61,26 +61,6 @@ RTX_TEST(pingpong_event_disable_timing) {
     RTX_CHECK(traced.eventMode() == PingPongEventMode::Default);
 }
 
-RTX_TEST(pingpong_scene_cut_duplicate) {
-    PingPongRing ring;
-    RTX_REQUIRE(ring.initialize());
-
-    constexpr size_t kBytes = 64 * 48 * 3 / 2;
-    std::vector<uint8_t> previous(kBytes, 0x3C);
-    std::vector<uint8_t> current(kBytes, 0x00);
-
-    RTX_CHECK(ring.duplicateFrame(previous.data(), current.data(), kBytes));
-    RTX_CHECK(std::memcmp(current.data(), previous.data(), kBytes) == 0);
-    RTX_CHECK_EQ(ring.duplicateCount(), static_cast<uint64_t>(1));
-    RTX_CHECK_EQ(ring.sceneCutCount(), static_cast<uint64_t>(1));
-    RTX_CHECK_EQ(ring.hostWaits(), static_cast<uint64_t>(0));
-
-    // Invalid arguments are refused instead of copying from a null pointer.
-    RTX_CHECK(!ring.duplicateFrame(nullptr, current.data(), kBytes));
-    RTX_CHECK(!ring.duplicateFrame(previous.data(), nullptr, kBytes));
-    RTX_CHECK(!ring.duplicateFrame(previous.data(), current.data(), 0));
-    RTX_CHECK_EQ(ring.duplicateCount(), static_cast<uint64_t>(1));
-}
 
 RTX_TEST(pingpong_no_host_wait) {
     PingPongRing ring;

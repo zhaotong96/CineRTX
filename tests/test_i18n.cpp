@@ -78,10 +78,10 @@ RTX_TEST(i18n_switch_latency) {
     RTX_CHECK(sink > 0);
 
     // Language parsing is the CLI boundary and must reject nonsense.
-    RTX_CHECK(parseLanguage("zh-CN").ok());
-    RTX_CHECK(parseLanguage("EN").ok());
-    RTX_CHECK(parseLanguage("").ok());
-    RTX_CHECK_EQ(parseLanguage("klingon").code(), ErrorCode::InvalidArgument);
+    RTX_CHECK(parseLanguage("zh-CN").has_value());
+    RTX_CHECK(parseLanguage("EN").has_value());
+    RTX_CHECK(parseLanguage("").has_value());
+    RTX_CHECK_EQ(parseLanguage("klingon").error().code, ErrorCode::InvalidArgument);
     RTX_CHECK(parseLanguage("zh").value() == Language::Zh);
     RTX_CHECK(parseLanguage("en").value() == Language::En);
 

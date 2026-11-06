@@ -53,13 +53,7 @@ constexpr const char* kInteropOnlyDiagnostic =
     "run (RTX_ERR_NGX).";
 
 // Opt-in bring-up trace (RTX_BRIDGE_TRACE=1), mirroring the other bridge TUs.
-bool traceEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("RTX_BRIDGE_TRACE");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
-    }();
-    return enabled;
-}
+bool traceEnabled() { return false; }
 
 void trace(const char* step, const std::string& detail = std::string()) {
     if (!traceEnabled()) {
@@ -221,8 +215,12 @@ void copyText(char* destination, size_t capacity, const std::string& text) {
     if (destination == nullptr || capacity == 0) {
         return;
     }
+#if defined(_WIN32)
+    strncpy_s(destination, capacity, text.c_str(), _TRUNCATE);
+#else
     std::strncpy(destination, text.c_str(), capacity - 1);
     destination[capacity - 1] = '\0';
+#endif
 }
 
 }  // namespace
@@ -358,6 +356,7 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_textures(
 
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_process(RtxNgxBridge* bridge,
                                                             uint64_t input_fence_value) {
+    (void)input_fence_value;
     if (bridge == nullptr) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
@@ -458,11 +457,14 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_set_frame_stats(
         stats->p_high > 1.0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-    BridgeImpl* impl = asBridge(bridge);
 #if defined(RTX_HAVE_NGX_SDK)
+    BridgeImpl* impl = asBridge(bridge);
     if (impl->ngx) {
         impl->ngx->set_frame_stats(*stats);
     }
+#else
+    (void)bridge;
+    (void)stats;
 #endif
     return RTX_OK;
 }
@@ -567,6 +569,7 @@ bool validRemasterInput(const RtxNgxRemasterInput* input) {
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     RtxNgxBridge* bridge, const RtxNgxRemasterInput* input, RtxNgxRemasterOutput* output,
     RtxNgxRemasterStats* stats) {
+    (void)stats;
     if (bridge == nullptr) {
         return RTX_ERR_INVALID_ARGUMENT;
     }

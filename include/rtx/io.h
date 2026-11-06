@@ -4,13 +4,12 @@
 // I/O abstractions.  The FFmpeg container layer is an unconditional statically
 // linked core component (Gate 3.0): every build of rtx_core carries
 // libavformat/libavcodec/libavutil/libswresample machine code, and there is no
-// configuration switch that can remove it.  Raw NV12/P010 paths remain
-// available for hermetic verification artefacts.
+// configuration switch that can remove it.
 
 #pragma once
 
 #include <cstdint>
-#include <fstream>
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -51,106 +50,33 @@ struct MediaInfo {
 class IDemuxer {
 public:
     virtual ~IDemuxer() = default;
-    virtual Result<MediaInfo> open(const std::string& path) = 0;
+    virtual Result<MediaInfo> open(const std::filesystem::path& path) = 0;
     virtual Result<Packet> readPacket() = 0;
     virtual std::vector<std::string> warnings() const { return {}; }
-    // Index of the best audio stream, or -1 when the container has none.  The
-    // phase-3 multi-track audio pipeline routes on this before it attaches.
+    // Index of the best audio stream, or -1 when the container has none.
     virtual int audioStreamIndex() const noexcept { return -1; }
 };
 
 class IMuxer {
 public:
     virtual ~IMuxer() = default;
-    virtual Status open(const std::string& path, const MediaInfo& info,
+    virtual Result<void> open(const std::filesystem::path& path, const MediaInfo& info,
                         const Hdr10Metadata& hdr) = 0;
-    virtual Status writePacket(const Packet& packet) = 0;
-    virtual Status finalize() = 0;
+    virtual Result<void> writePacket(const Packet& packet) = 0;
+    virtual Result<void> finalize() = 0;
 };
 
 std::unique_ptr<IDemuxer> makeFfmpegDemuxer();
 std::unique_ptr<IMuxer> makeFfmpegMuxer();
 
-// Compile-time invariant: the media container layer is always present.  The
-// symbol survives so that long-lived call sites keep a single, documented
-// capability query instead of reintroducing a conditional macro.
+// Compile-time invariant: the media container layer is always present.
 constexpr bool ffmpegAvailable() noexcept { return true; }
 
 // ---------------------------------------------------------------------------
 // Zero-disk container I/O (ACT-STATIC-03)
-//
-// The demuxer/muxer above take a filesystem path.  The memory variants wrap the
-// same libavformat objects around an avio_alloc_context() buffer so the
-// container layer can be exercised end to end without touching a disk file.
-// Both are unconditional: they compile into rtx_core in every configuration.
 // ---------------------------------------------------------------------------
 std::unique_ptr<IDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes);
 std::unique_ptr<IMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
                                         std::string container_format = "matroska");
-
-// Deterministic synthetic source used by tests and `--simulate`.  Produces
-// BT.709 limited-range NV12 with a moving high-contrast edge and an optional
-// hard cut at `scene_cut_frame`.
-class SyntheticNv12Source {
-public:
-    struct Config {
-        int width = 1920;
-        int height = 1080;
-        int frame_count = 120;
-        Rational frame_rate{30, 1};
-        int scene_cut_frame = -1;
-        int bar_speed = 7;
-    };
-
-    explicit SyntheticNv12Source(Config config);
-
-    Result<Frame> next();
-    bool done() const noexcept { return index_ >= config_.frame_count; }
-    int64_t index() const noexcept { return index_; }
-    const Config& config() const noexcept { return config_; }
-    void reset() { index_ = 0; }
-
-private:
-    Config config_;
-    int64_t index_ = 0;
-    std::shared_ptr<FrameBuffer> previous_;
-};
-
-// Reads a headerless NV12 stream.  Frame size is derived from width/height.
-class RawNv12Reader {
-public:
-    Status open(const std::string& path, int width, int height);
-    Result<Frame> read(int64_t pts, Rational time_base);
-    bool eof() const noexcept { return eof_; }
-    int64_t frameCount() const noexcept { return frame_count_; }
-    void close();
-
-private:
-    std::ifstream stream_;
-    int width_ = 0;
-    int height_ = 0;
-    int64_t frame_count_ = 0;
-    bool eof_ = false;
-};
-
-// Writes tightly packed 10-bit P010.  This is the verification artefact used by
-// the color/HDR gate and by ffmpeg-based playback checks.
-class RawP010Writer {
-public:
-    Status open(const std::string& path, int width, int height);
-    Status write(const Frame& frame);
-    Status finalize();
-    uint64_t bytesWritten() const noexcept { return bytes_written_; }
-
-private:
-    std::ofstream stream_;
-    int width_ = 0;
-    int height_ = 0;
-    uint64_t bytes_written_ = 0;
-};
-
-// Sidecar metadata for QA tooling and container muxers.
-Status writeHdrSidecar(const std::string& path, const Hdr10Metadata& metadata);
-Result<Hdr10Metadata> readHdrSidecar(const std::string& path);
 
 }  // namespace rtx

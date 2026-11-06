@@ -13,7 +13,7 @@
 #      avdevice / postproc.
 #   C. The build output directory must not contain any av*.dll / sw*.dll.
 #   D. The single-EXE envelope: 1.2 MB <= CineRTX.exe <= 12.0 MB, with a
-#      toolchain-dependent golden band (8.0 MB unstripped / 3.5 MB stripped).
+#      golden band (3.0 MB for both stripped and unstripped images).
 #   E. Single-EXE closure: the output directory holds CineRTX.exe and, in a
 #      developer configuration, rtx_tests.exe -- and nothing else.  Any DLL,
 #      shared object or extra executable is a regression to the retired
@@ -31,10 +31,10 @@ param(
     # Gate 3.0 maximum: the golden envelope ceiling for the single-EXE build.
     [double]$MaxExeMb = 12.0,
     # Reported as a warning band; the hard envelope above is what fails.
-    [double]$GoldenExeMb = 8.0,
+    [double]$GoldenExeMb = 3.0,
     # Same warning band for an image whose COFF symbol table was stripped
     # (-Wl,--strip-all on the GCC/Clang/Zig path).  Selected automatically.
-    [double]$GoldenExeMbStripped = 3.5,
+    [double]$GoldenExeMbStripped = 3.0,
     [switch]$SkipEnvelope,
     [switch]$Quiet
 )
@@ -439,7 +439,7 @@ if ($Binary.Count -eq 0) {
     $searchDirectory = if ($BuildDir) {
         if ([IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $repo $BuildDir }
     } else {
-        foreach ($candidate in @('build/RelWithDebInfo', 'build/cmake/zig-windows',
+        foreach ($candidate in @('build/cmake/windows-msvc-ninja', 'build/RelWithDebInfo', 'build/cmake/zig-windows',
                                  'build/cmake/windows-msvc/Release',
                                  'build/cmake/linux-release', 'build/ci', 'build')) {
             $path = Join-Path $repo $candidate

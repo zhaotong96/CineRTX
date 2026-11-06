@@ -100,6 +100,8 @@ bool decodeUtf8(const std::string& value, size_t offset, uint32_t* codepoint, si
     return false;
 }
 
+}  // namespace
+
 // Emit pure ASCII.  \uXXXX escapes survive shells and log collectors that
 // decode a child process's UTF-8 stdout with a legacy code page before saving
 // it.  Invalid UTF-8 is replaced with U+FFFD so the JSON is always well formed.
@@ -153,6 +155,7 @@ std::string escapeJson(const std::string& value) {
     return output;
 }
 
+namespace {
 const char* resultLabel(int32_t result) {
     switch (static_cast<RtxResult>(result)) {
         case RTX_OK:
@@ -283,6 +286,7 @@ std::string formatProbeHuman(const ShimProbeResult& probe) {
 
 std::string formatProbeJson(const ShimProbeResult& probe) {
     std::ostringstream out;
+    out.imbue(std::locale::classic());
     out << "{\n";
     out << "  \"loaded\": " << (probe.loaded ? "true" : "false") << ",\n";
     out << "  \"path\": \"" << escapeJson(probe.path) << "\",\n";

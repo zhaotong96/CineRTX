@@ -26,6 +26,7 @@ ShimProbeResult probeShim();
 
 std::string formatProbeHuman(const ShimProbeResult& probe);
 std::string formatProbeJson(const ShimProbeResult& probe);
+std::string escapeJson(const std::string& value);
 
 std::string capabilityList(uint32_t caps);
 

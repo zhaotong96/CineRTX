@@ -53,7 +53,7 @@ RtxFrucConfig makeConfig(uint32_t backend, uint32_t width = 64, uint32_t height 
     config.height = height;
     config.surface_pitch = width;
     config.fp16_enabled = 1;
-    config.model_engine_path = nullptr;
+    config.model_engine_uri = nullptr;
     config.cuda_context = nullptr;  // CPU reference mode
     config.cuda_stream = nullptr;
     return config;

@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
+# SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 # Copyright (C) 2026 CineRTX contributors
 #
 # Audits SPDX headers, the GPL/MIT directory boundary, forbidden NVIDIA
@@ -64,6 +64,13 @@ function Test-SourceFile([string]$Path) {
     if ($expression -ne $expected) {
         Add-Violation "${relative}: expected '$expected', found '$expression'"
         return
+    }
+
+    if ($relative.StartsWith('src/shim/ngx_bridge/') -or $relative.StartsWith('include/shim/')) {
+        $content = Get-Content -LiteralPath $Path -Raw
+        if ($content -match '(?im)^\s*#\s*include\s*[<"]rtx/') {
+            Add-Violation "${relative}: Zone B/C header/source must not include Zone A GPL header ($($Matches[0].Trim()))"
+        }
     }
 
     if ($expected -eq $gplExpression) {

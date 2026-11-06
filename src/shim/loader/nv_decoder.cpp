@@ -10,13 +10,14 @@
 
 #include "rtx_shim_abi.h"
 
-#include <algorithm>
-#include <cstring>
-#include <deque>
-#include <mutex>
-#include <new>
-#include <string>
-#include <vector>
+// Hardware NVDEC surface decoding and asynchronous cuMemcpy2DAsync into GPU VRAM pool.
+// Bypasses host staging memory entirely, delivering zero-copy NV12/P010 surfaces to NGX and NVENC.
+// Surface mappings must be strictly unmapped upon export event signaling to prevent VRAM leaks.
+
+#include "dyn_library.h"
+#include "nv_cuda_context.h"
+#include "nv_func_tables.h"
+#include "nv_trace.h"
 
 #include "ffnvcodec/dynlink_cuda.h"
 #if defined(__clang__)
@@ -28,10 +29,13 @@
 #pragma clang diagnostic pop
 #endif
 
-#include "dyn_library.h"
-#include "nv_cuda_context.h"
-#include "nv_func_tables.h"
-#include "nv_trace.h"
+#include <algorithm>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <new>
+#include <string>
+#include <vector>
 
 namespace {
 

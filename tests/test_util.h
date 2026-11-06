@@ -42,7 +42,7 @@ private:
     std::filesystem::path path_;
 };
 
-inline std::vector<uint8_t> readAll(const std::string& path) {
+inline std::vector<uint8_t> readAll(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
         return {};
@@ -51,7 +51,7 @@ inline std::vector<uint8_t> readAll(const std::string& path) {
                                 std::istreambuf_iterator<char>());
 }
 
-inline bool writeAll(const std::string& path, const std::vector<uint8_t>& data) {
+inline bool writeAll(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     if (!stream) {
         return false;
@@ -63,6 +63,51 @@ inline bool writeAll(const std::string& path, const std::vector<uint8_t>& data) 
     return static_cast<bool>(stream);
 }
 
+inline Result<void> allocateTestFrame(Frame& frame, int frame_width, int frame_height,
+                                      PixelFormat frame_format, size_t alignment = 256) {
+    if (frame_width <= 0 || frame_height <= 0 || frame_format == PixelFormat::Unknown) {
+        return err(ErrorCode::InvalidArgument, "invalid frame geometry");
+    }
+    int local_pitches[3] = {0, 0, 0};
+    int local_chroma_width = 0;
+    int local_chroma_height = 0;
+    const size_t total = frameByteSize(frame_width, frame_height, frame_format, local_pitches,
+                                       &local_chroma_width, &local_chroma_height);
+    if (total == 0) {
+        return err(ErrorCode::InvalidArgument, "unsupported frame format");
+    }
+    auto buffer = std::make_shared<FrameBuffer>();
+    const Result<void> status = buffer->allocate(total, alignment);
+    if (!status.has_value()) {
+        return std::unexpected(status.error());
+    }
+    frame.width = frame_width;
+    frame.height = frame_height;
+    frame.format = frame_format;
+    frame.bit_depth = isTenBit(frame_format) ? 10 : 8;
+    frame.chroma_width = local_chroma_width;
+    frame.chroma_height = local_chroma_height;
+    frame.storage = std::move(buffer);
+
+    uint8_t* base = frame.storage->data();
+    frame.planes[0] = base;
+    frame.planes[1] = nullptr;
+    frame.planes[2] = nullptr;
+    frame.pitches[0] = local_pitches[0];
+    frame.pitches[1] = local_pitches[1];
+    frame.pitches[2] = local_pitches[2];
+
+    if (planeCount(frame_format) >= 2) {
+        frame.planes[1] = base + planeByteSize(frame_format, frame_width, frame_height, 0, frame.pitches[0]);
+    }
+    if (planeCount(frame_format) >= 3) {
+        frame.planes[2] = frame.planes[1] + planeByteSize(frame_format, frame_width, frame_height, 1, frame.pitches[1]);
+    }
+    for (int plane = 0; plane < 3; ++plane) {
+        frame.plane_sizes[plane] = planeByteSize(frame_format, frame_width, frame_height, plane, frame.pitches[plane]);
+    }
+    return {};
+}
 inline void fillNV12(Frame& frame, uint8_t luma, uint8_t chroma_u, uint8_t chroma_v) {
     for (int y = 0; y < frame.height; ++y) {
         std::memset(frame.planes[0] + static_cast<size_t>(y) * frame.pitches[0], luma,

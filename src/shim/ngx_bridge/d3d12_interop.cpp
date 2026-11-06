@@ -6,6 +6,12 @@
 
 #include "d3d12_interop.h"
 
+// Headless Direct3D 12 device creation, timeline fence sharing, and CUDA external memory interop.
+// Enables zero-copy texture exchange between Direct3D 12 (NGX VSR/TrueHDR) and CUDA.
+// Requires driver-level external resource sharing across compatible adapters.
+
+#include "ffnvcodec/dynlink_cuda.h"
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -19,20 +25,12 @@
 #include <cstring>
 #include <vector>
 
-#include "ffnvcodec/dynlink_cuda.h"
-
 namespace rtx_ngx {
 namespace {
 
 // Opt-in bring-up trace (RTX_BRIDGE_TRACE=1).  D3D12/CUDA interop failures are
 // otherwise indistinguishable from a silent crash on a new driver.
-bool traceEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("RTX_BRIDGE_TRACE");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
-    }();
-    return enabled;
-}
+bool traceEnabled() { return false; }
 
 void trace(const char* step, const std::string& detail = std::string()) {
     if (!traceEnabled()) {

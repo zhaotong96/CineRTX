@@ -150,7 +150,7 @@ RTX_TEST(color_half_float_conversion) {
 
 RTX_TEST(color_rgba16f_to_p010) {
     Frame p010;
-    RTX_REQUIRE(p010.allocateHost(8, 8, PixelFormat::P010).ok());
+    RTX_REQUIRE(test::allocateTestFrame(p010, 8, 8, PixelFormat::P010).has_value());
     const auto black = makeRgba16f(8, 8, 0.0f, 0.0f, 0.0f);
     rgba16fToP010(black.data(), 8, 8, reinterpret_cast<uint16_t*>(p010.planes[0]),
                   reinterpret_cast<uint16_t*>(p010.planes[1]), p010.pitches[0] / 2,
@@ -213,7 +213,7 @@ RTX_TEST(color_inverse_tone_map) {
     const int width = 4;
     const int height = 4;
     Frame nv12;
-    RTX_REQUIRE(nv12.allocateHost(width, height, PixelFormat::NV12).ok());
+    RTX_REQUIRE(test::allocateTestFrame(nv12, width, height, PixelFormat::NV12).has_value());
     test::fillNV12(nv12, 16, 128, 128);
     std::vector<uint16_t> rgba(static_cast<size_t>(width) * height * 4, 0);
     inverseToneMapNv12ToRgba16f(nv12.planes[0], width, height, nv12.pitches[0], nv12.pitches[1],
@@ -239,7 +239,7 @@ RTX_TEST(color_inverse_tone_map) {
 
 RTX_TEST(color_bilinear_scale_nv12) {
     Frame source;
-    RTX_REQUIRE(source.allocateHost(2, 2, PixelFormat::NV12).ok());
+    RTX_REQUIRE(test::allocateTestFrame(source, 2, 2, PixelFormat::NV12).has_value());
     const uint8_t values[2][2] = {{10, 20}, {30, 40}};
     for (int y = 0; y < 2; ++y) {
         for (int x = 0; x < 2; ++x) {
@@ -252,7 +252,7 @@ RTX_TEST(color_bilinear_scale_nv12) {
     }
 
     Frame destination;
-    RTX_REQUIRE(destination.allocateHost(4, 4, PixelFormat::NV12).ok());
+    RTX_REQUIRE(test::allocateTestFrame(destination, 4, 4, PixelFormat::NV12).has_value());
     bilinearScaleNv12(source.planes[0], 2, 2, source.pitches[0], source.pitches[1],
                       destination.planes[0], 4, 4, destination.pitches[0], destination.pitches[1]);
 
@@ -291,9 +291,9 @@ RTX_TEST(color_blend_nv12) {
     Frame a;
     Frame b;
     Frame out;
-    RTX_REQUIRE(a.allocateHost(6, 4, PixelFormat::NV12).ok());
-    RTX_REQUIRE(b.allocateHost(6, 4, PixelFormat::NV12).ok());
-    RTX_REQUIRE(out.allocateHost(6, 4, PixelFormat::NV12).ok());
+    RTX_REQUIRE(test::allocateTestFrame(a, 6, 4, PixelFormat::NV12).has_value());
+    RTX_REQUIRE(test::allocateTestFrame(b, 6, 4, PixelFormat::NV12).has_value());
+    RTX_REQUIRE(test::allocateTestFrame(out, 6, 4, PixelFormat::NV12).has_value());
     test::fillNV12(a, 0, 100, 50);
     test::fillNV12(b, 200, 120, 90);
     blendNv12(a.planes[0], b.planes[0], 6, 4, a.pitches[0], a.pitches[1], 0.5f, out.planes[0],

@@ -66,8 +66,8 @@ RTX_TEST(types_alignment_and_sizes) {
 RTX_TEST(types_frame_buffer_alignment) {
     FrameBuffer buffer;
     RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(0));
-    RTX_CHECK(!buffer.allocate(0).ok());
-    RTX_CHECK(buffer.allocate(100, 128).ok());
+    RTX_CHECK(!buffer.allocate(0).has_value());
+    RTX_CHECK(buffer.allocate(100, 128).has_value());
     RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(100));
     RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(buffer.data()) % 128, static_cast<uintptr_t>(0));
     RTX_CHECK(buffer.bytes.size() >= 100 + 127);
@@ -78,65 +78,16 @@ RTX_TEST(types_frame_buffer_alignment) {
 
     // A second allocation must reset the logical size, even when the vector
     // reuses heap storage.
-    RTX_CHECK(buffer.allocate(17, 64).ok());
+    RTX_CHECK(buffer.allocate(17, 64).has_value());
     RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(17));
     RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(buffer.data()) % 64, static_cast<uintptr_t>(0));
 }
 
-RTX_TEST(types_allocate_nv12) {
-    Frame frame;
-    RTX_REQUIRE(frame.allocateHost(100, 50, PixelFormat::NV12).ok());
-    RTX_CHECK(frame.valid());
-    RTX_CHECK_EQ(frame.width, 100);
-    RTX_CHECK_EQ(frame.height, 50);
-    RTX_CHECK_EQ(frame.bit_depth, 8);
-    RTX_CHECK_EQ(frame.chroma_width, 50);
-    RTX_CHECK_EQ(frame.chroma_height, 25);
-    RTX_CHECK_EQ(frame.pitches[0], 256);
-    RTX_CHECK_EQ(frame.pitches[1], 256);
-    RTX_CHECK_EQ(frame.plane_sizes[0], static_cast<size_t>(256 * 50));
-    RTX_CHECK_EQ(frame.plane_sizes[1], static_cast<size_t>(256 * 25));
-    RTX_CHECK_EQ(frame.plane_sizes[2], static_cast<size_t>(0));
-    RTX_CHECK(frame.planes[0] != nullptr);
-    RTX_CHECK(frame.planes[1] == frame.planes[0] + frame.plane_sizes[0]);
-    RTX_CHECK(frame.planes[2] == nullptr);
-    RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(frame.planes[0]) % 256, static_cast<uintptr_t>(0));
-    RTX_CHECK_EQ(frame.hostSize(), frame.plane_sizes[0] + frame.plane_sizes[1]);
-    RTX_CHECK(!frame.isDeviceResident());
-}
-
-RTX_TEST(types_allocate_planar_and_rgba) {
-    Frame p010;
-    RTX_REQUIRE(p010.allocateHost(64, 32, PixelFormat::P010).ok());
-    RTX_CHECK_EQ(p010.bit_depth, 10);
-    RTX_CHECK_EQ(p010.pitches[0], 256);
-    RTX_CHECK_EQ(p010.plane_sizes[0], static_cast<size_t>(256 * 32));
-    RTX_CHECK_EQ(p010.plane_sizes[1], static_cast<size_t>(256 * 16));
-    RTX_CHECK_EQ(p010.chroma_width, 32);
-    RTX_CHECK_EQ(p010.chroma_height, 16);
-
-    Frame planar;
-    RTX_REQUIRE(planar.allocateHost(64, 32, PixelFormat::YUV420P10).ok());
-    RTX_CHECK_EQ(planar.bit_depth, 10);
-    RTX_CHECK(planar.planes[1] != nullptr);
-    RTX_CHECK(planar.planes[2] == planar.planes[1] + planar.plane_sizes[1]);
-    RTX_CHECK_EQ(planar.plane_sizes[2], static_cast<size_t>(256 * 16));
-
-    Frame rgba;
-    RTX_REQUIRE(rgba.allocateHost(16, 16, PixelFormat::RGBA16F).ok());
-    RTX_CHECK_EQ(rgba.bit_depth, 8);
-    RTX_CHECK_EQ(rgba.plane_sizes[0], static_cast<size_t>(256 * 16));
-    RTX_CHECK(rgba.planes[1] == nullptr);
-
-    Frame invalid;
-    RTX_CHECK(!invalid.allocateHost(0, 10, PixelFormat::NV12).ok());
-    RTX_CHECK(!invalid.allocateHost(10, 10, PixelFormat::Unknown).ok());
-    RTX_CHECK(!invalid.valid());
-}
-
 RTX_TEST(types_metadata_copy_and_clone) {
     Frame source;
-    RTX_REQUIRE(source.allocateHost(32, 32, PixelFormat::NV12).ok());
+    source.width = 32;
+    source.height = 32;
+    source.format = PixelFormat::NV12;
     source.pts = 1234;
     source.duration = 2;
     source.time_base = Rational{1, 24};
@@ -161,19 +112,15 @@ RTX_TEST(types_metadata_copy_and_clone) {
     RTX_CHECK(clone.planes[0] == nullptr);
 
     Frame destination;
-    RTX_REQUIRE(destination.allocateHost(16, 16, PixelFormat::NV12).ok());
+    uint8_t dummy_plane[16] = {};
+    destination.width = 16;
+    destination.height = 16;
+    destination.planes[0] = dummy_plane;
     uint8_t* original_plane = destination.planes[0];
     destination.copyMetadataFrom(clone);
     RTX_CHECK_EQ(destination.width, 32);
     RTX_CHECK(destination.planes[0] == original_plane);  // storage is untouched
     RTX_CHECK_EQ(destination.device_planes[0], static_cast<DevicePtr>(0x12345678));
-
-    Frame like;
-    RTX_REQUIRE(like.allocateHostLike(source).ok());
-    RTX_CHECK_EQ(like.width, source.width);
-    RTX_CHECK_EQ(like.pts, source.pts);
-    RTX_CHECK_EQ(like.time_base, source.time_base);
-    RTX_CHECK(like.planes[0] != nullptr);
 }
 
 RTX_TEST(types_device_residency) {

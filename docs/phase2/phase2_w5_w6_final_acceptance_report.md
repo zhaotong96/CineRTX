@@ -70,7 +70,7 @@ rtx-transcode.exe --input in_1080p_sdr_1000f.mp4 --output gate21_v2.mp4 ^
 输入构造(真实素材,非合成):
 
 ```bat
-ffmpeg -stream_loop 4 -i 10秒IMAX水乐园女子镜头序列.mp4 ^
+ffmpeg -stream_loop 4 -i <INPUT_1080P_SDR_SAMPLE.mp4> ^
   -vf "crop=720:608:0:336,scale=1920:1080:flags=lanczos,format=yuv420p" ^
   -c:v libx264 -crf 18 -preset fast -an -frames:v 1000 in_1080p_sdr_1000f.mp4
 ```

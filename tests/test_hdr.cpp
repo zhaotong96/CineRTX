@@ -49,40 +49,40 @@ std::vector<uint8_t> removeEmulationPrevention(const std::vector<uint8_t>& escap
 Hdr10Metadata sampleMetadata() {
     TrueHdrParameters parameters;
     const Result<Hdr10Metadata> metadata = SeiSynthesizer::makeMetadata(parameters);
-    return metadata.ok() ? metadata.value() : Hdr10Metadata{};
+    return metadata.has_value() ? metadata.value() : Hdr10Metadata{};
 }
 
 }  // namespace
 
 RTX_TEST(hdr_truehdr_parameter_validation) {
     TrueHdrParameters parameters;
-    RTX_CHECK(parameters.validate().ok());
+    RTX_CHECK(parameters.validate().has_value());
 
     parameters.contrast = 49;
-    RTX_CHECK_EQ(parameters.validate().code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
     parameters.contrast = 125;
     parameters.saturation = 201;
-    RTX_CHECK_EQ(parameters.validate().code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
     parameters.saturation = 75;
     parameters.middle_gray = 9;
-    RTX_CHECK_EQ(parameters.validate().code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
     parameters.middle_gray = 44;
     parameters.max_luminance = 99;
-    RTX_CHECK_EQ(parameters.validate().code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
     parameters.max_luminance = 4001;
-    RTX_CHECK_EQ(parameters.validate().code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
     parameters.max_luminance = 1000;
     parameters.max_fall = 65536;
-    RTX_CHECK_EQ(parameters.validate().code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
     parameters.max_fall = 300;
-    RTX_CHECK(parameters.validate().ok());
+    RTX_CHECK(parameters.validate().has_value());
 }
 
 RTX_TEST(hdr_make_metadata_and_mastering_presets) {
     TrueHdrParameters parameters;
     parameters.mastering = MasteringPreset::DciP3D65;
     const Result<Hdr10Metadata> metadata = SeiSynthesizer::makeMetadata(parameters);
-    RTX_REQUIRE(metadata.ok());
+    RTX_REQUIRE(metadata.has_value());
     const Hdr10Metadata& hdr = metadata.value();
     RTX_CHECK(hdr.enabled);
     RTX_CHECK_EQ(hdr.mastering.red_x, static_cast<uint16_t>(34000));
@@ -107,7 +107,7 @@ RTX_TEST(hdr_make_metadata_and_mastering_presets) {
 
     TrueHdrParameters invalid;
     invalid.max_luminance = 10;
-    RTX_CHECK(!SeiSynthesizer::makeMetadata(invalid).ok());
+    RTX_CHECK(!SeiSynthesizer::makeMetadata(invalid).has_value());
 }
 
 RTX_TEST(hdr_nvenc_vui_settings) {
@@ -250,7 +250,7 @@ RTX_TEST(hdr_json_round_trip) {
     RTX_CHECK(json.find("\"max_fall\": 450") != std::string::npos);
 
     const Result<Hdr10Metadata> parsed = SeiSynthesizer::fromJson(json);
-    RTX_REQUIRE(parsed.ok());
+    RTX_REQUIRE(parsed.has_value());
     const Hdr10Metadata& value = parsed.value();
     RTX_CHECK(value.enabled);
     RTX_CHECK_EQ(value.target_nits, static_cast<uint32_t>(1600));
@@ -262,9 +262,9 @@ RTX_TEST(hdr_json_round_trip) {
     RTX_CHECK(value.color.primaries == ColorPrimaries::BT2020);
     RTX_CHECK(value.color.transfer == TransferFunction::SMPTE2084);
 
-    RTX_CHECK_EQ(SeiSynthesizer::fromJson("{}").code(), ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(SeiSynthesizer::fromJson("{}").error().code, ErrorCode::InvalidArgument);
     const std::string zero_luminance =
         R"({"enabled": true, "mastering_display": {"max_luminance": 0}})";
-    RTX_CHECK_EQ(SeiSynthesizer::fromJson(zero_luminance).code(),
+    RTX_CHECK_EQ(SeiSynthesizer::fromJson(zero_luminance).error().code,
                  ErrorCode::InvalidArgument);
 }

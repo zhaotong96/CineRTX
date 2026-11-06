@@ -80,7 +80,7 @@ typedef struct RtxFrucConfig {
     uint32_t height;               /* input height, e.g. 1080 */
     uint32_t surface_pitch;        /* NV12 device pitch in bytes */
     uint32_t fp16_enabled;         /* 1 = Tensor Core mixed precision */
-    const char* model_engine_path; /* serialised .engine path (RIFE only) */
+    const char* model_engine_uri;  /* serialised .engine path (RIFE only) */
     void* cuda_context;            /* CUcontext; NULL selects CPU reference mode */
     void* cuda_stream;             /* CUstream for the async interpolation */
 } RtxFrucConfig;
@@ -102,7 +102,7 @@ typedef struct RtxFrucBridgeApi {
     int32_t (*create)(const RtxFrucConfig* cfg, RtxFrucBridge** out_bridge, char* err_buf,
                       uint32_t err_cap);
     int32_t (*interpolate)(RtxFrucBridge* bridge, const RtxFrucFrameInput* in);
-    int32_t (*build_engine)(const char* onnx_path, const char* engine_out_path, uint32_t width,
+    int32_t (*build_engine)(const char* onnx_file, const char* engine_out_file, uint32_t width,
                             uint32_t height, uint32_t fp16, char* err_buf, uint32_t err_cap);
     uint64_t (*query_vram_footprint)(RtxFrucBridge* bridge);
     void (*destroy)(RtxFrucBridge* bridge);

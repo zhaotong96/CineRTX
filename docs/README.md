@@ -100,22 +100,47 @@
 
 ---
 
-## 六、 工程交接与维护指南 (`docs/handover/`)
+## 六、 阶段四 Modern C++26 全栈重构 (`docs/phase4/`)
 
-| 序号 | 交付文档 | 核心内容 | 索引关键字 |
+本目录收录阶段四（C++26 全栈重构、全仓反 Slop 极简架构重塑）的核心技术架构与工程施工规范。
+
+| 序号 | 方案与验收文档 | 核心内容 | 索引关键字 |
 | :---: | :--- | :--- | :--- |
-| **40** | [`handover/交接文档.md`](handover/交接文档.md) | 跨机环境同步、开发机-测试机映射关系、环境变量配置与日常维护排障手册 | `handover`, `maintenance`, `troubleshooting` |
+| **40** | [`phase4/CineRTX C++26 架构重构专家方案.md`](phase4/CineRTX%20C++26%20架构重构专家方案.md) | 阶段四 Modern C++26 架构升级专家技术指南与标准库演化方案 | `cpp26`, `modern-cpp`, `refactoring`, `standard-library` |
+| **41** | [`phase4/CineRTX_Phase4_Modern_CPP26_全栈重构工程施工方案.md`](phase4/CineRTX_Phase4_Modern_CPP26_全栈重构工程施工方案.md) | 阶段四 C++26 全栈重构实施 SOP 与逐行施工规范 | `phase4`, `construction-sop`, `modernization` |
+| **42** | [`phase4/CineRTX_全仓反Slop与极简架构重塑工程施工方案.md`](phase4/CineRTX_全仓反Slop与极简架构重塑工程施工方案.md) | 全仓反 Slop 治理、死代码切除与极简架构重塑工程施工指南 (PLAN-LEAN-ANTI-SLOP-20261101) | `anti-slop-plan`, `dead-code-elimination`, `occam-razor` |
 
 ---
 
-## 七、 演进规划与待办预案 (`docs/TODO/`)
+## 七、 工程交接与维护指南 (`docs/handover/`)
+
+| 序号 | 交付文档 | 核心内容 | 索引关键字 |
+| :---: | :--- | :--- | :--- |
+| **43** | [`handover/交接文档.md`](handover/交接文档.md) | 跨机环境同步、开发机-测试机映射关系、环境变量配置与日常维护排障手册 | `handover`, `maintenance`, `troubleshooting` |
+
+---
+
+## 八、 演进规划与待办预案 (`docs/TODO/`)
 
 本目录收录正在规划中、待评审或未来演进的架构重构规范与方案设计。
 
 | 序号 | 待办规范 | 核心内容 | 索引关键字 |
 | :---: | :--- | :--- | :--- |
-| **41** | [`TODO/ui_refactor_and_plugin_status.md`](TODO/ui_refactor_and_plugin_status.md) | Win32 原生 GDI 底部状态栏设计、NGX 插件运行态健康诊断探针与模式联动交互体系 | `status-bar`, `diagnostics`, `plugin-health`, `ui-refactor` |
-| **42** | [`TODO/i18n_architecture_and_localization.md`](TODO/i18n_architecture_and_localization.md) | 零依赖、零堆内存分配的 $O(1)$ 强类型枚举国际化 (i18n) 架构与中英双语自适应规范 | `i18n`, `localization`, `zero-allocation`, `bilingual` |
-| **43** | [`TODO/ffmpeg7_vs_ffmpeg8_selection_and_evolution.md`](TODO/ffmpeg7_vs_ffmpeg8_selection_and_evolution.md) | FFmpeg 7.1.1 静态内联锁定依据与未来向 FFmpeg 8.x 架构演进决策分析备忘录 | `ffmpeg7-vs-ffmpeg8`, `evolution`, `decision-record`, `todo` |
-| **44** | [`TODO/rife_cli_test_fixture.md`](TODO/rife_cli_test_fixture.md) | `cli_rife_command` 覆盖缺口：进程内引擎构建缺少可解析 ONNX 夹具，本轮明确接受并记录候选修复方案 | `rife`, `cli`, `ctest`, `test-gap`, `todo` |
+| **44** | [`TODO/ui_refactor_and_plugin_status.md`](TODO/ui_refactor_and_plugin_status.md) | Win32 原生 GDI 底部状态栏设计、NGX 插件运行态健康诊断探针与模式联动交互体系 | `status-bar`, `diagnostics`, `plugin-health`, `ui-refactor` |
+| **45** | [`TODO/i18n_architecture_and_localization.md`](TODO/i18n_architecture_and_localization.md) | 零依赖、零堆内存分配的 $O(1)$ 强类型枚举国际化 (i18n) 架构与中英双语自适应规范 | `i18n`, `localization`, `zero-allocation`, `bilingual` |
+| **46** | [`TODO/ffmpeg7_vs_ffmpeg8_selection_and_evolution.md`](TODO/ffmpeg7_vs_ffmpeg8_selection_and_evolution.md) | FFmpeg 7.1.1 静态内联锁定依据与未来向 FFmpeg 8.x 架构演进决策分析备忘录 | `ffmpeg7-vs-ffmpeg8`, `evolution`, `decision-record`, `todo` |
+| **47** | [`TODO/rife_cli_test_fixture.md`](TODO/rife_cli_test_fixture.md) | `cli_rife_command` 覆盖缺口：进程内引擎构建缺少可解析 ONNX 夹具，本轮明确接受并记录候选修复方案 | `rife`, `cli`, `ctest`, `test-gap`, `todo` |
+| **48** | [`TODO/gui_debug_log_elimination_and_debugview.md`](TODO/gui_debug_log_elimination_and_debugview.md) | 拔除 `RTX_GUI_RESULT_LOG` 环境变量，废除磁盘文件落盘，全面改用 Windows 原生 `OutputDebugString` 与 DebugView 实时监听流 | `debugview`, `occam-razor`, `outputdebugstring`, `todo` |
+| **49** | [`TODO/packaging_and_distribution_closure.md`](TODO/packaging_and_distribution_closure.md) | 开源发布归档分发与 NVIDIA 专有运行时再分发权合规闭环方案 (TODO-PKG-DIST-20261102) | `packaging`, `distribution`, `redistributable`, `gpl-compliance` |
+
+---
+
+## 九、 阶段五 双平面微内核与 Blackwell 极限特化 (`docs/phase5/`)
+
+本目录收录阶段五（双平面异步微内核 DAG 调度器、Blackwell sm_120 极限硬件特化、AV1 编码器升级及画质修复）的开工预研、专家委托与技术裁决档案。
+
+| 序号 | 规范与调研文档 | 核心内容 | 索引关键字 |
+| :---: | :--- | :--- | :--- |
+| **50** | [`phase5/CineRTX_Phase5_开工预研与关键问题专家深度调研委托书.md`](phase5/CineRTX_Phase5_开工预研与关键问题专家深度调研委托书.md) | 阶段五开工预研、画质色偏排查、竖屏自适应、AV1 默认选型与文档审计专家深度调研委托书 (DOC-COMMISSION-PHASE5-PRERESEARCH-001) | `phase5-pre-research`, `color-inversion-fix`, `vertical-video`, `av1-default`, `i18n` |
+| **51** | [`phase5/CineRTX 阶段五预研专家调研.md`](phase5/CineRTX%20阶段五预研专家调研.md) | 阶段五开工预研与八大关键工程问题领域专家深度调研及技术裁决报告 (VERDICT-COMMISSION-PHASE5-PRERESEARCH-001，全票审定批准八大决议案并下达强制加固指令) | `verdict`, `phase5-pre-research`, `color-hardening`, `black-level`, `smart-geometry`, `av1-default` |
 

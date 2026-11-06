@@ -31,6 +31,7 @@ public:
     // Read-only view over caller-owned bytes.  The span must outlive the
     // context; the demuxer keeps the source vector alive for its own lifetime.
     explicit MemoryAvioContext(std::span<const uint8_t> read_only_buf);
+    explicit MemoryAvioContext(std::span<const std::byte> read_only_buf);
 
     // Append/overwrite sink.  The vector is resized on demand and the context
     // never takes ownership of it.
@@ -48,6 +49,8 @@ public:
     [[nodiscard]] bool writable() const noexcept { return is_writable_; }
     [[nodiscard]] size_t position() const noexcept { return pos_; }
     [[nodiscard]] size_t size() const noexcept;
+    [[nodiscard]] bool isInitialized() const noexcept { return valid(); }
+    void shutdown() noexcept;
 
     // Marks the stream as seekable (AVIO_SEEKABLE_NORMAL).  libavformat leaves
     // avio_alloc_context() contexts non-seekable by default, and the mov /

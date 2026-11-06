@@ -335,8 +335,8 @@ int32_t createBridge(const RtxFrucConfig* cfg, RtxFrucBridge** out_bridge, char*
     if (cfg->backend_type == RTX_FRUC_BACKEND_NVOFFRUC) {
         vendor_ready = state.ofruc_api.loaded && state.cuda_api.loaded && gpu_mode;
     } else if (cfg->backend_type == RTX_FRUC_BACKEND_TRT_RIFE) {
-        vendor_ready = state.cuda_api.loaded && gpu_mode && cfg->model_engine_path != nullptr &&
-                       cfg->model_engine_path[0] != '\0';
+        vendor_ready = state.cuda_api.loaded && gpu_mode && cfg->model_engine_uri != nullptr &&
+                       cfg->model_engine_uri[0] != '\0';
     }
 
     auto* bridge = new (std::nothrow) RtxFrucBridge();
@@ -417,12 +417,12 @@ int32_t interpolateFrame(RtxFrucBridge* bridge, const RtxFrucFrameInput* in) {
     return RTX_FRUC_ERR_UNSUPPORTED;
 }
 
-int32_t buildEngine(const char* onnx_path, const char* engine_out_path, uint32_t width,
+int32_t buildEngine(const char* onnx_file, const char* engine_out_file, uint32_t width,
                     uint32_t height, uint32_t fp16, char* err_buf, uint32_t err_cap) {
     (void)width;
     (void)height;
     (void)fp16;
-    if (onnx_path == nullptr || engine_out_path == nullptr) {
+    if (onnx_file == nullptr || engine_out_file == nullptr) {
         writeError(err_buf, err_cap, "build_engine requires an ONNX input and an engine output");
         return RTX_FRUC_ERR_INVALID_ARGUMENT;
     }

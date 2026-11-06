@@ -30,6 +30,7 @@ CMakeUserPresets.json
 *.p010
 *.sidecar.json
 SHA256SUMS.txt
+*.dmp
 
 # Stray tool output (compiler preprocessor dumps land in the repo root when a
 # probe redirect is mistyped; a file literally named "-" has happened before)

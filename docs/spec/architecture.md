@@ -59,6 +59,19 @@ Consequences that are enforced mechanically, not by convention:
    `rtx::io::MemoryAvioContext` (`avio_alloc_context`), so "the tests pass but
    the shipped binary cannot demux" is structurally impossible.
 
+### 1.3 Occam's Razor & Zero-Switch Invariant (奥卡姆剃刀与禁绝冗余开关铁律)
+
+**【奥卡姆剃刀与禁绝冗余开关铁律】** CineRTX 坚决奉行“如无必要，勿增实体”的极简主义设计哲学。
+在代码库与系统架构演进中：
+1. **加任何开关之前，必须先经过至少三次独立深入反思，确认是否有不可替代的绝对必然性**。
+   此类开关包括但不限于：
+   - 命令行参数选项（如 `--switch`、`--feature-flag`）
+   - 环境变量开关（如 `RTX_ENABLE_XXX`、`RTX_DISABLE_XXX`、`RTX_NO_XXX`）
+   - CMake 条件编译宏（如 `RTX_WITH_XXX`、`RTX_HAVE_XXX`）
+   - 运行时内部动态配置分支或降级旁路
+2. **单一确定性产品路径**：引擎核心行为必须保持确定、无歧义、无分支。产品转码路径无条件执行，不搞多重模式切换；容灾诊断与环境引导按最佳实践内建闭环，严禁通过增加开关将认知负担与决策成本转嫁给用户或部署环境。
+3. **不可替代性门禁**：若且仅若经过三次深入反思后，确有不可调和的外部物理冲突（如不兼容的硬件规范要求），且无法通过确定性自适应推导完成时，方可提请架构委员会专项审议，并附带详尽的不可替代性论证。否则，一律视为违背架构哲学的冗余过度设计，坚决予以否决。
+
 ## 2. Stage order
 
 | Stage | Input | Output | Reference implementation | NVIDIA implementation |

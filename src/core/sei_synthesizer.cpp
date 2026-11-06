@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <iomanip>
-#include <sstream>
+#include <format>
+#include <string>
 
 namespace rtx {
 namespace {
@@ -86,28 +86,28 @@ std::string boolString(bool value) { return value ? "true" : "false"; }
 
 Result<void> TrueHdrParameters::validate() const {
     if (contrast < 50 || contrast > 200) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
-                                  "TrueHDR contrast out of range [50,200]",
-                                  std::to_string(contrast));
+        return err(ErrorCode::InvalidArgument,
+                   "TrueHDR contrast out of range [50,200]",
+                   std::to_string(contrast));
     }
     if (saturation < 50 || saturation > 200) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
-                                  "TrueHDR saturation out of range [50,200]",
-                                  std::to_string(saturation));
+        return err(ErrorCode::InvalidArgument,
+                   "TrueHDR saturation out of range [50,200]",
+                   std::to_string(saturation));
     }
     if (middle_gray < 10 || middle_gray > 100) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
-                                  "TrueHDR middle grey out of range [10,100]",
-                                  std::to_string(middle_gray));
+        return err(ErrorCode::InvalidArgument,
+                   "TrueHDR middle grey out of range [10,100]",
+                   std::to_string(middle_gray));
     }
     if (max_luminance < 100 || max_luminance > 4000) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
-                                  "TrueHDR max luminance out of range [100,4000]",
-                                  std::to_string(max_luminance));
+        return err(ErrorCode::InvalidArgument,
+                   "TrueHDR max luminance out of range [100,4000]",
+                   std::to_string(max_luminance));
     }
     if (max_fall < 0 || max_fall > 65535) {
-        return Result<void>::fail(ErrorCode::InvalidArgument,
-                                  "MaxFALL out of range [0,65535]");
+        return err(ErrorCode::InvalidArgument,
+                   "MaxFALL out of range [0,65535]");
     }
     return {};
 }
@@ -139,9 +139,9 @@ MasteringDisplay SeiSynthesizer::makeMasteringDisplay(MasteringPreset preset, ui
 }
 
 Result<Hdr10Metadata> SeiSynthesizer::makeMetadata(const TrueHdrParameters& params) {
-    const Status validation = params.validate();
-    if (!validation.ok()) {
-        return Result<Hdr10Metadata>::fromStatus(validation);
+    const Result<void> validation = params.validate();
+    if (!validation.has_value()) {
+        return std::unexpected(validation.error());
     }
     Hdr10Metadata metadata{};
     metadata.enabled = true;
@@ -152,7 +152,7 @@ Result<Hdr10Metadata> SeiSynthesizer::makeMetadata(const TrueHdrParameters& para
     metadata.color = ColorDescription{ColorPrimaries::BT2020, TransferFunction::SMPTE2084,
                                       MatrixCoefficients::BT2020NC, ColorRange::Limited};
     metadata.target_nits = static_cast<uint32_t>(params.max_luminance);
-    return Result<Hdr10Metadata>::ok(metadata);
+    return metadata;
 }
 
 NvencHevcHdrSettings SeiSynthesizer::makeNvencSettings(const Hdr10Metadata& metadata) {
@@ -304,40 +304,57 @@ std::vector<uint8_t> SeiSynthesizer::containerSideData(const Hdr10Metadata& meta
 }
 
 std::string SeiSynthesizer::toJson(const Hdr10Metadata& metadata) {
-    std::ostringstream out;
-    out << "{\n";
-    out << "  \"enabled\": " << boolString(metadata.enabled) << ",\n";
-    out << "  \"target_nits\": " << metadata.target_nits << ",\n";
-    out << "  \"color\": {\n";
-    out << "    \"primaries\": " << static_cast<int>(metadata.color.primaries) << ",\n";
-    out << "    \"transfer\": " << static_cast<int>(metadata.color.transfer) << ",\n";
-    out << "    \"matrix\": " << static_cast<int>(metadata.color.matrix) << ",\n";
-    out << "    \"range\": " << static_cast<int>(metadata.color.range) << "\n";
-    out << "  },\n";
-    out << "  \"mastering_display\": {\n";
-    out << "    \"red_x\": " << metadata.mastering.red_x << ",\n";
-    out << "    \"red_y\": " << metadata.mastering.red_y << ",\n";
-    out << "    \"green_x\": " << metadata.mastering.green_x << ",\n";
-    out << "    \"green_y\": " << metadata.mastering.green_y << ",\n";
-    out << "    \"blue_x\": " << metadata.mastering.blue_x << ",\n";
-    out << "    \"blue_y\": " << metadata.mastering.blue_y << ",\n";
-    out << "    \"white_x\": " << metadata.mastering.white_x << ",\n";
-    out << "    \"white_y\": " << metadata.mastering.white_y << ",\n";
-    out << "    \"max_luminance\": " << metadata.mastering.max_luminance << ",\n";
-    out << "    \"min_luminance\": " << metadata.mastering.min_luminance << "\n";
-    out << "  },\n";
-    out << "  \"content_light_level\": {\n";
-    out << "    \"max_cll\": " << metadata.cll.max_cll << ",\n";
-    out << "    \"max_fall\": " << metadata.cll.max_fall << "\n";
-    out << "  }\n";
-    out << "}\n";
-    return out.str();
+    return std::format(
+        "{{\n"
+        "  \"enabled\": {},\n"
+        "  \"target_nits\": {},\n"
+        "  \"color\": {{\n"
+        "    \"primaries\": {},\n"
+        "    \"transfer\": {},\n"
+        "    \"matrix\": {},\n"
+        "    \"range\": {}\n"
+        "  }},\n"
+        "  \"mastering_display\": {{\n"
+        "    \"red_x\": {},\n"
+        "    \"red_y\": {},\n"
+        "    \"green_x\": {},\n"
+        "    \"green_y\": {},\n"
+        "    \"blue_x\": {},\n"
+        "    \"blue_y\": {},\n"
+        "    \"white_x\": {},\n"
+        "    \"white_y\": {},\n"
+        "    \"max_luminance\": {},\n"
+        "    \"min_luminance\": {}\n"
+        "  }},\n"
+        "  \"content_light_level\": {{\n"
+        "    \"max_cll\": {},\n"
+        "    \"max_fall\": {}\n"
+        "  }}\n"
+        "}}\n",
+        boolString(metadata.enabled),
+        metadata.target_nits,
+        static_cast<int>(metadata.color.primaries),
+        static_cast<int>(metadata.color.transfer),
+        static_cast<int>(metadata.color.matrix),
+        static_cast<int>(metadata.color.range),
+        metadata.mastering.red_x,
+        metadata.mastering.red_y,
+        metadata.mastering.green_x,
+        metadata.mastering.green_y,
+        metadata.mastering.blue_x,
+        metadata.mastering.blue_y,
+        metadata.mastering.white_x,
+        metadata.mastering.white_y,
+        metadata.mastering.max_luminance,
+        metadata.mastering.min_luminance,
+        metadata.cll.max_cll,
+        metadata.cll.max_fall);
 }
 
 Result<Hdr10Metadata> SeiSynthesizer::fromJson(const std::string& json) {
     if (json.find("\"mastering_display\"") == std::string::npos) {
-        return Result<Hdr10Metadata>::fail(ErrorCode::InvalidArgument,
-                                           "HDR sidecar is missing mastering_display");
+        return err(ErrorCode::InvalidArgument,
+                   "HDR sidecar is missing mastering_display");
     }
     Hdr10Metadata metadata{};
     metadata.enabled = json.find("\"enabled\": true") != std::string::npos;
@@ -363,10 +380,10 @@ Result<Hdr10Metadata> SeiSynthesizer::fromJson(const std::string& json) {
         static_cast<ColorRange>(findInt(json, "range", 0)),
     };
     if (metadata.mastering.max_luminance == 0) {
-        return Result<Hdr10Metadata>::fail(ErrorCode::InvalidArgument,
-                                           "mastering display max luminance is zero");
+        return err(ErrorCode::InvalidArgument,
+                   "mastering display max luminance is zero");
     }
-    return Result<Hdr10Metadata>::ok(metadata);
+    return metadata;
 }
 
 }  // namespace rtx
