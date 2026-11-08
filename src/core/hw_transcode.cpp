@@ -428,10 +428,10 @@ public:
             bridge_config.output_height = target_height_;
             bridge_config.vsr_quality = options.vsr_quality;
             bridge_config.enable_truehdr = 1;
-            bridge_config.contrast = 0;
-            bridge_config.saturation = 0;
-            bridge_config.middle_gray = 0;
-            bridge_config.max_luminance = 0;
+            bridge_config.contrast = 100;
+            bridge_config.saturation = 100;
+            bridge_config.middle_gray = 50;
+            bridge_config.max_luminance = 1000;
             bridge_config.project_id = 0x52545831u;
 
             RtxNgxBridge* raw_bridge = nullptr;
@@ -476,10 +476,8 @@ public:
         output_info_.video_codec = report.output_codec;
         output_info_.format_name.clear();
         output_info_.annex_b = true;
-        if (hdr_.enabled) {
-            output_info_.color = hdr_.color;
-            output_info_.bit_depth = output_depth;
-        }
+        output_info_.color = hdr_.color;
+        output_info_.bit_depth = output_depth;
         frame_rate_ = chooseFrameRate(options, info_);
         return {};
     }
@@ -905,9 +903,12 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
     };
 
     const int input_full_range = info.color.range == ColorRange::Full ? 1 : 0;
-    int input_matrix = 1;
-    if (info.color.matrix == MatrixCoefficients::BT709) input_matrix = 1;
-    else if (info.color.matrix == MatrixCoefficients::BT2020NC) input_matrix = 9;
+    int input_matrix = 0;  // 0 = BT.709 (ABI 契约)
+    if (info.color.matrix == MatrixCoefficients::BT2020NC) {
+        input_matrix = 1;  // 1 = BT.2020 NCL
+    } else {
+        input_matrix = 0;  // 0 = BT.709
+    }
 
     RtxNgxRemasterStats previous_stats{};
     double pack_max_ms = 0.0;

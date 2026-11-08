@@ -178,6 +178,8 @@ struct CudaApi {
     CUresult (*event_record)(CUevent, CUstream) = nullptr;
     CUresult (*event_elapsed)(float*, CUevent, CUevent) = nullptr;
     CUresult (*event_destroy)(CUevent) = nullptr;
+    CUresult (*memset_d2d16)(CUdeviceptr, size_t, unsigned short, size_t, size_t) = nullptr;
+    CUresult (*memset_d16)(CUdeviceptr, unsigned short, size_t) = nullptr;
 
     bool load(std::string* error) {
         HMODULE module = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -279,6 +281,14 @@ struct CudaApi {
             event_destroy = reinterpret_cast<decltype(event_destroy)>(sym("cuEventDestroy"));
         }
         get_error_name = reinterpret_cast<decltype(get_error_name)>(sym("cuGetErrorName"));
+        memset_d2d16 = reinterpret_cast<decltype(memset_d2d16)>(sym("cuMemsetD2D16_v2"));
+        if (memset_d2d16 == nullptr) {
+            memset_d2d16 = reinterpret_cast<decltype(memset_d2d16)>(sym("cuMemsetD2D16"));
+        }
+        memset_d16 = reinterpret_cast<decltype(memset_d16)>(sym("cuMemsetD16_v2"));
+        if (memset_d16 == nullptr) {
+            memset_d16 = reinterpret_cast<decltype(memset_d16)>(sym("cuMemsetD16"));
+        }
         // The external-semaphore family is optional: older drivers keep the
         // CPU-wait fallback alive.  Everything else is mandatory.
         if (init == nullptr || import_external_memory == nullptr ||
@@ -813,6 +823,37 @@ bool D3D12Interop::create_pack_stream(std::string* error) {
     pack_stream_ = stream;
     pack_stream_priority_ = greatest;
     pack_stream_high_priority_ = greatest < least;
+    return true;
+}
+
+bool D3D12Interop::clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t width,
+                                    uint32_t height, std::string* error) {
+    if (device_ptr == 0) {
+        return true;
+    }
+    CudaApi& cuda = cudaApi();
+    if (!bind_context(error)) {
+        return false;
+    }
+    const uint16_t y_black = 0x1000;      // 10-bit limited black: 64 << 6
+    const uint16_t uv_neutral = 0x8000;   // 10-bit neutral chroma: 512 << 6
+    const size_t y_rows = height;
+    const size_t uv_rows = height / 2;
+    const size_t width_samples = width;
+
+    if (cuda.memset_d2d16 != nullptr) {
+        cuda.memset_d2d16(static_cast<CUdeviceptr>(device_ptr), pitch, y_black, width_samples, y_rows);
+        const CUdeviceptr uv_ptr = static_cast<CUdeviceptr>(device_ptr + pitch * height);
+        cuda.memset_d2d16(uv_ptr, pitch, uv_neutral, width_samples, uv_rows);
+    } else if (cuda.memset_d16 != nullptr) {
+        for (size_t r = 0; r < y_rows; ++r) {
+            cuda.memset_d16(static_cast<CUdeviceptr>(device_ptr + r * pitch), y_black, width_samples);
+        }
+        const uint64_t uv_base = device_ptr + pitch * height;
+        for (size_t r = 0; r < uv_rows; ++r) {
+            cuda.memset_d16(static_cast<CUdeviceptr>(uv_base + r * pitch), uv_neutral, width_samples);
+        }
+    }
     return true;
 }
 

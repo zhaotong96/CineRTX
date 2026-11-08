@@ -99,7 +99,7 @@ $L__BB0_5:
 	shr.s32 	%r19, %r2, 1;
 	shr.s32 	%r20, %r4, 1;
 	mul.wide.s32 	%rd19, %r20, %r19;
-	shl.b32 	%r21, %r1, 1;
+	and.b32 	%r21, %r1, -2;
 	cvt.s64.s32 	%rd20, %r21;
 	add.s64 	%rd21, %rd19, %rd20;
 	.loc	1 141 9
@@ -145,7 +145,7 @@ $L__BB0_2:
 	.loc	1 159 9
 	shr.s32 	%r16, %r2, 1;
 	mul.wide.s32 	%rd10, %r4, %r16;
-	shl.b32 	%r17, %r1, 1;
+	and.b32 	%r17, %r1, -2;
 	cvt.s64.s32 	%rd11, %r17;
 	add.s64 	%rd12, %rd10, %rd11;
 	.loc	1 160 9

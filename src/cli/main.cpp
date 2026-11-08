@@ -78,6 +78,8 @@ struct Options {
     bool fps_set = false;
     bool four_k_profile = false;
     bool no_cuda_graph = false;
+    bool truehdr = false;
+    bool hdr_set = false;
     std::filesystem::path input_path;
     std::filesystem::path output_path;
     std::filesystem::path onnx;
@@ -113,6 +115,8 @@ void printHelp() {
               << "  --vsr-quality 1..4           NGX VSR quality (default 2)\n"
               << "  --json                       Machine-readable output\n"
               << "  --quiet, --verbose           Logging verbosity\n"
+              << "  --truehdr                    Enable TrueHDR inverse tone mapping (SDR -> HDR10)\n"
+              << "  --sdr                        Force SDR native color space (default for SDR sources)\n"
               << "  --4k-profile                 Allow a 4K RIFE workspace\n"
               << "  --no-cuda-graph              Omit --useCudaGraph from trtexec\n"
               << "  --lang en|zh                 Output language (default: zh)\n"
@@ -262,6 +266,12 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.verbose = true;
         } else if (argument == "--4k-profile") {
             options.four_k_profile = true;
+        } else if (argument == "--truehdr") {
+            options.truehdr = true;
+            options.hdr_set = true;
+        } else if (argument == "--sdr") {
+            options.truehdr = false;
+            options.hdr_set = true;
         } else if (argument == "--no-cuda-graph") {
             options.no_cuda_graph = true;
         } else {
@@ -386,6 +396,7 @@ HwTranscodeOptions makeHwOptions(const Options& options) {
     hardware.target_height = options.target_height;
     hardware.vsr_quality = options.vsr_quality;
     hardware.verbose = options.verbose;
+    hardware.hdr = options.hdr_set ? options.truehdr : false;
     return hardware;
 }
 

@@ -226,6 +226,8 @@ public:
     // ---------------------------------------------------------------------
     bool alloc_pitched(uint64_t* device_ptr, size_t* pitch, size_t width_bytes, size_t rows,
                        std::string* error);
+    bool clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t width, uint32_t height,
+                          std::string* error);
     bool free_device(uint64_t device_ptr, std::string* error);
     bool event_create(void** event, std::string* error);
     void event_destroy(void* event) noexcept;

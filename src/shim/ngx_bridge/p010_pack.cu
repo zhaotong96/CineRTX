@@ -137,7 +137,7 @@ extern "C" __global__ void rtx_yuv_to_rgb10(
         const unsigned short y_raw =
             y_plane[static_cast<size_t>(y) * (y_pitch_bytes >> 1) + x];
         const size_t uv_offset =
-            static_cast<size_t>(y >> 1) * (uv_pitch_bytes >> 1) + (x << 1);
+            static_cast<size_t>(y >> 1) * (uv_pitch_bytes >> 1) + (x & ~1);
         const unsigned short u_raw = uv_plane[uv_offset];
         const unsigned short v_raw = uv_plane[uv_offset + 1];
         const float y10 = static_cast<float>(y_raw >> 6);
@@ -156,7 +156,7 @@ extern "C" __global__ void rtx_yuv_to_rgb10(
         const unsigned char* y8 = reinterpret_cast<const unsigned char*>(y_plane);
         const unsigned char* uv8 = reinterpret_cast<const unsigned char*>(uv_plane);
         const float yv = static_cast<float>(y8[static_cast<size_t>(y) * y_pitch_bytes + x]);
-        const size_t uv_offset = static_cast<size_t>(y >> 1) * uv_pitch_bytes + (x << 1);
+        const size_t uv_offset = static_cast<size_t>(y >> 1) * uv_pitch_bytes + (x & ~1);
         const float uv_u = static_cast<float>(uv8[uv_offset]);
         const float uv_v = static_cast<float>(uv8[uv_offset + 1]);
         if (full_range) {

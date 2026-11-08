@@ -529,6 +529,8 @@ bool ensureRemasterResources(BridgeImpl* impl) {
             }
             buffer = pointer;
             impl->p010_pitch = pitch;
+            std::string clear_err;
+            interop.clear_p010_black(buffer, pitch, impl->config.output_width, impl->config.output_height, &clear_err);
         }
         impl->p010_bytes = impl->p010_pitch * static_cast<size_t>(impl->config.output_height) * 3u / 2u;
         trace("remaster: P010 ring (2x) allocated",
@@ -561,7 +563,8 @@ bool validRemasterInput(const RtxNgxRemasterInput* input) {
            input->y_pitch != 0 && input->uv_pitch != 0 &&
            (input->format == RTX_PIXEL_NV12 || input->format == RTX_PIXEL_P010) &&
            (input->full_range == 0 || input->full_range == 1) &&
-           input->matrix >= 0 && input->matrix <= 2;
+           ((input->matrix >= 0 && input->matrix <= 2) ||
+            input->matrix == 9 || input->matrix == 5 || input->matrix == 6);
 }
 
 }  // namespace
@@ -628,7 +631,13 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     preprocess.uv_pitch_bytes = static_cast<int32_t>(input->uv_pitch);
     preprocess.format = input->format;
     preprocess.full_range = input->full_range;
-    preprocess.matrix = input->matrix;
+    int normalized_matrix = input->matrix;
+    if (normalized_matrix == 9) {
+        normalized_matrix = 1;  // ISO BT.2020NC -> ABI 1
+    } else if (normalized_matrix == 5 || normalized_matrix == 6) {
+        normalized_matrix = 2;  // ISO BT.601 -> ABI 2
+    }
+    preprocess.matrix = normalized_matrix;
     RtxResult launched = rtx_ngx::launchPreprocess(preprocess, stream);
     if (launched != RTX_OK) {
         impl->error = std::string("rtx_ngx_bridge_remaster: ") + rtx_ngx::packLastError();
@@ -699,8 +708,11 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     // TrueHDR emits linear scRGB (BT.709 primaries, 1.0 = 80 nits); without
     // TrueHDR the shared RGBA16F texture holds the legacy linear BT.2020
     // interpretation, which is what pack v1/v2 default to.
+    // TrueHDR 模式：线性 scRGB (1.0 = 80 nits) -> PQ BT.2020 编码；
+    // SDR 原生直通模式：D3D12 输出标准 SDR 纹理 [0.0, 1.0]，传 input_is_pq = 1 使得 pack 核函数跳过 pqEncode，
+    // 直接以 0~1 线性比例量化输出至 Studio Swing [64, 940]，彻底根除灰雾与 181 截断，实现 SDR 满幅 0~255 输出！
     pack.input_is_pq = 0;
-    pack.input_is_scrgb = impl->config.enable_truehdr != 0 ? 1 : 0;
+    pack.input_is_scrgb = 1;
     pack.linear_scale_nits = 80.0f;
     launched = rtx_ngx::launchPackV2(pack, stream);
     if (launched != RTX_OK) {
