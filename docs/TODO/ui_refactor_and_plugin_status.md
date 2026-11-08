@@ -1,10 +1,10 @@
 # CineRTX GUI 演进重构设计：底部状态栏与插件运行态诊断体系
 
 > **文档标识**：`SPEC-GUI-TODO-001`  
-> **所属目录**：[`docs/TODO/ui_refactor_and_plugin_status.md`](file:///[REDACTED_PROJ]/docs/TODO/ui_refactor_and_plugin_status.md)  
+> **所属目录**：[`docs/TODO/ui_refactor_and_plugin_status.md`](./ui_refactor_and_plugin_status.md)  
 > **起草日期**：2026-10-25  
 > **状态**：待评审 / 演进路线规划 (Draft / RFC)  
-> **适用目标**：[`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp) 原生 Win32 GDI 即时态单 exe GUI
+> **适用目标**：[`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp) 原生 Win32 GDI 即时态单 exe GUI
 
 > **2026-10-29 更新：** 产品契约已统一为单一重制链路。GUI 现在直接调用
 > `rtx::runNvidiaRemasterTranscode`，不再提供“极速转码 / AI 重制”双模式选择，
@@ -16,7 +16,7 @@
 ## 1. 现状审查与核心痛点 (Problem Statement)
 
 ### 1.1 现状盲区实测
-在当前 CineRTX GUI 实现（[`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp)）中，界面设计仅包含顶栏设备名、视频拖拽卡片、编解码参数卡片与下方任务吞吐进度条：
+在当前 CineRTX GUI 实现（[`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp)）中，界面设计仅包含顶栏设备名、视频拖拽卡片、编解码参数卡片与下方任务吞吐进度条：
 1. **完全缺失状态栏 (Status Bar)**：主窗口底部缺乏持久化硬件与环境诊断状态栏，用户无法感知当前系统底层能力；
 2. **插件装载为静默失败 (Silent Fallback)**：
    - 依赖目录 `plugins/nvidia_rtx/` 下缺少 `nvngx_vsr.dll` 或 `nvngx_truehdr.dll` 时，GUI 没有任何显式视觉提示（如置灰、警告角标、缺件说明）；
@@ -206,7 +206,7 @@ void drawStatusBar(HDC dc, int width, int height) {
 
 | 阶段 | 实施内容 | 交付标准 | 关联 issue / 模块 |
 | :---: | :--- | :--- | :--- |
-| **Phase 3.1** | **状态栏基础设施与异步探针** | 窗口底部渲染 4 槽位状态栏；实现无锁后台探测线程与 `kMsgPluginDiagnostics` 消息处理； | [`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp) |
-| **Phase 3.2** | **Gate 2 重制模式交互控件** | 增加工作模式单选控件（极速裸转码 vs AI重制）；缺少 DLL 时自动置灰并展示角标； | [`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp) |
+| **Phase 3.1** | **状态栏基础设施与异步探针** | 窗口底部渲染 4 槽位状态栏；实现无锁后台探测线程与 `kMsgPluginDiagnostics` 消息处理； | [`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp) |
+| **Phase 3.2** | **Gate 2 重制模式交互控件** | 增加工作模式单选控件（极速裸转码 vs AI重制）；缺少 DLL 时自动置灰并展示角标； | [`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp) |
 | **Phase 3.3** | **诊断弹窗与排障向导** | 点击置灰卡片或状态栏槽位，弹出自愈引导（一键打开 `plugins/nvidia_rtx` 目录）； | `ShellExecuteW(..., L"explore", ...)` |
-| **Phase 3.4** | **端到端测试与自检** | 添加 `--gui-self-test-missing-plugins` 仿真测试，验证无 DLL 时的健壮性与无崩溃保障。 | [`tests/unit/gui_smoke_test.cpp`](file:///[REDACTED_PROJ]/tests/unit/gui_smoke_test.cpp) |
+| **Phase 3.4** | **端到端测试与自检** | 添加 `--gui-self-test-missing-plugins` 仿真测试，验证无 DLL 时的健壮性与无崩溃保障。 | [`tests/unit/gui_smoke_test.cpp`](../../tests/unit/gui_smoke_test.cpp) |

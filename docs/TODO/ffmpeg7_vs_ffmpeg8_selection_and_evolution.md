@@ -1,10 +1,10 @@
 # CineRTX 媒体底层架构决断：FFmpeg 7.1.1 锁定依据与 FFmpeg 8.x 未来演进技术评估
 
 > **文档标识**：`SPEC-TODO-FFMPEG-EVOLUTION-003`  
-> **所属目录**：[`docs/TODO/ffmpeg7_vs_ffmpeg8_selection_and_evolution.md`](file:///C:/PUBLIC/[REDACTED_PROJ]/docs/TODO/ffmpeg7_vs_ffmpeg8_selection_and_evolution.md)  
+> **所属目录**：[`docs/TODO/ffmpeg7_vs_ffmpeg8_selection_and_evolution.md`](./ffmpeg7_vs_ffmpeg8_selection_and_evolution.md)  
 > **起草日期**：2026-10-26  
 > **状态**：归档记录 / 未来演进路线储备 (Archived Deliberation & Future RFC)  
-> **关联规范**：[`docs/phase3/CineRTX FFmpeg全量静态链接专家方案.md`](file:///C:/PUBLIC/[REDACTED_PROJ]/docs/phase3/CineRTX%20FFmpeg全量静态链接专家方案.md)、[`docs/phase3/CineRTX_FFmpeg全量静态链接全栈施工方案.md`](file:///C:/PUBLIC/[REDACTED_PROJ]/docs/phase3/CineRTX_FFmpeg全量静态链接全栈施工方案.md)
+> **关联规范**：[`docs/phase3/CineRTX FFmpeg全量静态链接专家方案.md`](../../docs/phase3/CineRTX%20FFmpeg全量静态链接专家方案.md)、[`docs/phase3/CineRTX_FFmpeg全量静态链接全栈施工方案.md`](../../docs/phase3/CineRTX_FFmpeg全量静态链接全栈施工方案.md)
 
 ---
 
@@ -115,7 +115,7 @@ FFmpeg 8.x 是重大的主版本跃升（Major Version Bump），对库的 ABI�
 
 #### 升级实施步骤：
 1. **外部构建脚本升级**：
-   - 将 [`tools/build_ffmpeg_static_msvc.sh`](file:///C:/PUBLIC/[REDACTED_PROJ]/tools/build_ffmpeg_static_msvc.sh) 中的版本定义更新为目标版本：
+   - 将 [`tools/build_ffmpeg_static_msvc.sh`](../../tools/build_ffmpeg_static_msvc.sh) 中的版本定义更新为目标版本：
      ```bash
      FFMPEG_VERSION="${FFMPEG_VERSION:-8.1.0}"
      ```
@@ -124,10 +124,10 @@ FFmpeg 8.x 是重大的主版本跃升（Major Version Bump），对库的 ABI�
    - 运行 dumpbin 审计新版 `.lib`，确认不包含网络（`ws2_32`）、加密（`schannel`）等污染符号；
    - 验证静态库总体积仍然稳定控制在 $\le 3.5\text{ MB}$；
 3. **更新 CMake 供应链清单**：
-   - 计算新生成的 `.zip` 静态归档包的 SHA-256，更新 [`cmake/RtxFfmpegStatic.cmake`](file:///C:/PUBLIC/[REDACTED_PROJ]/cmake/RtxFfmpegStatic.cmake)；
+   - 计算新生成的 `.zip` 静态归档包的 SHA-256，更新 [`cmake/RtxFfmpegStatic.cmake`](../../cmake/RtxFfmpegStatic.cmake)；
 4. **门禁回归验证**：
    - 执行 `ctest --output-on-failure`：确保 137+ 项单元测试 100% PASS；
-   - 执行 [`tools/audit_imports.ps1`](file:///C:/PUBLIC/[REDACTED_PROJ]/tools/audit_imports.ps1)：确保生成的单 EXE 导入表中 FFmpeg 动态库导入计数严格为 0；
+   - 执行 [`tools/audit_imports.ps1`](../../tools/audit_imports.ps1)：确保生成的单 EXE 导入表中 FFmpeg 动态库导入计数严格为 0；
    - 执行 1080p@60 离线与实时转码闭环压测。
 
 ---

@@ -1,10 +1,10 @@
 # CineRTX 国际化 (i18n) 与多语言架构改造技术规范
 
 > **文档标识**：`SPEC-I18N-TODO-002`  
-> **所属目录**：[`docs/TODO/i18n_architecture_and_localization.md`](file:///[REDACTED_PROJ]/docs/TODO/i18n_architecture_and_localization.md)  
+> **所属目录**：[`docs/TODO/i18n_architecture_and_localization.md`](./i18n_architecture_and_localization.md)  
 > **起草日期**：2026-10-25  
 > **状态**：待评审 / 演进路线规划 (Draft / RFC)  
-> **适用目标**：[`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp)、[`src/cli/main.cpp`](file:///[REDACTED_PROJ]/src/cli/main.cpp)、核心错误汇报链路
+> **适用目标**：[`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp)、[`src/cli/main.cpp`](../../src/cli/main.cpp)、核心错误汇报链路
 
 ---
 
@@ -12,7 +12,7 @@
 
 ### 1.1 现状盲区
 经过对 CineRTX 现有源码的全面审计，目前的字符串与多语言体系存在严重的**单语言硬编码耦合**：
-1. **GUI 视图层硬编码中文**：在 [`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp) 中，所有的 UI 标签、卡片标题、占位引导语及遥测指标名称均直接以 `L"..."` 中文字符串字面量写死在绘图函数内部：
+1. **GUI 视图层硬编码中文**：在 [`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp) 中，所有的 UI 标签、卡片标题、占位引导语及遥测指标名称均直接以 `L"..."` 中文字符串字面量写死在绘图函数内部：
    - `L"RTX 零拷贝转码引擎"`
    - `L"将 MP4 / MKV 文件拖入窗口，然后开始硬件转码。"`
    - `L"输入视频"`、`L"编码  HEVC"`、`L"预设  P7"`
@@ -205,7 +205,7 @@ Language detectSystemLanguage() noexcept {
 
 | 阶段 | 实施任务 | 交付物与验证标准 |
 | :---: | :--- | :--- |
-| **Phase 4.1** | **核心抽象与双语字典落地** | 创建 [`include/rtx/i18n.h`](file:///[REDACTED_PROJ]/include/rtx/i18n.h) 与 [`src/core/i18n.cpp`](file:///[REDACTED_PROJ]/src/core/i18n.cpp)，注册全量枚举与静态表；编写单元测试验证枚举与字符串严格 1:1 对齐。 |
-| **Phase 4.2** | **GUI 视图层全面去硬编码** | 全面替换 [`src/gui/rtx_gui.cpp`](file:///[REDACTED_PROJ]/src/gui/rtx_gui.cpp) 中的 `L"..."` 中文字面量；增加系统语言自适应探测。 |
-| **Phase 4.3** | **CLI 终端参数集成与对齐** | 改造 [`src/cli/main.cpp`](file:///[REDACTED_PROJ]/src/cli/main.cpp)，增加 `--lang` 参数，完成帮助信息双语化。 |
+| **Phase 4.1** | **核心抽象与双语字典落地** | 创建 [`include/rtx/i18n.h`](../../include/rtx/i18n.h) 与 [`src/core/i18n.cpp`](../../src/core/i18n.cpp)，注册全量枚举与静态表；编写单元测试验证枚举与字符串严格 1:1 对齐。 |
+| **Phase 4.2** | **GUI 视图层全面去硬编码** | 全面替换 [`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp) 中的 `L"..."` 中文字面量；增加系统语言自适应探测。 |
+| **Phase 4.3** | **CLI 终端参数集成与对齐** | 改造 [`src/cli/main.cpp`](../../src/cli/main.cpp)，增加 `--lang` 参数，完成帮助信息双语化。 |
 | **Phase 4.4** | **无损自动化测试** | 在 CI/CD 单元测试中增加多语言覆盖率测试用例（覆盖 `en-US` 与 `zh-CN` 双模式渲染）。 |
