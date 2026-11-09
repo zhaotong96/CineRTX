@@ -132,6 +132,7 @@
 | **47** | [`TODO/rife_cli_test_fixture.md`](TODO/rife_cli_test_fixture.md) | `cli_rife_command` 覆盖缺口：进程内引擎构建缺少可解析 ONNX 夹具，本轮明确接受并记录候选修复方案 | `rife`, `cli`, `ctest`, `test-gap`, `todo` |
 | **48** | [`TODO/gui_debug_log_elimination_and_debugview.md`](TODO/gui_debug_log_elimination_and_debugview.md) | 拔除 `RTX_GUI_RESULT_LOG` 环境变量，废除磁盘文件落盘，全面改用 Windows 原生 `OutputDebugString` 与 DebugView 实时监听流 | `debugview`, `occam-razor`, `outputdebugstring`, `todo` |
 | **49** | [`TODO/packaging_and_distribution_closure.md`](TODO/packaging_and_distribution_closure.md) | 开源发布归档分发与 NVIDIA 专有运行时再分发权合规闭环方案 (TODO-PKG-DIST-20261102) | `packaging`, `distribution`, `redistributable`, `gpl-compliance` |
+| **50** | [`TODO/cli_gui_synchronization_av1_and_pro_parameters.md`](TODO/cli_gui_synchronization_av1_and_pro_parameters.md) | 双端 SSOT 配置引擎（根除双端参数不同步隐患）、默认编码升级为 AV1 10-bit、UI 工业级专业调参矩阵面板 | `ssot`, `dual-frontend-sync`, `av1-default`, `pro-parameters`, `tuning-inspector` |
 
 ---
 
@@ -141,6 +142,8 @@
 
 | 序号 | 规范与调研文档 | 核心内容 | 索引关键字 |
 | :---: | :--- | :--- | :--- |
-| **50** | [`phase5/CineRTX_Phase5_开工预研与关键问题专家深度调研委托书.md`](phase5/CineRTX_Phase5_开工预研与关键问题专家深度调研委托书.md) | 阶段五开工预研、画质色偏排查、竖屏自适应、AV1 默认选型与文档审计专家深度调研委托书 (DOC-COMMISSION-PHASE5-PRERESEARCH-001) | `phase5-pre-research`, `color-inversion-fix`, `vertical-video`, `av1-default`, `i18n` |
-| **51** | [`phase5/CineRTX 阶段五预研专家调研.md`](phase5/CineRTX%20阶段五预研专家调研.md) | 阶段五开工预研与八大关键工程问题领域专家深度调研及技术裁决报告 (VERDICT-COMMISSION-PHASE5-PRERESEARCH-001，全票审定批准八大决议案并下达强制加固指令) | `verdict`, `phase5-pre-research`, `color-hardening`, `black-level`, `smart-geometry`, `av1-default` |
+| **51** | [`phase5/CineRTX_Phase5_开工预研与关键问题专家深度调研委托书.md`](phase5/CineRTX_Phase5_开工预研与关键问题专家深度调研委托书.md) | 阶段五开工预研、画质色偏排查、竖屏自适应、AV1 默认选型与文档审计专家深度调研委托书 (DOC-COMMISSION-PHASE5-PRERESEARCH-001) | `phase5-pre-research`, `color-inversion-fix`, `vertical-video`, `av1-default`, `i18n` |
+| **52** | [`phase5/CineRTX 阶段五预研专家调研.md`](phase5/CineRTX%20阶段五预研专家调研.md) | 阶段五开工预研与八大关键工程问题领域专家深度调研及技术裁决报告 (VERDICT-COMMISSION-PHASE5-PRERESEARCH-001，全票审定批准八大决议案并下达强制加固指令) | `verdict`, `phase5-pre-research`, `color-hardening`, `black-level`, `smart-geometry`, `av1-default` |
+| **53** | [`phase5/CineRTX_Phase5_全媒体可用性与工程化落地施工方案.md`](phase5/CineRTX_Phase5_全媒体可用性与工程化落地施工方案.md) | 阶段五全媒体工业可用性施工方案（PLAN-PHASE5-MEDIA-USABILITY-20261108，音频透传、9:16竖屏自适应、SDR直通与发布闭环） | `phase5-plan`, `audio-mux`, `smart-geometry`, `sdr-passthrough`, `packaging` |
+| **54** | [`phase5/CineRTX_Phase5_全媒体可用性与工程化落地实施总结报告.md`](phase5/CineRTX_Phase5_全媒体可用性与工程化落地实施总结报告.md) | 阶段五工程实施终期总结报告（Wave 1~4 全波次交付验收、音画合流全保真、竖屏4K直出、93项单测全绿及绿色发布包闭环） | `phase5-report`, `acceptance`, `audio-verified`, `portrait-4k`, `release-closure` |
 

@@ -67,8 +67,8 @@ struct Options {
     int frames = 0;
     int width = 1920;
     int height = 1080;
-    int target_width = 3840;
-    int target_height = 2160;
+    int target_width = 0;
+    int target_height = 0;
     Rational input_fps{24, 1};
     int vsr_quality = 2;
     bool json = false;
@@ -283,9 +283,9 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
         error = "no command specified (try --help)";
         return false;
     }
-    if (options.width <= 0 || options.height <= 0 || options.target_width <= 0 ||
-        options.target_height <= 0) {
-        error = "geometry must be positive";
+    if (options.width <= 0 || options.height <= 0 || options.target_width < 0 ||
+        options.target_height < 0) {
+        error = "geometry must be positive (target may be 0 for auto 4K)";
         return false;
     }
     if (options.vsr_quality < 1 || options.vsr_quality > 4) {
@@ -442,8 +442,25 @@ void printHwReport(const HwTranscodeReport& report, const Options& options) {
 }
 
 int runHardwareMode(const Options& options) {
-    const HwTranscodeOptions hardware = makeHwOptions(options);
+    HwTranscodeOptions hardware = makeHwOptions(options);
+    if (!options.quiet && !options.json) {
+        hardware.progress = [](const HwTranscodeProgress& p) {
+            if (p.total_frames > 0) {
+                const double pct = static_cast<double>(p.frames_encoded) * 100.0 / p.total_frames;
+                const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
+                std::cout << std::format("\r[Transcode] {:5.1f}% ({}/{} frames, {:5.1f} FPS)",
+                                         pct, p.frames_encoded, p.total_frames, fps) << std::flush;
+            } else {
+                const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
+                std::cout << std::format("\r[Transcode] {} frames encoded ({:5.1f} FPS)",
+                                         p.frames_encoded, fps) << std::flush;
+            }
+        };
+    }
     Result<HwTranscodeReport> result = runNvidiaRemasterTranscode(hardware);
+    if (!options.quiet && !options.json) {
+        std::cout << "\n";
+    }
     if (!result.has_value()) {
         std::cerr << "error: " << result.error().toString() << "\n";
         return 1;

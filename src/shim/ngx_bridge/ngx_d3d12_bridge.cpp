@@ -40,6 +40,8 @@
 #include <string>
 
 #include "d3d12_interop.h"
+#include "sdr_blit_cs.h"
+#include "sdr_blit_rs.h"
 
 namespace rtx_ngx {
 namespace {
@@ -52,6 +54,9 @@ const GUID kIidGraphicsCommandList = {0x5b160d0f,
                                       0xac1b,
                                       0x4185,
                                       {0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55}};
+const GUID kIidRootSignature = {0xc54a6b66, 0x72df, 0x4ee8, {0x8b, 0xe5, 0xa9, 0x46, 0xa1, 0x42, 0x92, 0x14}};
+const GUID kIidPipelineState = {0x765a30f3, 0xf624, 0x4c6f, {0xa8, 0x28, 0xac, 0xe9, 0x48, 0x62, 0x24, 0x45}};
+const GUID kIidDescriptorHeap = {0x8efb471d, 0x616c, 0x4f49, {0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51}};
 
 constexpr auto kFenceTimeout = std::chrono::milliseconds(10000);
 constexpr double kDefaultSmoothing = 0.92;
@@ -139,7 +144,7 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     node_mask_ = config.luid_node_mask != 0 ? config.luid_node_mask : 1u;
     needs_vsr_ = output_width_ > input_width_ || output_height_ > input_height_;
     needs_truehdr_ = config.enable_truehdr != 0;
-    needs_mid_ = needs_vsr_ && needs_truehdr_;
+    needs_mid_ = needs_vsr_;
     if (!needs_vsr_ && !needs_truehdr_) {
         *error = "the NGX configuration requests neither VSR upscaling nor TrueHDR";
         return false;
@@ -270,6 +275,12 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     if (!create_features(error)) {
         cleanup();
         return false;
+    }
+    if (needs_vsr_ && !needs_truehdr_) {
+        if (!create_sdr_blit(error)) {
+            cleanup();
+            return false;
+        }
     }
     if (FAILED(list->Close())) {
         return fail("closing the feature-creation command list failed");
@@ -435,6 +446,24 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error) {
                 move(mid, mid_state, srv);
             }
         }
+    }
+
+    if (eval_ok && needs_vsr_ && !needs_truehdr_ && sdr_pso_ != nullptr) {
+        move(mid, mid_state, srv);
+        move(output, output_state, uav);
+        list->SetComputeRootSignature(as<ID3D12RootSignature>(sdr_root_signature_));
+        list->SetPipelineState(as<ID3D12PipelineState>(sdr_pso_));
+        ID3D12DescriptorHeap* heaps[] = {as<ID3D12DescriptorHeap>(sdr_descriptor_heap_)};
+        list->SetDescriptorHeaps(1, heaps);
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle =
+            as<ID3D12DescriptorHeap>(sdr_descriptor_heap_)->GetGPUDescriptorHandleForHeapStart();
+        const unsigned int inc_size =
+            as<ID3D12Device>(device_)->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        list->SetComputeRootDescriptorTable(0, gpu_handle);
+        gpu_handle.ptr += inc_size;
+        list->SetComputeRootDescriptorTable(1, gpu_handle);
+        list->Dispatch((output_width_ + 15) / 16, (output_height_ + 15) / 16, 1);
+        uav_barrier(output);
     }
 
     if (eval_ok && needs_truehdr_) {
@@ -609,7 +638,86 @@ void NgxD3D12Bridge::uav_barrier(void* resource) {
     as<ID3D12GraphicsCommandList>(command_list_)->ResourceBarrier(1, &barrier);
 }
 
+bool NgxD3D12Bridge::create_sdr_blit(std::string* error) {
+    release_sdr_blit();
+    ID3D12Device* device = as<ID3D12Device>(device_);
+    if (device == nullptr || interop_ == nullptr) {
+        *error = "cannot create SDR blit without a D3D12 device and interop";
+        return false;
+    }
+    ID3D12RootSignature* root_sig = nullptr;
+    HRESULT hr = device->CreateRootSignature(0, g_sdr_blit_rs, sizeof(g_sdr_blit_rs),
+                                             kIidRootSignature, reinterpret_cast<void**>(&root_sig));
+    if (FAILED(hr) || root_sig == nullptr) {
+        *error = "CreateRootSignature for SDR blit failed";
+        return false;
+    }
+    sdr_root_signature_ = root_sig;
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc{};
+    pso_desc.pRootSignature = root_sig;
+    pso_desc.CS = {g_sdr_blit_cs, sizeof(g_sdr_blit_cs)};
+    ID3D12PipelineState* pso = nullptr;
+    hr = device->CreateComputePipelineState(&pso_desc, kIidPipelineState, reinterpret_cast<void**>(&pso));
+    if (FAILED(hr) || pso == nullptr) {
+        *error = "CreateComputePipelineState for SDR blit failed";
+        release_sdr_blit();
+        return false;
+    }
+    sdr_pso_ = pso;
+
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap_desc.NumDescriptors = 2;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ID3D12DescriptorHeap* heap = nullptr;
+    hr = device->CreateDescriptorHeap(&heap_desc, kIidDescriptorHeap, reinterpret_cast<void**>(&heap));
+    if (FAILED(hr) || heap == nullptr) {
+        *error = "CreateDescriptorHeap for SDR blit failed";
+        release_sdr_blit();
+        return false;
+    }
+    sdr_descriptor_heap_ = heap;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle = heap->GetCPUDescriptorHandleForHeapStart();
+    const unsigned int inc_size =
+        device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    // Descriptor 0: SRV for mid texture (R8G8B8A8_UNORM)
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+    srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv_desc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(as<ID3D12Resource>(interop_->mid().resource), &srv_desc, cpu_handle);
+
+    // Descriptor 1: UAV for output texture (RGBA16F)
+    cpu_handle.ptr += inc_size;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc{};
+    uav_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    device->CreateUnorderedAccessView(as<ID3D12Resource>(interop_->output().resource), nullptr, &uav_desc, cpu_handle);
+
+    return true;
+}
+
+void NgxD3D12Bridge::release_sdr_blit() {
+    if (sdr_pso_ != nullptr) {
+        as<ID3D12PipelineState>(sdr_pso_)->Release();
+        sdr_pso_ = nullptr;
+    }
+    if (sdr_root_signature_ != nullptr) {
+        as<ID3D12RootSignature>(sdr_root_signature_)->Release();
+        sdr_root_signature_ = nullptr;
+    }
+    if (sdr_descriptor_heap_ != nullptr) {
+        as<ID3D12DescriptorHeap>(sdr_descriptor_heap_)->Release();
+        sdr_descriptor_heap_ = nullptr;
+    }
+}
+
 void NgxD3D12Bridge::release_features() {
+    release_sdr_blit();
     if (vsr_handle_ != nullptr) {
         trace("release: VSR feature");
         (void)NVSDK_NGX_D3D12_ReleaseFeature(as<NVSDK_NGX_Handle>(vsr_handle_));

@@ -187,7 +187,7 @@ flowchart TD
 ### 问题五：`build\external\plugins\nvidia_rtx` 临时文件与供应链治理
 
 #### 1. 现场勘查
-对 `C:\PUBLIC\CineRTX\build\external\plugins\nvidia_rtx` 目录进行物理排查，发现以下文件：
+对 `build\external\plugins\nvidia_rtx` 目录进行物理排查，发现以下文件：
 * `nvngx_truehdr.dll`（3,955,752 字节，NVIDIA 专有运行时 DLL）
 * `nvngx_vsr.dll`（19,140,144 字节，NVIDIA 专有运行时 DLL）
 * `rtx_ngx_bridge.dll`（2,449,920 字节，本地编译的 C 桥接库）

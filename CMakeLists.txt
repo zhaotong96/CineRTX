@@ -140,6 +140,7 @@ endif()
 
 set(RTX_CORE_SOURCES
     src/core/color.cpp
+    src/core/geometry.cpp
     src/core/hw_transcode.cpp
     src/core/i18n.cpp
     src/core/runtime_env.cpp
@@ -708,6 +709,7 @@ if(RTX_BUILD_TESTS)
         tests/test_hdr.cpp
         tests/test_i18n.cpp
         tests/test_io.cpp
+        tests/unit/test_audio_stream_copy.cpp
         tests/test_main.cpp
         tests/test_offruc_bridge.cpp
         tests/test_pingpong_pipeline.cpp

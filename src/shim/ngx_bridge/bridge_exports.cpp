@@ -42,6 +42,8 @@
 
 namespace {
 
+static std::string g_last_bridge_create_error;
+
 constexpr const char* kSdkMissingDiagnostic =
     "rtx_ngx_bridge: the RTX Video SDK (linked nvsdk_ngx_s.lib plus "
     "nvngx_vsr.dll / nvngx_truehdr.dll) is not available, so VSR and TrueHDR "
@@ -306,6 +308,7 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_create(const RtxNgxBridgeCon
     std::string ngx_error;
     if (!impl->ngx->create(*impl->interop, *config, &ngx_error)) {
         impl->error = "rtx_ngx_bridge: NGX evaluator creation failed: " + ngx_error;
+        g_last_bridge_create_error = impl->error;
         if (impl->interop->pollDeviceLost(nullptr)) {
             return RTX_ERR_DEVICE_LOST;
         }
@@ -442,6 +445,9 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_reset(RtxNgxBridge* bridge, 
 
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_ngx_bridge_last_error(RtxNgxBridge* bridge) {
     if (bridge == nullptr) {
+        if (!g_last_bridge_create_error.empty()) {
+            return g_last_bridge_create_error.c_str();
+        }
         return kSdkMissingDiagnostic;
     }
     return asBridge(bridge)->error.c_str();
@@ -711,9 +717,15 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     // TrueHDR 模式：线性 scRGB (1.0 = 80 nits) -> PQ BT.2020 编码；
     // SDR 原生直通模式：D3D12 输出标准 SDR 纹理 [0.0, 1.0]，传 input_is_pq = 1 使得 pack 核函数跳过 pqEncode，
     // 直接以 0~1 线性比例量化输出至 Studio Swing [64, 940]，彻底根除灰雾与 181 截断，实现 SDR 满幅 0~255 输出！
-    pack.input_is_pq = 0;
-    pack.input_is_scrgb = 1;
-    pack.linear_scale_nits = 80.0f;
+    if (impl->config.enable_truehdr != 0) {
+        pack.input_is_pq = 0;
+        pack.input_is_scrgb = 1;
+        pack.linear_scale_nits = 80.0f;
+    } else {
+        pack.input_is_pq = 1;
+        pack.input_is_scrgb = 0;
+        pack.linear_scale_nits = 1.0f;
+    }
     launched = rtx_ngx::launchPackV2(pack, stream);
     if (launched != RTX_OK) {
         impl->error = std::string("rtx_ngx_bridge_remaster: ") + rtx_ngx::packLastError();

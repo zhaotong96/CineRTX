@@ -33,6 +33,8 @@ struct MediaInfo {
     int64_t duration_ms = 0;
     int audio_streams = 0;
     int subtitle_streams = 0;
+    std::vector<AudioTrackInfo> audio_tracks;
+    int primary_audio_index = -1;
     bool hdr_source = false;
     std::string format_name;
 
@@ -63,6 +65,7 @@ public:
     virtual Result<void> open(const std::filesystem::path& path, const MediaInfo& info,
                         const Hdr10Metadata& hdr) = 0;
     virtual Result<void> writePacket(const Packet& packet) = 0;
+    virtual Result<void> writeAudioPacket(const Packet& packet) { return writePacket(packet); }
     virtual Result<void> finalize() = 0;
 };
 

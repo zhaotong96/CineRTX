@@ -920,8 +920,8 @@ void runJob(JobSnapshot job) {
     // Main10 with VSR + TrueHDR always enabled.  There is no passthrough or
     // codec choice to keep the two front ends functionally identical.
     options.codec = rtx::VideoCodec::HEVC;
-    options.target_width = 3840;
-    options.target_height = 2160;
+    options.target_width = 0;
+    options.target_height = 0;
     options.vsr_quality = 2;
     options.bit_depth = 10;
     options.preset = job.preset;
@@ -1388,18 +1388,12 @@ int attachParentConsole() {
         SetConsoleCP(CP_UTF8);
         FILE* consoleStream = nullptr;
         if (!outputRedirected) {
-            if (freopen_s(&consoleStream, "CONOUT$", "w", stdout) != 0) {
-                return -1;
-            }
+            freopen_s(&consoleStream, "CONOUT$", "w", stdout);
         }
         if (!errorRedirected) {
-            if (freopen_s(&consoleStream, "CONOUT$", "w", stderr) != 0) {
-                return -1;
-            }
+            freopen_s(&consoleStream, "CONOUT$", "w", stderr);
         }
-        if (freopen_s(&consoleStream, "CONIN$", "r", stdin) != 0) {
-            return -1;
-        }
+        freopen_s(&consoleStream, "CONIN$", "r", stdin);
     }
     return 0;
 }
@@ -1450,9 +1444,7 @@ extern "C" int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCom
         LocalFree(arguments);
     }
     if (hasCliArguments && !forceGui) {
-        if (attachParentConsole() != 0) {
-            return 2;
-        }
+        attachParentConsole();
         std::vector<char*> cliPointers;
         cliPointers.reserve(cliArguments.size() + 1);
         for (std::string& argument : cliArguments) {

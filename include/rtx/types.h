@@ -283,6 +283,26 @@ size_t planeByteSize(PixelFormat format, int width, int height, int plane, int p
 size_t frameByteSize(int width, int height, PixelFormat format, int* pitches = nullptr,
                      int* chroma_width = nullptr, int* chroma_height = nullptr);
 
+struct AudioTrackInfo {
+    int stream_index = -1;
+    int codec_id = 0;
+    std::string codec_name;
+    int sample_rate = 0;
+    int channels = 0;
+    uint64_t channel_layout = 0;
+    int bitrate = 0;
+    Rational time_base{1, 48000};
+    std::vector<uint8_t> extradata;
+    uint32_t codec_tag = 0;
+    int profile = 0;
+    int frame_size = 0;
+    int initial_padding = 0;
+    int trailing_padding = 0;
+    int bits_per_coded_sample = 0;
+    int format = 0;
+    std::shared_ptr<void> opaque_codecpar;
+};
+
 struct Packet {
     std::vector<uint8_t> data;
     int64_t pts = 0;

@@ -28,8 +28,9 @@ CineRTX 坚决奉行“如无必要，勿增实体”的极简主义设计哲学
 | **代码与架构深度协查** | [委托书](../phase4/CineRTX_领域专家代码与架构全面深度协查委托书.md) / [专家裁决报告](../phase4/CineRTX%20代码与架构深度协查.md) / [施工方案](../phase4/CineRTX_全仓反Slop与极简架构重塑工程施工方案.md) | **P0 (阶段四归档)** | **施工方案已签发 (闭环待审)** | 领域专家已出具反 Slop 终审裁决与负向切除清单；施工方案与协查全案归入 `docs/phase4/` 备查。 |
 | **推送前工程治理** | [`pre_push_release_remediation_backlog.md`](../phase4/pre_push_release_remediation_backlog.md) | **P0 (阶段四准入)** | **已闭环就绪** | 落实推送前静态审计（`RTX-AUDIT-2026-10-31-FINAL`）指出的 A-01 至 A-08 整改项，解决 Linux locale、启动 335MB 内存预分配、ODR 违规及文档外链问题。 |
 | **开源准入最终验收** | [`CineRTX_开源准入与全栈工程终审专家验收委托书.md`](../phase4/CineRTX_开源准入与全栈工程终审专家验收委托书.md) | **P0 (发布准入)** | **委托书就绪 (待转交评审)** | 呈报领域专家评审委员会，对全仓物理零拷贝、Modern C++26 架构纯度、三区合规及脱敏清零执行最终穿透验收，提请签署 GitHub 开源发布令。 |
-| **音频透传与混流** | [`audio_stream_copy_and_muxing.md`](./audio_stream_copy_and_muxing.md) | **P1 (核心)** | **待办立项 (Backlog)** | 解决转码后音频轨丢失/完全静音缺陷，实施 AVPacket 零拷贝流透传（Stream Copy）与唇音同步。 |
-| **智能几何自适应** | [`smart_geometry_and_aspect_ratio.md`](./smart_geometry_and_aspect_ratio.md) | **P1 (核心)** | **待办立项 (Backlog)** | 解决 9:16 竖屏被强制拉伸压扁 3.16 倍缺陷，推导长宽比自适应竖屏 4K 与 Pillarbox 消色差黑边方案。 |
+| **音频透传与混流** | [`audio_stream_copy_and_muxing.md`](./audio_stream_copy_and_muxing.md) | **P1 (核心)** | **已闭环实施 (Phase 5)** | 解决转码后音频轨丢失/完全静音缺陷，实施 AVPacket 零拷贝流透传（Stream Copy）与唇音同步。 |
+| **智能几何自适应** | [`smart_geometry_and_aspect_ratio.md`](./smart_geometry_and_aspect_ratio.md) | **P1 (核心)** | **已闭环实施 (Phase 5)** | 解决 9:16 竖屏被强制拉伸压扁 3.16 倍缺陷，推导长宽比自适应竖屏 4K 与 Pillarbox 消色差黑边方案。 |
+| **双端同步与专业调参** | [`cli_gui_synchronization_av1_and_pro_parameters.md`](./cli_gui_synchronization_av1_and_pro_parameters.md) | **P1 (核心)** | **正式立项 (Backlog)** | 建立双端 SSOT 配置中枢消除各前端参数不同步漏洞；默认编码由 HEVC 升级为 AV1 10-bit；引入工业级扩展调参矩阵面板。 |
 | **下一代架构演进** | [`phase5_roadmap_and_spec.md`](./phase5_roadmap_and_spec.md) | **P1 (核心)** | **专家批准立项** | 领域专家终审批准立项：双平面异步微内核 DAG 调度器（`GpuFrameToken`）、Blackwell sm_120 极限特化（64KB 大页、FP8/NVFP4 RIFE、NVENC v209 AV1 10-bit）。 |
 | **媒体底层演进** | [`ffmpeg7_vs_ffmpeg8_selection_and_evolution.md`](./ffmpeg7_vs_ffmpeg8_selection_and_evolution.md) | **P2 (储备)** | **归档备查** | FFmpeg 7.1.1 静态内联锁定依据及面向未来 FFmpeg 8.x 主线特性的裁剪与演进评估。 |
 | **UI 与交互重构** | [`ui_refactor_and_plugin_status.md`](./ui_refactor_and_plugin_status.md) | **P2 (储备)** | **方案就绪** | Win32 原生极简单 EXE 界面优化、DirectComposition 视口硬件加速与插件状态机解耦。 |

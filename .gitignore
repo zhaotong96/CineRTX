@@ -52,3 +52,4 @@ gate1*.nv12
 # AI agent local cache
 /.workbuddy-ai/
 /scratch/
+/dist/

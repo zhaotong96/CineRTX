@@ -31,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <mutex>
 #include <utility>
 
 extern "C" {
@@ -390,14 +391,14 @@ public:
                            avErrorString(status));
             }
             if (packet_->stream_index == audio_stream_) {
-                // Multi-track audio is delivered to the phase-3 audio pipeline;
-                // the video contract of readPacket() is unchanged.
                 bool audio_valid = false;
                 last_audio_flicks_ = projectWithTimebase(
                     *packet_, info_.time_base, audio_drift_, audio_guard_, &audio_valid);
                 last_audio_flicks_valid_ = audio_valid;
+                Packet p = convertPacket(*packet_);
+                p.stream_index = packet_->stream_index;
                 av_packet_unref(packet_);
-                continue;
+                return p;
             }
             if (packet_->stream_index != video_stream_) {
                 av_packet_unref(packet_);
@@ -464,12 +465,45 @@ private:
             info.duration_ms = format_->duration * 1000 / AV_TIME_BASE;
         }
         for (unsigned int i = 0; i < format_->nb_streams; ++i) {
-            if (format_->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            AVStream* st = format_->streams[i];
+            if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
                 ++info.audio_streams;
-            } else if (format_->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+                AudioTrackInfo track;
+                track.stream_index = static_cast<int>(i);
+                track.codec_id = st->codecpar->codec_id;
+                track.codec_name = avcodec_get_name(st->codecpar->codec_id);
+                track.sample_rate = st->codecpar->sample_rate;
+                track.channels = st->codecpar->ch_layout.nb_channels;
+                track.channel_layout = st->codecpar->ch_layout.u.mask;
+                track.bitrate = static_cast<int>(st->codecpar->bit_rate);
+                track.time_base = Rational{st->time_base.num, st->time_base.den};
+                track.codec_tag = st->codecpar->codec_tag;
+                track.profile = st->codecpar->profile;
+                track.frame_size = st->codecpar->frame_size;
+                track.initial_padding = st->codecpar->initial_padding;
+                track.trailing_padding = st->codecpar->trailing_padding;
+                track.bits_per_coded_sample = st->codecpar->bits_per_coded_sample;
+                track.format = st->codecpar->format;
+                if (st->codecpar->extradata != nullptr && st->codecpar->extradata_size > 0) {
+                    track.extradata.assign(st->codecpar->extradata,
+                                           st->codecpar->extradata + st->codecpar->extradata_size);
+                }
+                AVCodecParameters* cloned_par = avcodec_parameters_alloc();
+                if (cloned_par != nullptr) {
+                    avcodec_parameters_copy(cloned_par, st->codecpar);
+                    track.opaque_codecpar = std::shared_ptr<void>(cloned_par, [](void* p) {
+                        if (p != nullptr) {
+                            AVCodecParameters* cp = static_cast<AVCodecParameters*>(p);
+                            avcodec_parameters_free(&cp);
+                        }
+                    });
+                }
+                info.audio_tracks.push_back(std::move(track));
+            } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
                 ++info.subtitle_streams;
             }
         }
+        info.primary_audio_index = audio_stream_;
         info.color = colorFromAv(*stream->codecpar);
         info.hdr = hdrFromSideData(*stream->codecpar);
         info.hdr_source = info.hdr.enabled;
@@ -621,8 +655,14 @@ private:
         packet.duration = source.duration;
         packet.keyframe = (source.flags & AV_PKT_FLAG_KEY) != 0;
         packet.stream_index = source.stream_index;
-        packet.time_base = info_.time_base;
-        packet.pts_flicks = projectVideoPtsToFlicks(source.pts, info_.time_base, video_drift_,
+        if (source.stream_index == audio_stream_ && audio_stream_ >= 0 && format_ != nullptr &&
+            static_cast<unsigned int>(audio_stream_) < format_->nb_streams) {
+            packet.time_base = Rational{format_->streams[audio_stream_]->time_base.num,
+                                        format_->streams[audio_stream_]->time_base.den};
+        } else {
+            packet.time_base = info_.time_base;
+        }
+        packet.pts_flicks = projectVideoPtsToFlicks(source.pts, packet.time_base, video_drift_,
                                                     &packet.flicks_valid);
         return packet;
     }
@@ -758,6 +798,51 @@ public:
             }
         }
 
+        if (!info.audio_tracks.empty() && info.primary_audio_index >= 0) {
+            const AudioTrackInfo* primary = nullptr;
+            for (const auto& t : info.audio_tracks) {
+                if (t.stream_index == info.primary_audio_index) {
+                    primary = &t;
+                    break;
+                }
+            }
+            if (!primary && !info.audio_tracks.empty()) {
+                primary = &info.audio_tracks.front();
+            }
+            if (primary != nullptr) {
+                audio_stream_ = avformat_new_stream(format_, nullptr);
+                if (audio_stream_ == nullptr) {
+                    close();
+                    return err(ErrorCode::Io, "cannot create audio output stream");
+                }
+                if (primary->opaque_codecpar != nullptr) {
+                    AVCodecParameters* src_par =
+                        static_cast<AVCodecParameters*>(primary->opaque_codecpar.get());
+                    avcodec_parameters_copy(audio_stream_->codecpar, src_par);
+                } else {
+                    audio_stream_->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+                    audio_stream_->codecpar->codec_id = static_cast<AVCodecID>(primary->codec_id);
+                    audio_stream_->codecpar->sample_rate = primary->sample_rate;
+                    audio_stream_->codecpar->ch_layout.nb_channels = primary->channels;
+                    if (primary->channel_layout != 0) {
+                        av_channel_layout_from_mask(&audio_stream_->codecpar->ch_layout, primary->channel_layout);
+                    } else {
+                        av_channel_layout_default(&audio_stream_->codecpar->ch_layout, primary->channels);
+                    }
+                    audio_stream_->codecpar->bit_rate = primary->bitrate;
+                }
+                audio_stream_->codecpar->codec_tag = 0;
+                audio_stream_->time_base = AVRational{
+                    primary->time_base.num > 0 ? static_cast<int>(primary->time_base.num) : 1,
+                    primary->time_base.den > 0 ? static_cast<int>(primary->time_base.den) : primary->sample_rate
+                };
+                in_audio_time_base_ = primary->time_base;
+                out_audio_time_base_ = Rational{audio_stream_->time_base.num, audio_stream_->time_base.den};
+                audio_stream_index_ = audio_stream_->index;
+                src_audio_stream_index_ = primary->stream_index;
+            }
+        }
+
         if (in_memory) {
             memory_avio_ = std::make_unique<io::MemoryAvioContext>(memory_target_);
             if (!memory_avio_->valid()) {
@@ -796,8 +881,39 @@ public:
     }
 
     Result<void> writePacket(const Packet& packet) override {
-        if (!opened_ || format_ == nullptr || stream_ == nullptr) {
+        std::lock_guard<std::mutex> lock(muxer_mutex_);
+        if (!opened_ || format_ == nullptr) {
             return err(ErrorCode::State, "muxer is not open");
+        }
+        if (audio_stream_ != nullptr &&
+            (packet.stream_index == src_audio_stream_index_ || packet.stream_index == audio_stream_index_)) {
+            if (packet.data.size() > static_cast<size_t>(INT_MAX)) {
+                return err(ErrorCode::InvalidArgument, "audio packet is too large");
+            }
+            av_packet_unref(packet_);
+            int status = av_new_packet(packet_, static_cast<int>(packet.data.size()));
+            if (status < 0) {
+                return err(ErrorCode::OutOfMemory, "cannot allocate output audio packet");
+            }
+            std::memcpy(packet_->data, packet.data.data(), packet.data.size());
+            packet_->stream_index = audio_stream_->index;
+            const AVRational source_base{
+                in_audio_time_base_.num > 0 ? static_cast<int>(in_audio_time_base_.num) : 1,
+                in_audio_time_base_.den > 0 ? static_cast<int>(in_audio_time_base_.den) : 48000};
+            packet_->pts = av_rescale_q(packet.pts, source_base, audio_stream_->time_base);
+            packet_->dts = av_rescale_q(packet.dts, source_base, audio_stream_->time_base);
+            packet_->duration = av_rescale_q(packet.duration, source_base, audio_stream_->time_base);
+            packet_->flags = packet.keyframe ? AV_PKT_FLAG_KEY : 0;
+            status = av_interleaved_write_frame(format_, packet_);
+            av_packet_unref(packet_);
+            if (status < 0) {
+                return err(ErrorCode::Io, "cannot write audio packet",
+                           avErrorString(status));
+            }
+            return {};
+        }
+        if (stream_ == nullptr) {
+            return err(ErrorCode::State, "video stream is not open");
         }
         const bool native_annexb = container_.find("mpegts") != std::string::npos ||
                                    container_.find("m2ts") != std::string::npos ||
@@ -926,9 +1042,18 @@ private:
         }
         memory_avio_.reset();
         stream_ = nullptr;
+        audio_stream_ = nullptr;
+        audio_stream_index_ = -1;
+        src_audio_stream_index_ = -1;
         hdr_ = Hdr10Metadata{};
     }
 
+    std::mutex muxer_mutex_;
+    AVStream* audio_stream_ = nullptr;
+    int audio_stream_index_ = -1;
+    int src_audio_stream_index_ = -1;
+    Rational in_audio_time_base_{1, 48000};
+    Rational out_audio_time_base_{1, 48000};
     std::vector<uint8_t>* memory_target_ = nullptr;
     std::string memory_format_;
     std::unique_ptr<io::MemoryAvioContext> memory_avio_;

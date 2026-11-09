@@ -49,8 +49,10 @@ public:
 
 private:
     bool create_features(std::string* error);
+    bool create_sdr_blit(std::string* error);
     bool apply_pending_stats(std::string* error);
     void release_features();
+    void release_sdr_blit();
     void transition(void* resource, int before, int after);
     void uav_barrier(void* resource);
 
@@ -61,6 +63,9 @@ private:
     void* ngx_params_ = nullptr;
     void* vsr_handle_ = nullptr;
     void* truehdr_handle_ = nullptr;
+    void* sdr_root_signature_ = nullptr;
+    void* sdr_pso_ = nullptr;
+    void* sdr_descriptor_heap_ = nullptr;
 
     bool ngx_initialized_ = false;
     bool initialized_ = false;

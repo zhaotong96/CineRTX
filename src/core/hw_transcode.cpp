@@ -3,6 +3,8 @@
 
 #include "rtx/hw_transcode.h"
 
+#include "rtx/geometry.h"
+
 #include "bitstream.h"
 #include "rtx/hdr.h"
 #include "rtx/ngx_remaster.h"
@@ -411,13 +413,32 @@ public:
         }
         report.output_bit_depth = output_depth;
 
+        const bool is_portrait_input = (info_.width > 0 && info_.height > 0 && info_.width < info_.height);
+        const bool is_default_landscape_4k = (target_width_ == 3840 && target_height_ == 2160);
+        if (is_remaster && (target_width_ <= 0 || target_height_ <= 0 || (is_portrait_input && is_default_landscape_4k))) {
+            auto geom = SmartGeometryCalculator::calculate(info_.width, info_.height, GeometryTargetMode::AutoDirect, target_width_, target_height_);
+            target_width_ = geom.canvas_width;
+            target_height_ = geom.canvas_height;
+            report.output_width = target_width_;
+            report.output_height = target_height_;
+        }
+
+        const bool enable_truehdr = options.hdr;
         if (is_remaster) {
-            const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(TrueHdrParameters{});
-            if (!canonical.has_value()) {
-                return std::unexpected(canonical.error());
+            if (enable_truehdr) {
+                const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(TrueHdrParameters{});
+                if (!canonical.has_value()) {
+                    return std::unexpected(canonical.error());
+                }
+                hdr_ = canonical.value();
+                applyHdrDefaults(hdr_);
+            } else {
+                hdr_.enabled = false;
+                hdr_.color.primaries = ColorPrimaries::BT709;
+                hdr_.color.transfer = TransferFunction::BT709;
+                hdr_.color.matrix = MatrixCoefficients::BT709;
+                hdr_.color.range = ColorRange::Limited;
             }
-            hdr_ = canonical.value();
-            applyHdrDefaults(hdr_);
 
             RtxNgxBridgeConfig bridge_config{};
             std::memcpy(bridge_config.luid, diagnostics_.device.luid, sizeof(bridge_config.luid));
@@ -427,7 +448,7 @@ public:
             bridge_config.output_width = target_width_;
             bridge_config.output_height = target_height_;
             bridge_config.vsr_quality = options.vsr_quality;
-            bridge_config.enable_truehdr = 1;
+            bridge_config.enable_truehdr = enable_truehdr ? 1 : 0;
             bridge_config.contrast = 100;
             bridge_config.saturation = 100;
             bridge_config.middle_gray = 50;
@@ -639,6 +660,23 @@ public:
     IDemuxer* demuxer() const { return demuxer_.get(); }
     IMuxer* muxer() const { return muxer_.get(); }
     const MediaInfo& info() const { return info_; }
+    int targetWidth() const noexcept { return target_width_; }
+    int targetHeight() const noexcept { return target_height_; }
+    bool isAudioPacket(const Packet& p) const noexcept {
+        return info_.primary_audio_index >= 0 && p.stream_index == info_.primary_audio_index;
+    }
+    int audioStreamIndex() const noexcept {
+        return info_.primary_audio_index;
+    }
+    bool isMuxerOpen() const noexcept {
+        return muxer_ != nullptr;
+    }
+    Result<void> writeAudioPacket(const Packet& packet) {
+        if (muxer_ == nullptr) {
+            return err(ErrorCode::State, "muxer is not open");
+        }
+        return muxer_->writeAudioPacket(packet);
+    }
     const MediaInfo& outputInfo() const { return output_info_; }
     const Rational& frameRate() const { return frame_rate_; }
     const Hdr10Metadata& hdr() const { return hdr_; }
@@ -775,6 +813,9 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
         }
     };
 
+    std::deque<Packet> audio_packet_queue;
+    std::mutex audio_queue_mutex;
+
     int64_t packet_pts = 0;
     const Rational input_time_base = info.time_base.valid() ? info.time_base : clock_time_base;
     for (;;) {
@@ -793,6 +834,31 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
         }
         ++report.packets_read;
         Packet& input = packet.value();
+        if (session.isAudioPacket(input)) {
+            if (session.isMuxerOpen()) {
+                std::deque<Packet> to_flush;
+                {
+                    std::lock_guard<std::mutex> lk(audio_queue_mutex);
+                    to_flush.swap(audio_packet_queue);
+                }
+                for (const auto& ap : to_flush) {
+                    auto a_res = session.writeAudioPacket(ap);
+                    if (!a_res.has_value()) {
+                        return std::unexpected(a_res.error());
+                    }
+                    ++report.packets_written;
+                }
+                auto a_res = session.writeAudioPacket(input);
+                if (!a_res.has_value()) {
+                    return std::unexpected(a_res.error());
+                }
+                ++report.packets_written;
+            } else {
+                std::lock_guard<std::mutex> lk(audio_queue_mutex);
+                audio_packet_queue.push_back(std::move(input));
+            }
+            continue;
+        }
         int64_t pts = input.pts;
         if (pts == std::numeric_limits<int64_t>::min()) {
             pts = packet_pts;
@@ -835,6 +901,21 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
         return std::unexpected(flushed_encoder.error());
     }
 
+    if (session.isMuxerOpen()) {
+        std::deque<Packet> to_flush;
+        {
+            std::lock_guard<std::mutex> lk(audio_queue_mutex);
+            to_flush.swap(audio_packet_queue);
+        }
+        for (const auto& ap : to_flush) {
+            auto a_res = session.writeAudioPacket(ap);
+            if (!a_res.has_value()) {
+                return std::unexpected(a_res.error());
+            }
+            ++report.packets_written;
+        }
+    }
+
     auto finalized = session.finalize(report, started);
     if (!finalized.has_value()) {
         return std::unexpected(finalized.error());
@@ -854,19 +935,22 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         return err(ErrorCode::InvalidArgument, "vsr_quality must be in 1..4");
     }
 
-    const int target_width = options.target_width > 0 ? options.target_width : 3840;
-    const int target_height = options.target_height > 0 ? options.target_height : 2160;
-    if ((target_width & 1) != 0 || (target_height & 1) != 0) {
-        return err(ErrorCode::InvalidArgument, "target geometry must be even");
-    }
-
     const Clock::time_point started = Clock::now();
     HwTranscodeReport report;
     report.path = "vsr-remaster";
     report.vsr_quality = options.vsr_quality;
 
     NvidiaTranscodeSession session;
-    auto init_res = session.initialize(options, /*is_remaster=*/true, report, target_width, target_height);
+    auto init_res = session.initialize(options, /*is_remaster=*/true, report, options.target_width, options.target_height);
+    if (!init_res.has_value()) {
+        return std::unexpected(init_res.error());
+    }
+
+    const int target_width = session.targetWidth();
+    const int target_height = session.targetHeight();
+    if ((target_width & 1) != 0 || (target_height & 1) != 0) {
+        return err(ErrorCode::InvalidArgument, "target geometry must be even");
+    }
     if (!init_res.has_value()) {
         return std::unexpected(init_res.error());
     }
@@ -1083,6 +1167,9 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         }
     };
 
+    std::deque<Packet> audio_packet_queue;
+    std::mutex audio_queue_mutex;
+
     const Clock::time_point main_loop_started = Clock::now();
     int64_t packet_pts = 0;
     const int64_t frame_ticks =
@@ -1110,6 +1197,34 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         }
         ++report.packets_read;
         Packet& input = packet.value();
+        if (session.isAudioPacket(input)) {
+            if (session.isMuxerOpen()) {
+                std::deque<Packet> to_flush;
+                {
+                    std::lock_guard<std::mutex> lk(audio_queue_mutex);
+                    to_flush.swap(audio_packet_queue);
+                }
+                for (const auto& ap : to_flush) {
+                    auto a_res = session.writeAudioPacket(ap);
+                    if (!a_res.has_value()) {
+                        pipeline_status = a_res;
+                        break;
+                    }
+                    ++report.packets_written;
+                }
+                if (!pipeline_status.has_value()) break;
+                auto a_res = session.writeAudioPacket(input);
+                if (!a_res.has_value()) {
+                    pipeline_status = a_res;
+                    break;
+                }
+                ++report.packets_written;
+            } else {
+                std::lock_guard<std::mutex> lk(audio_queue_mutex);
+                audio_packet_queue.push_back(std::move(input));
+            }
+            continue;
+        }
         int64_t pts = input.pts;
         if (pts == std::numeric_limits<int64_t>::min()) {
             pts = packet_pts;
@@ -1167,6 +1282,21 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
     auto flushed_encoder = session.flushEncoder(report);
     if (!flushed_encoder.has_value()) {
         return std::unexpected(flushed_encoder.error());
+    }
+
+    if (session.isMuxerOpen()) {
+        std::deque<Packet> to_flush;
+        {
+            std::lock_guard<std::mutex> lk(audio_queue_mutex);
+            to_flush.swap(audio_packet_queue);
+        }
+        for (const auto& ap : to_flush) {
+            auto a_res = session.writeAudioPacket(ap);
+            if (!a_res.has_value()) {
+                return std::unexpected(a_res.error());
+            }
+            ++report.packets_written;
+        }
     }
 
     auto finalized = session.finalize(report, started);
