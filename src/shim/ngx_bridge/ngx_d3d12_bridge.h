@@ -29,7 +29,6 @@ public:
     NgxD3D12Bridge& operator=(const NgxD3D12Bridge&) = delete;
 
     bool create(D3D12Interop& interop, const RtxNgxBridgeConfig& config, std::string* error);
-    void destroy();
 
     bool ready() const noexcept { return initialized_; }
 
@@ -48,6 +47,7 @@ public:
     const std::string& diagnostics() const noexcept { return diagnostics_; }
 
 private:
+    void release();
     bool create_features(std::string* error);
     bool create_sdr_blit(std::string* error);
     bool apply_pending_stats(std::string* error);

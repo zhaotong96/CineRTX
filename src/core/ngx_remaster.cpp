@@ -274,7 +274,7 @@ RtxResult NgxRemasterBridge::create(const RtxNgxBridgeConfig* config,
     return create_ != nullptr ? create_(config, bridge) : RTX_ERR_DLL_MISSING;
 }
 
-void NgxRemasterBridge::destroy(RtxNgxBridge* bridge) const {
+void NgxRemasterBridge::releaseBridge(RtxNgxBridge* bridge) const {
     if (destroy_ != nullptr) {
         destroy_(bridge);
     }

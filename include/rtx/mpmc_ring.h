@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -134,12 +135,24 @@ public:
         return true;
     }
 
+    [[nodiscard]] std::optional<T> tryPop() noexcept {
+        T item{};
+        if (tryPop(item)) {
+            return item;
+        }
+        return std::nullopt;
+    }
+
 private:
 #if defined(_MSC_VER)
 #pragma warning(push)
-#pragma warning(disable : 4324) // 显式设计的 64 字节缓存行伪共享隔离填充
+#pragma warning(disable : 4324) // 显式设计的缓存行伪共享隔离填充
 #endif
-    struct alignas(kCacheLineSize) Cell {
+#ifdef __cpp_lib_hardware_interference_size
+    struct alignas(std::hardware_destructive_interference_size) Cell {
+#else
+    struct alignas(64) Cell {
+#endif
         std::atomic<size_t> sequence{0};
         T data{};
     };

@@ -8,7 +8,7 @@
 
 namespace rtx {
 
-GeometryResult SmartGeometryCalculator::calculate(int src_w, int src_h,
+GeometryResult calculateSmartGeometry(int src_w, int src_h,
                                                  GeometryTargetMode mode,
                                                  int user_target_w, int user_target_h) {
     GeometryResult res;

@@ -4,9 +4,11 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <limits>
 #include <memory>
 #include <new>
@@ -22,14 +24,12 @@
 
 namespace rtx {
 
-// Cacheline isolation (64-byte alignment)
+// Cacheline isolation (64-byte alignment or standard interference size)
 #ifdef __cpp_lib_hardware_interference_size
 inline constexpr std::size_t kCacheLineSize = std::hardware_destructive_interference_size;
 #else
 inline constexpr std::size_t kCacheLineSize = 64;
 #endif
-
-
 
 // Tagged strong handle: strong typing with zero-cost compile-time semantics
 template <typename Tag, std::integral ValueType = std::int64_t,
@@ -58,7 +58,6 @@ struct TaggedHandle {
 
     [[nodiscard]] constexpr ValueType value() const noexcept { return v; }
 
-    // Const implicit conversion to underlying integer
     constexpr operator ValueType() const noexcept { return v; }
 
     static constexpr ValueType visitor(const auto& other) noexcept {
@@ -70,7 +69,6 @@ struct TaggedHandle {
         }
     }
 
-    // Consistent three-way comparison
     constexpr auto operator<=>(const TaggedHandle&) const noexcept = default;
     constexpr auto operator<=>(std::integral auto other) const noexcept {
         return v <=> visitor(other);
@@ -98,8 +96,6 @@ static_assert(sizeof(SlotHandle) == 4);
 static_assert(std::is_trivially_copyable_v<SlotHandle>);
 static_assert(std::is_standard_layout_v<SlotHandle>);
 
-
-
 using DevicePtr = uint64_t;
 inline constexpr DevicePtr kInvalidDevicePtr = 0;
 
@@ -120,13 +116,186 @@ enum class VideoCodec : int32_t {
     AV1 = 3,
 };
 
-const char* videoCodecName(VideoCodec codec) noexcept;
-VideoCodec videoCodecFromName(const std::string& name) noexcept;
+[[nodiscard]] constexpr const char* videoCodecName(VideoCodec codec) noexcept {
+    switch (codec) {
+        case VideoCodec::H264:
+            return "h264";
+        case VideoCodec::HEVC:
+            return "hevc";
+        case VideoCodec::AV1:
+            return "av1";
+        case VideoCodec::Unknown:
+            break;
+    }
+    return "unknown";
+}
 
-const char* pixelFormatName(PixelFormat format) noexcept;
-size_t bytesPerPixel(PixelFormat format) noexcept;
-int planeCount(PixelFormat format) noexcept;
-bool isTenBit(PixelFormat format) noexcept;
+[[nodiscard]] inline VideoCodec videoCodecFromName(std::string_view name) noexcept {
+    if (name == "h264" || name == "avc" || name == "avc1") {
+        return VideoCodec::H264;
+    }
+    if (name == "hevc" || name == "h265" || name == "hvc1" || name == "hev1") {
+        return VideoCodec::HEVC;
+    }
+    if (name == "av1" || name == "av01") {
+        return VideoCodec::AV1;
+    }
+    return VideoCodec::Unknown;
+}
+
+[[nodiscard]] constexpr const char* pixelFormatName(PixelFormat format) noexcept {
+    switch (format) {
+        case PixelFormat::NV12:
+            return "NV12";
+        case PixelFormat::P010:
+            return "P010";
+        case PixelFormat::RGB32:
+            return "RGB32";
+        case PixelFormat::R10G10B10A2:
+            return "R10G10B10A2";
+        case PixelFormat::RGBA16F:
+            return "RGBA16F";
+        case PixelFormat::YUV420P10:
+            return "YUV420P10";
+        case PixelFormat::Unknown:
+            break;
+    }
+    return "UNKNOWN";
+}
+
+[[nodiscard]] constexpr size_t bytesPerPixel(PixelFormat format) noexcept {
+    switch (format) {
+        case PixelFormat::NV12:
+            return 1;
+        case PixelFormat::P010:
+        case PixelFormat::YUV420P10:
+            return 2;
+        case PixelFormat::RGB32:
+        case PixelFormat::R10G10B10A2:
+            return 4;
+        case PixelFormat::RGBA16F:
+            return 8;
+        case PixelFormat::Unknown:
+            break;
+    }
+    return 0;
+}
+
+[[nodiscard]] constexpr int planeCount(PixelFormat format) noexcept {
+    switch (format) {
+        case PixelFormat::NV12:
+        case PixelFormat::P010:
+            return 2;
+        case PixelFormat::YUV420P10:
+            return 3;
+        case PixelFormat::RGB32:
+        case PixelFormat::R10G10B10A2:
+        case PixelFormat::RGBA16F:
+            return 1;
+        case PixelFormat::Unknown:
+            break;
+    }
+    return 0;
+}
+
+[[nodiscard]] constexpr bool isTenBit(PixelFormat format) noexcept {
+    return format == PixelFormat::P010 || format == PixelFormat::YUV420P10 ||
+           format == PixelFormat::R10G10B10A2;
+}
+
+[[nodiscard]] constexpr size_t alignUp(size_t value, size_t alignment) noexcept {
+    if (alignment == 0) {
+        return value;
+    }
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+[[nodiscard]] constexpr size_t planeByteSize(PixelFormat format, int width, int height, int plane, int pitch) {
+    if (width <= 0 || height <= 0 || plane < 0) {
+        return 0;
+    }
+    const int chroma_height = (height + 1) / 2;
+    switch (format) {
+        case PixelFormat::NV12:
+        case PixelFormat::P010:
+            if (plane == 0) {
+                return static_cast<size_t>(pitch) * static_cast<size_t>(height);
+            }
+            if (plane == 1) {
+                return static_cast<size_t>(pitch) * static_cast<size_t>(chroma_height);
+            }
+            break;
+        case PixelFormat::YUV420P10:
+            if (plane == 0) {
+                return static_cast<size_t>(pitch) * static_cast<size_t>(height);
+            }
+            if (plane == 1 || plane == 2) {
+                return static_cast<size_t>(pitch) * static_cast<size_t>(chroma_height);
+            }
+            break;
+        case PixelFormat::RGB32:
+        case PixelFormat::R10G10B10A2:
+        case PixelFormat::RGBA16F:
+            if (plane == 0) {
+                return static_cast<size_t>(pitch) * static_cast<size_t>(height);
+            }
+            break;
+        case PixelFormat::Unknown:
+            break;
+    }
+    return 0;
+}
+
+inline size_t frameByteSize(int width, int height, PixelFormat format, int* pitches = nullptr,
+                            int* chroma_width = nullptr, int* chroma_height = nullptr) {
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+    int local_pitches[3] = {0, 0, 0};
+    const int local_chroma_width = (width + 1) / 2;
+    const int local_chroma_height = (height + 1) / 2;
+
+    switch (format) {
+        case PixelFormat::NV12:
+            local_pitches[0] = static_cast<int>(alignUp(static_cast<size_t>(width), 256));
+            local_pitches[1] = local_pitches[0];
+            break;
+        case PixelFormat::P010:
+        case PixelFormat::YUV420P10:
+            local_pitches[0] = static_cast<int>(alignUp(static_cast<size_t>(width) * 2, 256));
+            local_pitches[1] = local_pitches[0];
+            local_pitches[2] = local_pitches[0];
+            break;
+        case PixelFormat::RGB32:
+        case PixelFormat::R10G10B10A2:
+            local_pitches[0] = static_cast<int>(alignUp(static_cast<size_t>(width) * 4, 256));
+            break;
+        case PixelFormat::RGBA16F:
+            local_pitches[0] = static_cast<int>(alignUp(static_cast<size_t>(width) * 8, 256));
+            break;
+        case PixelFormat::Unknown:
+            return 0;
+    }
+
+    size_t total = 0;
+    const int planes = planeCount(format);
+    for (int plane = 0; plane < planes; ++plane) {
+        total += planeByteSize(format, width, height, plane, local_pitches[plane]);
+    }
+
+    if (pitches != nullptr) {
+        pitches[0] = local_pitches[0];
+        pitches[1] = local_pitches[1];
+        pitches[2] = local_pitches[2];
+    }
+    if (chroma_width != nullptr) {
+        *chroma_width = local_chroma_width;
+    }
+    if (chroma_height != nullptr) {
+        *chroma_height = local_chroma_height;
+    }
+    return total;
+}
 
 enum class ColorPrimaries : int32_t {
     BT709 = 1,
@@ -157,7 +326,6 @@ struct ColorDescription {
 };
 
 struct MasteringDisplay {
-    // Chromaticities in units of 0.00002 (SMPTE ST 2086 / HEVC SEI).
     uint16_t red_x = 0;
     uint16_t red_y = 0;
     uint16_t green_x = 0;
@@ -166,7 +334,6 @@ struct MasteringDisplay {
     uint16_t blue_y = 0;
     uint16_t white_x = 0;
     uint16_t white_y = 0;
-    // Luminance in units of 0.0001 cd/m^2.
     uint32_t max_luminance = 0;
     uint32_t min_luminance = 0;
 };
@@ -199,14 +366,43 @@ struct DeviceInfo {
     bool turingOrNewer() const {
         return compute_major > 7 || (compute_major == 7 && compute_minor >= 5);
     }
-    std::string toString() const;
+    std::string toString() const {
+        std::string sm = (compute_major > 0)
+            ? std::format("sm_{}{}", compute_major, compute_minor)
+            : "cpu";
+        std::string luid_str;
+        for (int i = 0; i < 8; ++i) {
+            luid_str += std::format("{:x}", luid[i]);
+        }
+        return std::format("{} [{}, LUID={}, VRAM={} MiB]",
+                           name, sm, luid_str, vram_bytes / (1024ull * 1024ull));
+    }
 };
 
 struct FrameBuffer {
     std::vector<uint8_t> bytes;
     size_t alignment = 256;
 
-    Result<void> allocate(size_t size, size_t align = 256);
+    Result<void> allocate(size_t size, size_t align = 256) {
+        if (size == 0) {
+            return err(ErrorCode::InvalidArgument, "zero-sized frame buffer");
+        }
+        alignment = std::max<size_t>(align, 64);
+        if (size > std::numeric_limits<size_t>::max() - alignment) {
+            return err(ErrorCode::InvalidArgument, "frame allocation size overflow");
+        }
+        try {
+            bytes.assign(size + alignment - 1, 0);
+        } catch (const std::bad_alloc&) {
+            return err(ErrorCode::OutOfMemory, "frame allocation failed",
+                       std::to_string(size));
+        }
+        const uintptr_t raw = reinterpret_cast<uintptr_t>(bytes.data());
+        const size_t remainder = raw % alignment;
+        offset_ = remainder == 0 ? 0 : alignment - remainder;
+        size_ = size;
+        return {};
+    }
     uint8_t* data() { return bytes.data() + offset_; }
     const uint8_t* data() const { return bytes.data() + offset_; }
     size_t size() const noexcept { return size_; }
@@ -232,9 +428,6 @@ struct Frame {
     size_t plane_sizes[3] = {0, 0, 0};
     int pitches[3] = {0, 0, 0};
 
-    // Device-side view.  In CPU reference mode these are either zero or
-    // simulated allocation addresses; in the NVIDIA path they are CUdeviceptr
-    // values that were never mapped into host virtual memory.
     DevicePtr device_planes[3] = {kInvalidDevicePtr, kInvalidDevicePtr, kInvalidDevicePtr};
     uint32_t device_pitches[3] = {0, 0, 0};
 
@@ -264,11 +457,35 @@ struct Frame {
         return std::span<const uint8_t>(planes[plane], plane_sizes[plane]);
     }
 
+    void copyMetadataFrom(const Frame& other) {
+        width = other.width;
+        height = other.height;
+        format = other.format;
+        bit_depth = other.bit_depth;
+        chroma_width = other.chroma_width;
+        chroma_height = other.chroma_height;
 
+        for (int i = 0; i < 3; ++i) {
+            pitches[i] = other.pitches[i];
+            plane_sizes[i] = other.plane_sizes[i];
+            device_planes[i] = other.device_planes[i];
+            device_pitches[i] = other.device_pitches[i];
+        }
 
-    // Copy metadata only; the storage and plane pointers are left untouched.
-    void copyMetadataFrom(const Frame& other);
-    Frame cloneMetadata() const;
+        pts = other.pts;
+        time_base = other.time_base;
+        duration = other.duration;
+        fence_value = other.fence_value;
+        keyframe = other.keyframe;
+        color = other.color;
+        hdr = other.hdr;
+    }
+
+    Frame cloneMetadata() const {
+        Frame frame;
+        frame.copyMetadataFrom(*this);
+        return frame;
+    }
 };
 
 struct PlaneRect {
@@ -277,11 +494,6 @@ struct PlaneRect {
     int width = 0;
     int height = 0;
 };
-
-size_t alignUp(size_t value, size_t alignment) noexcept;
-size_t planeByteSize(PixelFormat format, int width, int height, int plane, int pitch);
-size_t frameByteSize(int width, int height, PixelFormat format, int* pitches = nullptr,
-                     int* chroma_width = nullptr, int* chroma_height = nullptr);
 
 struct AudioTrackInfo {
     int stream_index = -1;
@@ -311,10 +523,6 @@ struct Packet {
     bool keyframe = false;
     int stream_index = 0;
     Rational time_base{1, 1000};
-
-    // Projection of `pts` onto the Flicks integer timeline (705,600,000 Hz).
-    // `flicks_valid` is false when the container supplies no presentation
-    // timestamp at all; `pts_flicks` is then meaningless.
     int64_t pts_flicks = 0;
     bool flicks_valid = false;
 };

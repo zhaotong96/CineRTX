@@ -50,7 +50,6 @@ public:
     [[nodiscard]] size_t position() const noexcept { return pos_; }
     [[nodiscard]] size_t size() const noexcept;
     [[nodiscard]] bool isInitialized() const noexcept { return valid(); }
-    void shutdown() noexcept;
 
     // Marks the stream as seekable (AVIO_SEEKABLE_NORMAL).  libavformat leaves
     // avio_alloc_context() contexts non-seekable by default, and the mov /

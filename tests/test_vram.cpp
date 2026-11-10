@@ -90,10 +90,11 @@ RTX_TEST(vram_budget_validation) {
 }
 
 RTX_TEST(vram_surface_pool_lifecycle) {
-    SurfacePool pool;
-    RTX_CHECK_EQ(pool.initialize(PoolSpec{}).error().code, ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(SurfacePool::create(PoolSpec{}).error().code, ErrorCode::InvalidArgument);
     const PoolSpec spec = smallSpec(4);
-    RTX_REQUIRE(pool.initialize(spec).has_value());
+    auto pool_res = SurfacePool::create(spec);
+    RTX_REQUIRE(pool_res.has_value());
+    SurfacePool pool = std::move(*pool_res);
     RTX_CHECK_EQ(pool.capacity(), static_cast<size_t>(4));
     RTX_CHECK_EQ(pool.available(), static_cast<size_t>(4));
     RTX_CHECK_EQ(pool.used(), static_cast<size_t>(0));
@@ -149,15 +150,16 @@ RTX_TEST(vram_surface_pool_lifecycle) {
     SurfaceLease again = pool.acquire();
     RTX_CHECK(static_cast<bool>(again));
 
-    pool.shutdown();
+    pool.reset();
     RTX_CHECK_EQ(pool.capacity(), static_cast<size_t>(0));
     RTX_CHECK(!pool.acquire());
-    RTX_CHECK_EQ(pool.initialize(PoolSpec{}).error().code, ErrorCode::InvalidArgument);
+    RTX_CHECK_EQ(SurfacePool::create(PoolSpec{}).error().code, ErrorCode::InvalidArgument);
 }
 
 RTX_TEST(vram_surface_lease_move_semantics) {
-    SurfacePool pool;
-    RTX_REQUIRE(pool.initialize(smallSpec(2)).has_value());
+    auto pool_res = SurfacePool::create(smallSpec(2));
+    RTX_REQUIRE(pool_res.has_value());
+    SurfacePool pool = std::move(*pool_res);
     SurfaceLease first = pool.acquire();
     RTX_REQUIRE(static_cast<bool>(first));
     const uint32_t id = first.slotId();
@@ -174,8 +176,9 @@ RTX_TEST(vram_surface_lease_move_semantics) {
 }
 
 RTX_TEST(vram_surface_pool_concurrent_acquire_release) {
-    SurfacePool pool;
-    RTX_REQUIRE(pool.initialize(smallSpec(8)).has_value());
+    auto pool_res = SurfacePool::create(smallSpec(8));
+    RTX_REQUIRE(pool_res.has_value());
+    SurfacePool pool = std::move(*pool_res);
 
     constexpr size_t kWorkerCount = 4;
     constexpr size_t kIterationsPerWorker = 10000;
@@ -338,10 +341,11 @@ RTX_TEST(vram_surface_pool_device_backed) {
     };
 
     const PoolSpec spec = smallSpec(4);
-    SurfacePool pool;
-    RTX_CHECK_EQ(pool.initializeDevice(spec, DeviceAllocator{}).error().code,
+    RTX_CHECK_EQ(SurfacePool::createDevice(spec, DeviceAllocator{}).error().code,
                  ErrorCode::InvalidArgument);
-    RTX_REQUIRE(pool.initializeDevice(spec, allocator).has_value());
+    auto pool_res = SurfacePool::createDevice(spec, allocator);
+    RTX_REQUIRE(pool_res.has_value());
+    SurfacePool pool = std::move(*pool_res);
     RTX_CHECK(pool.deviceBacked());
     RTX_CHECK_EQ(pool.capacity(), static_cast<size_t>(4));
     RTX_CHECK_EQ(state.allocations, static_cast<size_t>(4));
@@ -373,7 +377,7 @@ RTX_TEST(vram_surface_pool_device_backed) {
     RTX_CHECK(!pool.acquire());
 
     leases.clear();
-    pool.shutdown();
+    pool.reset();
     RTX_CHECK_EQ(state.frees, static_cast<size_t>(4));
     RTX_CHECK_EQ(pool.deviceBytes(), static_cast<size_t>(0));
     RTX_CHECK_EQ(pool.deviceFreeCount(), static_cast<uint64_t>(4));
@@ -383,8 +387,9 @@ RTX_TEST(vram_surface_pool_device_backed) {
 RTX_TEST(vram_watermarks_65_percent) {
     // 12-slot encode pool: pause at 8/12 (66.7%), critical at 11/12 (91.7%).
     const PoolSpec spec = smallSpec(12);
-    SurfacePool pool;
-    RTX_REQUIRE(pool.initialize(spec).has_value());
+    auto pool_res = SurfacePool::create(spec);
+    RTX_REQUIRE(pool_res.has_value());
+    SurfacePool pool = std::move(*pool_res);
     std::vector<SurfaceLease> leases;
     for (int i = 0; i < 7; ++i) {
         leases.push_back(pool.acquire());

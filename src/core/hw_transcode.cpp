@@ -231,7 +231,7 @@ struct BridgeDeleter {
     const NgxRemasterBridge* loader = nullptr;
     void operator()(RtxNgxBridge* bridge) const {
         if (loader != nullptr && bridge != nullptr) {
-            loader->destroy(bridge);
+            loader->releaseBridge(bridge);
         }
     }
 };
@@ -332,14 +332,35 @@ std::string HwTranscodeReport::toJson() const {
 
 class NvidiaTranscodeSession {
 public:
-    NvidiaTranscodeSession() = default;
-    ~NvidiaTranscodeSession() { shutdown(); }
+    static Result<std::unique_ptr<NvidiaTranscodeSession>> create(
+        const HwTranscodeOptions& options, bool is_remaster,
+        HwTranscodeReport& report, int target_w = 0, int target_h = 0) {
+        auto session = std::unique_ptr<NvidiaTranscodeSession>(new NvidiaTranscodeSession());
+        auto res = session->configure(options, is_remaster, report, target_w, target_h);
+        if (!res.has_value()) {
+            return std::unexpected(res.error());
+        }
+        return session;
+    }
+
+    ~NvidiaTranscodeSession() {
+        muxer_.reset();
+        encoder_.reset();
+        decoder_.reset();
+        bridge_.reset();
+        demuxer_.reset();
+        shim_.close();
+        bridge_loader_.close();
+    }
 
     NvidiaTranscodeSession(const NvidiaTranscodeSession&) = delete;
     NvidiaTranscodeSession& operator=(const NvidiaTranscodeSession&) = delete;
 
-    Result<void> initialize(const HwTranscodeOptions& options, bool is_remaster,
-                            HwTranscodeReport& report, int target_w = 0, int target_h = 0) {
+private:
+    NvidiaTranscodeSession() = default;
+
+    Result<void> configure(const HwTranscodeOptions& options, bool is_remaster,
+                           HwTranscodeReport& report, int target_w = 0, int target_h = 0) {
         options_ = options;
         is_remaster_ = is_remaster;
         target_width_ = target_w;
@@ -416,7 +437,7 @@ public:
         const bool is_portrait_input = (info_.width > 0 && info_.height > 0 && info_.width < info_.height);
         const bool is_default_landscape_4k = (target_width_ == 3840 && target_height_ == 2160);
         if (is_remaster && (target_width_ <= 0 || target_height_ <= 0 || (is_portrait_input && is_default_landscape_4k))) {
-            auto geom = SmartGeometryCalculator::calculate(info_.width, info_.height, GeometryTargetMode::AutoDirect, target_width_, target_height_);
+            auto geom = calculateSmartGeometry(info_.width, info_.height, GeometryTargetMode::AutoDirect, target_width_, target_height_);
             target_width_ = geom.canvas_width;
             target_height_ = geom.canvas_height;
             report.output_width = target_width_;
@@ -503,16 +524,7 @@ public:
         return {};
     }
 
-    void shutdown() {
-        muxer_.reset();
-        encoder_.reset();
-        decoder_.reset();
-        bridge_.reset();
-        demuxer_.reset();
-        shim_.close();
-        bridge_loader_.close();
-    }
-
+public:
     Result<void> createEncoder(const RtxFrameDesc& frame, HwTranscodeReport& report) {
         RtxEncoderConfig config{};
         config.codec = encoderCodec(options_.codec);
@@ -717,11 +729,11 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
     HwTranscodeReport report;
     report.path = "container";
 
-    NvidiaTranscodeSession session;
-    auto init_res = session.initialize(options, /*is_remaster=*/false, report);
-    if (!init_res.has_value()) {
-        return std::unexpected(init_res.error());
+    auto session_res = NvidiaTranscodeSession::create(options, /*is_remaster=*/false, report);
+    if (!session_res.has_value()) {
+        return std::unexpected(session_res.error());
     }
+    auto& session = *session_res.value();
 
     const MediaInfo& info = session.info();
     const Rational& frame_rate = session.frameRate();
@@ -940,19 +952,16 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
     report.path = "vsr-remaster";
     report.vsr_quality = options.vsr_quality;
 
-    NvidiaTranscodeSession session;
-    auto init_res = session.initialize(options, /*is_remaster=*/true, report, options.target_width, options.target_height);
-    if (!init_res.has_value()) {
-        return std::unexpected(init_res.error());
+    auto session_res = NvidiaTranscodeSession::create(options, /*is_remaster=*/true, report, options.target_width, options.target_height);
+    if (!session_res.has_value()) {
+        return std::unexpected(session_res.error());
     }
+    auto& session = *session_res.value();
 
     const int target_width = session.targetWidth();
     const int target_height = session.targetHeight();
     if ((target_width & 1) != 0 || (target_height & 1) != 0) {
         return err(ErrorCode::InvalidArgument, "target geometry must be even");
-    }
-    if (!init_res.has_value()) {
-        return std::unexpected(init_res.error());
     }
 
     const MediaInfo& info = session.info();

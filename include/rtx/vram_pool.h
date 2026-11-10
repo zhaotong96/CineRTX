@@ -122,20 +122,21 @@ public:
     SurfacePool(const SurfacePool&) = delete;
     SurfacePool& operator=(const SurfacePool&) = delete;
 
-    // Deterministic explicit lifecycle management
+    SurfacePool(SurfacePool&& other) noexcept;
+    SurfacePool& operator=(SurfacePool&& other) noexcept;
+
+    // 100% RAII static factories
+    [[nodiscard]] static Result<SurfacePool> create(const PoolSpec& spec,
+                                                    bool simulate_device_memory = true);
+    [[nodiscard]] static Result<SurfacePool> createDevice(const PoolSpec& spec,
+                                                          DeviceAllocator allocator,
+                                                          bool allocate_host_view = false);
+
     [[nodiscard]] bool isInitialized() const noexcept {
         return initialized_.load(std::memory_order_acquire);
     }
 
-    // CPU/reference initialisation: host slots plus synthetic device pointers
-    // when `simulate_device_memory` is true.
-    Result<void> initialize(const PoolSpec& spec, bool simulate_device_memory = true);
-    // Production initialisation: every slot is one physical cuMemAlloc
-    // allocation supplied by `allocator`.  No host buffer is allocated unless
-    // `allocate_host_view` explicitly asks for a staging view (test-only).
-    Result<void> initializeDevice(const PoolSpec& spec, DeviceAllocator allocator,
-                            bool allocate_host_view = false);
-    void shutdown();
+    void reset();
 
     SurfaceLease acquire();
     void release(SlotHandle slot_id);

@@ -24,11 +24,17 @@ struct GeometryResult {
     bool is_portrait = false;
 };
 
-class SmartGeometryCalculator {
-public:
+GeometryResult calculateSmartGeometry(int src_w, int src_h,
+                                      GeometryTargetMode mode = GeometryTargetMode::AutoDirect,
+                                      int user_target_w = 0, int user_target_h = 0);
+
+// Backward-compatibility alias
+struct SmartGeometryCalculator {
     static GeometryResult calculate(int src_w, int src_h,
                                     GeometryTargetMode mode = GeometryTargetMode::AutoDirect,
-                                    int user_target_w = 0, int user_target_h = 0);
+                                    int user_target_w = 0, int user_target_h = 0) {
+        return calculateSmartGeometry(src_w, src_h, mode, user_target_w, user_target_h);
+    }
 };
 
 }  // namespace rtx

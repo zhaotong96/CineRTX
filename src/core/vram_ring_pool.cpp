@@ -176,145 +176,43 @@ Frame SurfaceLease::view() const {
     return frame;
 }
 
+SurfacePool::SurfacePool(SurfacePool&& other) noexcept {
+    *this = std::move(other);
+}
+
+SurfacePool& SurfacePool::operator=(SurfacePool&& other) noexcept {
+    if (this != &other) {
+        reset();
+        spec_ = std::move(other.spec_);
+        slots_ = std::move(other.slots_);
+        free_list_ = std::move(other.free_list_);
+        used_.store(other.used_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        acquire_count_.store(other.acquire_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        release_count_.store(other.release_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        empty_count_.store(other.empty_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        high_slots_ = other.high_slots_;
+        critical_slots_ = other.critical_slots_;
+        simulated_base_ = other.simulated_base_;
+        device_allocator_ = other.device_allocator_;
+        device_bytes_.store(other.device_bytes_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        device_allocations_.store(other.device_allocations_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        device_frees_.store(other.device_frees_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        device_backed_ = other.device_backed_;
+        initialized_.store(other.initialized_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        release_callback_ = std::move(other.release_callback_);
+
+        other.initialized_.store(false, std::memory_order_relaxed);
+        other.device_backed_ = false;
+        other.device_allocator_ = {};
+    }
+    return *this;
+}
+
 SurfacePool::~SurfacePool() {
-    shutdown();
+    reset();
 }
 
-Result<void> SurfacePool::initialize(const PoolSpec& spec, bool simulate_device_memory) {
-    shutdown();
-    if (std::is_lteq(spec.slots <=> 0) || std::is_lteq(spec.width <=> 0) ||
-        std::is_lteq(spec.height <=> 0) || spec.format == PixelFormat::Unknown) {
-        return err(ErrorCode::InvalidArgument, "invalid surface pool specification",
-                   spec.name);
-    }
-    const size_t frame_bytes = spec.frameBytes();
-    if (std::is_eq(frame_bytes <=> 0)) {
-        return err(ErrorCode::InvalidArgument, "unsupported surface pool format",
-                   spec.name);
-    }
-
-    spec_ = spec;
-    slots_.reserve(static_cast<size_t>(spec.slots));
-    free_list_ = std::make_unique<MpmcBoundedQueue<SlotHandle>>(
-        static_cast<size_t>(spec.slots) * 2ull);
-    if (!free_list_->valid()) {
-        return err(ErrorCode::OutOfMemory, "failed to allocate pool free list");
-    }
-
-    DevicePtr next_device = simulated_base_ +
-                            static_cast<DevicePtr>(spec.simulated_device_base_mb) * 1024ull * 1024ull;
-    for (int i = 0; i < spec.slots; ++i) {
-        auto slot = std::make_unique<SurfaceSlot>();
-        slot->id = SlotHandle(static_cast<uint32_t>(i));
-        slot->width = spec.width;
-        slot->height = spec.height;
-        slot->format = spec.format;
-        slot->allocation_bytes = frame_bytes;
-        slot->host = std::make_unique<FrameBuffer>();
-        const Result<void> allocation = slot->host->allocate(frame_bytes, spec.alignment);
-        if (!allocation.has_value()) {
-            shutdown();
-            return err(allocation.error().code, "surface allocation failed",
-                       std::format("{} slot {}", spec.name, i));
-        }
-        if (simulate_device_memory) {
-            slot->device_ptr = next_device;
-            next_device += static_cast<DevicePtr>(alignUp(frame_bytes, 2ull * 1024 * 1024));
-        }
-        slots_.push_back(std::move(slot));
-        if (!free_list_->tryPush(SlotHandle(static_cast<uint32_t>(i)))) {
-            shutdown();
-            return err(ErrorCode::Internal, "free list initialisation failed");
-        }
-    }
-
-    used_.store(0, std::memory_order_relaxed);
-    acquire_count_.store(0, std::memory_order_relaxed);
-    release_count_.store(0, std::memory_order_relaxed);
-    empty_count_.store(0, std::memory_order_relaxed);
-    high_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.65));
-    critical_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.90));
-    initialized_.store(true, std::memory_order_release);
-    return {};
-}
-
-Result<void> SurfacePool::initializeDevice(const PoolSpec& spec, DeviceAllocator allocator,
-                                     bool allocate_host_view) {
-    shutdown();
-    if (std::is_lteq(spec.slots <=> 0) || std::is_lteq(spec.width <=> 0) ||
-        std::is_lteq(spec.height <=> 0) || spec.format == PixelFormat::Unknown) {
-        return err(ErrorCode::InvalidArgument, "invalid surface pool specification",
-                   spec.name);
-    }
-    if (allocator.allocate == nullptr || allocator.free == nullptr) {
-        return err(ErrorCode::InvalidArgument,
-                   "device-backed pool requires a working allocator", spec.name);
-    }
-    const size_t frame_bytes = spec.frameBytes();
-    if (std::is_eq(frame_bytes <=> 0)) {
-        return err(ErrorCode::InvalidArgument, "unsupported surface pool format",
-                   spec.name);
-    }
-
-    spec_ = spec;
-    device_allocator_ = allocator;
-    device_backed_ = true;
-    device_bytes_.store(0, std::memory_order_relaxed);
-    slots_.reserve(static_cast<size_t>(spec.slots));
-    free_list_ = std::make_unique<MpmcBoundedQueue<SlotHandle>>(
-        static_cast<size_t>(spec.slots) * 2ull);
-    if (!free_list_->valid()) {
-        shutdown();
-        return err(ErrorCode::OutOfMemory, "failed to allocate pool free list");
-    }
-
-    const size_t alignment = std::max(spec.alignment, kDeviceAlignment);
-    for (int i = 0; i < spec.slots; ++i) {
-        auto slot = std::make_unique<SurfaceSlot>();
-        slot->id = SlotHandle(static_cast<uint32_t>(i));
-        slot->width = spec.width;
-        slot->height = spec.height;
-        slot->format = spec.format;
-        slot->allocation_bytes = frame_bytes;
-        slot->device_ptr = allocator.allocate(allocator.context, frame_bytes, alignment);
-        if (slot->device_ptr == kInvalidDevicePtr) {
-            shutdown();
-            return err(ErrorCode::OutOfMemory,
-                       "device allocation failed for pool slot",
-                       std::format("{} slot {}", spec.name, i));
-        }
-        slot->device_resident = true;
-        device_bytes_.fetch_add(frame_bytes, std::memory_order_relaxed);
-        device_allocations_.fetch_add(1, std::memory_order_relaxed);
-        // Publish the slot before any further failure point so shutdown() can
-        // release the physical allocation.
-        slots_.push_back(std::move(slot));
-        if (allocate_host_view) {
-            slots_.back()->host = std::make_unique<FrameBuffer>();
-            const Result<void> allocation = slots_.back()->host->allocate(frame_bytes, spec.alignment);
-            if (!allocation.has_value()) {
-                shutdown();
-                return err(allocation.error().code, "staging view allocation failed",
-                           std::format("{} slot {}", spec.name, i));
-            }
-        }
-        if (!free_list_->tryPush(SlotHandle(static_cast<uint32_t>(i)))) {
-            shutdown();
-            return err(ErrorCode::Internal, "free list initialisation failed");
-        }
-    }
-
-    used_.store(0, std::memory_order_relaxed);
-    acquire_count_.store(0, std::memory_order_relaxed);
-    release_count_.store(0, std::memory_order_relaxed);
-    empty_count_.store(0, std::memory_order_relaxed);
-    high_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.65));
-    critical_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.90));
-    initialized_.store(true, std::memory_order_release);
-    return {};
-}
-
-void SurfacePool::shutdown() {
+void SurfacePool::reset() {
     initialized_.store(false, std::memory_order_release);
     // Deterministic reverse-order destruction of device allocations
     for (auto it = slots_.rbegin(); it != slots_.rend(); ++it) {
@@ -335,6 +233,132 @@ void SurfacePool::shutdown() {
     free_list_.reset();
     slots_.clear();
     used_.store(0, std::memory_order_relaxed);
+}
+
+Result<SurfacePool> SurfacePool::create(const PoolSpec& spec, bool simulate_device_memory) {
+    if (std::is_lteq(spec.slots <=> 0) || std::is_lteq(spec.width <=> 0) ||
+        std::is_lteq(spec.height <=> 0) || spec.format == PixelFormat::Unknown) {
+        return err(ErrorCode::InvalidArgument, "invalid surface pool specification",
+                   spec.name);
+    }
+    const size_t frame_bytes = spec.frameBytes();
+    if (std::is_eq(frame_bytes <=> 0)) {
+        return err(ErrorCode::InvalidArgument, "unsupported surface pool format",
+                   spec.name);
+    }
+
+    SurfacePool pool;
+    pool.spec_ = spec;
+    pool.slots_.reserve(static_cast<size_t>(spec.slots));
+    pool.free_list_ = std::make_unique<MpmcBoundedQueue<SlotHandle>>(
+        static_cast<size_t>(spec.slots) * 2ull);
+    if (!pool.free_list_->valid()) {
+        return err(ErrorCode::OutOfMemory, "failed to allocate pool free list");
+    }
+
+    DevicePtr next_device = pool.simulated_base_ +
+                            static_cast<DevicePtr>(spec.simulated_device_base_mb) * 1024ull * 1024ull;
+    for (int i = 0; i < spec.slots; ++i) {
+        auto slot = std::make_unique<SurfaceSlot>();
+        slot->id = SlotHandle(static_cast<uint32_t>(i));
+        slot->width = spec.width;
+        slot->height = spec.height;
+        slot->format = spec.format;
+        slot->allocation_bytes = frame_bytes;
+        slot->host = std::make_unique<FrameBuffer>();
+        const Result<void> allocation = slot->host->allocate(frame_bytes, spec.alignment);
+        if (!allocation.has_value()) {
+            return err(allocation.error().code, "surface allocation failed",
+                       std::format("{} slot {}", spec.name, i));
+        }
+        if (simulate_device_memory) {
+            slot->device_ptr = next_device;
+            next_device += static_cast<DevicePtr>(alignUp(frame_bytes, 2ull * 1024 * 1024));
+        }
+        pool.slots_.push_back(std::move(slot));
+        if (!pool.free_list_->tryPush(SlotHandle(static_cast<uint32_t>(i)))) {
+            return err(ErrorCode::Internal, "free list initialisation failed");
+        }
+    }
+
+    pool.used_.store(0, std::memory_order_relaxed);
+    pool.acquire_count_.store(0, std::memory_order_relaxed);
+    pool.release_count_.store(0, std::memory_order_relaxed);
+    pool.empty_count_.store(0, std::memory_order_relaxed);
+    pool.high_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.65));
+    pool.critical_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.90));
+    pool.initialized_.store(true, std::memory_order_release);
+    return pool;
+}
+
+Result<SurfacePool> SurfacePool::createDevice(const PoolSpec& spec, DeviceAllocator allocator,
+                                             bool allocate_host_view) {
+    if (std::is_lteq(spec.slots <=> 0) || std::is_lteq(spec.width <=> 0) ||
+        std::is_lteq(spec.height <=> 0) || spec.format == PixelFormat::Unknown) {
+        return err(ErrorCode::InvalidArgument, "invalid surface pool specification",
+                   spec.name);
+    }
+    if (allocator.allocate == nullptr || allocator.free == nullptr) {
+        return err(ErrorCode::InvalidArgument,
+                   "device-backed pool requires a working allocator", spec.name);
+    }
+    const size_t frame_bytes = spec.frameBytes();
+    if (std::is_eq(frame_bytes <=> 0)) {
+        return err(ErrorCode::InvalidArgument, "unsupported surface pool format",
+                   spec.name);
+    }
+
+    SurfacePool pool;
+    pool.spec_ = spec;
+    pool.device_allocator_ = allocator;
+    pool.device_backed_ = true;
+    pool.device_bytes_.store(0, std::memory_order_relaxed);
+    pool.slots_.reserve(static_cast<size_t>(spec.slots));
+    pool.free_list_ = std::make_unique<MpmcBoundedQueue<SlotHandle>>(
+        static_cast<size_t>(spec.slots) * 2ull);
+    if (!pool.free_list_->valid()) {
+        return err(ErrorCode::OutOfMemory, "failed to allocate pool free list");
+    }
+
+    const size_t alignment = std::max(spec.alignment, kDeviceAlignment);
+    for (int i = 0; i < spec.slots; ++i) {
+        auto slot = std::make_unique<SurfaceSlot>();
+        slot->id = SlotHandle(static_cast<uint32_t>(i));
+        slot->width = spec.width;
+        slot->height = spec.height;
+        slot->format = spec.format;
+        slot->allocation_bytes = frame_bytes;
+        slot->device_ptr = allocator.allocate(allocator.context, frame_bytes, alignment);
+        if (slot->device_ptr == kInvalidDevicePtr) {
+            return err(ErrorCode::OutOfMemory,
+                       "device allocation failed for pool slot",
+                       std::format("{} slot {}", spec.name, i));
+        }
+        slot->device_resident = true;
+        pool.device_bytes_.fetch_add(frame_bytes, std::memory_order_relaxed);
+        pool.device_allocations_.fetch_add(1, std::memory_order_relaxed);
+        pool.slots_.push_back(std::move(slot));
+        if (allocate_host_view) {
+            pool.slots_.back()->host = std::make_unique<FrameBuffer>();
+            const Result<void> allocation = pool.slots_.back()->host->allocate(frame_bytes, spec.alignment);
+            if (!allocation.has_value()) {
+                return err(allocation.error().code, "staging view allocation failed",
+                           std::format("{} slot {}", spec.name, i));
+            }
+        }
+        if (!pool.free_list_->tryPush(SlotHandle(static_cast<uint32_t>(i)))) {
+            return err(ErrorCode::Internal, "free list initialisation failed");
+        }
+    }
+
+    pool.used_.store(0, std::memory_order_relaxed);
+    pool.acquire_count_.store(0, std::memory_order_relaxed);
+    pool.release_count_.store(0, std::memory_order_relaxed);
+    pool.empty_count_.store(0, std::memory_order_relaxed);
+    pool.high_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.65));
+    pool.critical_slots_ = static_cast<size_t>(std::ceil(spec.slots * 0.90));
+    pool.initialized_.store(true, std::memory_order_release);
+    return pool;
 }
 
 SurfaceLease SurfacePool::acquire() {

@@ -44,7 +44,7 @@ public:
 
     RtxResult queryCaps(RtxNgxBridgeCaps* caps) const;
     RtxResult create(const RtxNgxBridgeConfig* config, RtxNgxBridge** bridge) const;
-    void destroy(RtxNgxBridge* bridge) const;
+    void releaseBridge(RtxNgxBridge* bridge) const;
     RtxResult remaster(RtxNgxBridge* bridge, const RtxNgxRemasterInput* input,
                        RtxNgxRemasterOutput* output, RtxNgxRemasterStats* stats) const;
     RtxResult getRemasterStats(RtxNgxBridge* bridge, RtxNgxRemasterStats* stats) const;

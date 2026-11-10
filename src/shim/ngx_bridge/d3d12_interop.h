@@ -57,81 +57,6 @@ struct PingPongSlot {
     uint32_t frames_served = 0;
 };
 
-enum class PingPongEventMode : uint8_t { DisableTiming = 0, Default = 1 };
-
-class PingPongRing {
-public:
-    PingPongRing() = default;
-
-    bool initialize(PingPongEventMode mode = PingPongEventMode::DisableTiming,
-                    std::string* error = nullptr) {
-        if (ready_) {
-            if (error != nullptr) *error = "ping-pong ring is already initialised";
-            return false;
-        }
-        mode_ = mode;
-        host_waits_ = 0;
-        submitted_frames_ = 0;
-        duplicate_count_ = 0;
-        scene_cut_count_ = 0;
-        for (auto& slot : slots_) {
-            slot = PingPongSlot{};
-        }
-        ready_ = true;
-        if (error != nullptr) error->clear();
-        return true;
-    }
-
-    void shutdown() {
-        for (auto& slot : slots_) {
-            slot = PingPongSlot{};
-        }
-        ready_ = false;
-    }
-
-    bool ready() const noexcept { return ready_; }
-
-    static size_t slotIndexFor(int64_t frame_index) noexcept { return static_cast<size_t>(frame_index & 1); }
-
-    PingPongSlot& slotFor(int64_t frame_index) noexcept { return slots_[slotIndexFor(frame_index)]; }
-    const PingPongSlot& slotFor(int64_t frame_index) const noexcept {
-        return slots_[slotIndexFor(frame_index)];
-    }
-
-    uint64_t prepareSlot(int64_t frame_index) {
-        if (!ready_ || frame_index < 0 || frame_index < 2) return 0;
-        return slotFor(frame_index).d3d12_fence_val;
-    }
-
-    void completeSlot(int64_t frame_index, uint64_t fence_value) {
-        if (!ready_ || frame_index < 0) return;
-        PingPongSlot& slot = slotFor(frame_index);
-        slot.d3d12_fence_val = fence_value;
-        ++slot.frames_served;
-        ++submitted_frames_;
-    }
-
-    bool eventTimingDisabled() const noexcept {
-        return mode_ == PingPongEventMode::DisableTiming;
-    }
-    PingPongEventMode eventMode() const noexcept { return mode_; }
-
-    uint64_t hostWaits() const noexcept { return host_waits_; }
-    uint64_t submittedFrames() const noexcept { return submitted_frames_; }
-    uint64_t duplicateCount() const noexcept { return duplicate_count_; }
-    uint64_t sceneCutCount() const noexcept { return scene_cut_count_; }
-
-    static constexpr uint32_t kFrucModeDuplicate = 3;
-
-private:
-    std::array<PingPongSlot, 2> slots_{};
-    PingPongEventMode mode_ = PingPongEventMode::DisableTiming;
-    uint64_t host_waits_ = 0;
-    uint64_t submitted_frames_ = 0;
-    uint64_t duplicate_count_ = 0;
-    uint64_t scene_cut_count_ = 0;
-    bool ready_ = false;
-};
 class D3D12Interop {
 public:
     D3D12Interop() = default;
@@ -141,7 +66,6 @@ public:
     D3D12Interop& operator=(const D3D12Interop&) = delete;
 
     bool create(const RtxNgxBridgeConfig& config, std::string* error);
-    void destroy();
 
     bool valid() const noexcept { return device_ != nullptr; }
     InteropTexture& input() noexcept { return input_; }
@@ -255,6 +179,7 @@ public:
     }
 
 private:
+    void release();
     bool create_device(const uint8_t luid[8], std::string* error);
     bool create_texture(uint32_t width, uint32_t height, int32_t format,
                         InteropTexture* texture, std::string* error);

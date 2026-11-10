@@ -455,7 +455,7 @@ bool waitForFence(ID3D12Fence* fence, uint64_t value) {
 
 }  // namespace
 
-D3D12Interop::~D3D12Interop() { destroy(); }
+D3D12Interop::~D3D12Interop() { release(); }
 
 bool D3D12Interop::create(const RtxNgxBridgeConfig& config, std::string* error) {
     trace("create: begin");
@@ -1483,7 +1483,7 @@ bool D3D12Interop::download(InteropTexture& texture, void* data, size_t size,
     return ok;
 }
 
-void D3D12Interop::destroy() {
+void D3D12Interop::release() {
     CudaApi& cuda = cudaApi();
     std::string ignored_error;
     if (cuda_context_ != nullptr) {

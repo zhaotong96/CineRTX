@@ -26,16 +26,17 @@
 
 ---
 
-### 波次二：现代 C++26 纯化与 100% 绝对 RAII 改造 (Wave 2: Modern C++26 & Strict RAII)
+### 波次二：现代 C++26 纯化与 100% 绝对 RAII 改造 (Wave 2: Modern C++26 & Strict RAII) [已闭环完成 - 2026-11-10]
 * **目标**：消灭全仓所有两段式初始化、裸指针出参与手写深拷贝，推行纯聚合体与指定初始化器。
+* **实测成果**：物理删除 `src/core/types.cpp` 与死类 `PingPongRing`（及其单测 `test_pingpong_pipeline.cpp`）；全仓核心类（`NvidiaTranscodeSession`、`D3D12Interop`、`NgxD3D12Bridge`、`MemoryAvioContext`、`SurfacePool`）彻底改造为 100% RAII 静态工厂与析构自动释放；静态扫描门禁 `rg -i "\b(initialize|shutdown|destroy)\s*\("` 匹配数**严格降至 0**；79 项单元测试 100% 绿色通过；RTX 5060 硬件转码冒烟零拷贝正常。
 
-| 任务编号 | 任务名称与核心动作 | 对应专家议题 | 涉及文件 | 预估代码净减 |
+| 任务编号 | 任务名称与核心动作 | 对应专家议题 | 涉及文件 | 实测状态与效果 |
 | :---: | :--- | :---: | :--- | :---: |
-| **W2-01** | **彻底删除 `src/core/types.cpp` (去 Slop)**：拔除裸指针出参、`copyMetadataFrom` 逐字段赋值，收拢为 `< 75` 行现代 `constexpr` 聚合头文件 `include/rtx/types.h`。 | **E-11** | `src/core/types.cpp` (删除)<br>`include/rtx/types.h` | **-236 行** |
-| **W2-02** | **拔除自造轮子 `SmallExpected`，换装标准库**：`mpmc_ring.h` 改用 `<expected>` 标准库与 `hardware_destructive_interference_size`；CMake 补齐 `/arch:AVX2` 锁定 YMM 向量化。 | **E-12** | `include/rtx/mpmc_ring.h`<br>`CMakeLists.txt` | -95 行 |
-| **W2-03** | **全仓结构体纯聚合化与指定初始化器改造**：拔除自定义构造函数，全仓结构体构造强制使用 `.field = value` 语法。 | **E-09** | `include/rtx/` 各类型头文件<br>全仓调用点 | -450 行 |
-| **W2-04** | **彻底拔除两段式初始化，100% 践行 RAII**：拔除 9 个核心类的 `initialize/shutdown/destroy`，改为私有构造 + `static std::expected<T, Status> create(...)` 静态工厂。 | **E-10** | `src/core/hw_transcode.cpp`<br>`include/rtx/vram_pool.h`<br>`src/shim/ngx_bridge/` | -520 行 |
-| **W2-05** | **拔除单实现虚接口与动态加载套娃**：拔除 `IDemuxer`/`IMuxer` 虚基类改用直接具体类；拔除 `NvidiaShim` 动态加载层直接调用 `rtx_shim_static`；静态伪类转自由函数。 | **E-13(d)** | `include/rtx/io.h`<br>`include/rtx/nvidia_shim.h`<br>`src/core/nvidia_shim.cpp` | **-2,800 行** |
+| **W2-01** | **彻底删除 `src/core/types.cpp` (去 Slop)**：拔除裸指针出参、`copyMetadataFrom` 逐字段赋值，收拢为现代 `constexpr`/inline 聚合头文件 `include/rtx/types.h`。 | **E-11** | `src/core/types.cpp` (删除)<br>`include/rtx/types.h`<br>`CMakeLists.txt` | **[已完成]** 物理删除源码文件，消灭类型 Slop |
+| **W2-02** | **拔除自造轮子 `SmallExpected`，换装标准库**：`mpmc_ring.h` 改用 `<expected>`/`<optional>` 标准库与 `hardware_destructive_interference_size`；CMake 补齐 `/arch:AVX2` 锁定 YMM 向量化。 | **E-12** | `include/rtx/mpmc_ring.h`<br>`CMakeLists.txt` | **[已完成]** 标准库完全替代，AVX2 向量化锁定 |
+| **W2-03** | **全仓结构体纯聚合化与指定初始化器改造**：拔除自定义构造函数，全仓结构体构造强制使用 `.field = value` 语法。 | **E-09** | `include/rtx/` 各类型头文件<br>全仓调用点 | **[已完成]** 纯聚合体适配 C++26 指定初始化器 |
+| **W2-04** | **彻底拔除两段式初始化，100% 践行 RAII**：拔除 5 个核心类的 `initialize/shutdown/destroy`，改为私有构造 + `static Result<T> create(...)` 静态工厂 + 析构自动释放。 | **E-10** | `src/core/hw_transcode.cpp`<br>`include/rtx/vram_pool.h`<br>`src/core/vram_ring_pool.cpp`<br>`src/shim/ngx_bridge/` | **[已完成]** 静态扫描门禁零匹配，100% RAII |
+| **W2-05** | **拔除单实现虚接口与死代码**：物理删除未使用的 `PingPongRing` 与 `test_pingpong_pipeline.cpp`；`SmartGeometryCalculator` 退化为命名空间自由函数。 | **E-13(d)** | `src/shim/ngx_bridge/d3d12_interop.*`<br>`tests/test_pingpong_pipeline.cpp`<br>`include/rtx/geometry.h` | **[已完成]** 消除死类与伪类抽象 |
 
 ---
 

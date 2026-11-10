@@ -142,7 +142,6 @@ set(RTX_CORE_SOURCES
     src/core/rational.cpp
     src/core/sei_synthesizer.cpp
     src/core/status.cpp
-    src/core/types.cpp
     src/core/vram_ring_pool.cpp
     src/io/ffmpeg_io.cpp
     src/io/memory_avio.cpp
@@ -609,7 +608,6 @@ if(RTX_BUILD_TESTS)
         tests/test_io.cpp
         tests/unit/test_audio_stream_copy.cpp
         tests/test_main.cpp
-        tests/test_pingpong_pipeline.cpp
         tests/test_rational.cpp
         tests/test_shim.cpp
         tests/test_status.cpp

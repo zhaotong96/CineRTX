@@ -123,7 +123,7 @@ std::wstring makeAppDataDirectory(const std::wstring& fallback) {
 
 NgxD3D12Bridge::NgxD3D12Bridge() = default;
 
-NgxD3D12Bridge::~NgxD3D12Bridge() { destroy(); }
+NgxD3D12Bridge::~NgxD3D12Bridge() { release(); }
 
 bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& config,
                             std::string* error) {
@@ -752,7 +752,7 @@ void NgxD3D12Bridge::release_features() {
     }
 }
 
-void NgxD3D12Bridge::destroy() {
+void NgxD3D12Bridge::release() {
     std::lock_guard<std::mutex> lock(mutex_);
     trace("destroy: begin");
     if (interop_ != nullptr && pending_signal_ != 0) {

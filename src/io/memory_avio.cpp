@@ -82,10 +82,6 @@ void MemoryAvioContext::initAvio(int write_flag) {
     avio_ctx_->direct = 0;
 }
 
-void MemoryAvioContext::shutdown() noexcept {
-    releaseAvio();
-}
-
 void MemoryAvioContext::releaseAvio() noexcept {
     if (avio_ctx_ != nullptr) {
         // avio_context_free() releases the AVIOContext but not the caller's
