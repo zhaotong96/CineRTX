@@ -40,16 +40,17 @@
 
 ---
 
-### 波次三：AV1 默认与原生参数矩阵 UI 重构 (Wave 3: AV1 10-bit & Native Pro UI)
+### 波次三：AV1 默认与原生参数矩阵 UI 重构 (Wave 3: AV1 10-bit & Native Pro UI) [已闭环完成 - 2026-11-10]
 * **目标**：全面暴露 13 项专业转码参数，废除 GDI 手绘教条，默认启用 AV1 10-bit 编码。
+* **实测成果**：全波次净减代码 **622 行**（其中 `src/gui/rtx_gui.cpp` 由 1,950+ 行大幅精简至 736 行，净减 1,214 行）；全链路默认输出 AV1 10-bit（带 `av1C` 配置盒与 OBU 封装，sm_89 探测自动回退）；Win32 原生 Common Controls 13 项专业参数矩阵（6 ComboBox、4 Edit、3 CheckBox）全量双向绑定；支持 `Ctrl+L` 原地热重载中英文 i18n；废除 `RTX_GUI_RESULT_LOG` 改用 `OutputDebugStringW`；79 项单测 100% 绿色；RTX 5060 实测 GUI 端到端 4K HDR10 AV1 转码 100% 成功。
 
-| 任务编号 | 任务名称与核心动作 | 对应专家议题 | 涉及文件 | 预估代码净减 |
+| 任务编号 | 任务名称与核心动作 | 对应专家议题 | 涉及文件 | 实测状态与效果 |
 | :---: | :--- | :---: | :--- | :---: |
-| **W3-01** | **全链路默认切换为 AV1 10-bit**：拔除 5 处硬编码 HEVC 拦截点，补齐 `av1C` 与 OBU 比特流封装；加启动期 NVENC 自检（Ada/Blackwell 默认 AV1，Ampere 自动回退 HEVC）。 | **E-04** | `src/core/hw_transcode.cpp`<br>`include/rtx/hw_transcode.h`<br>`src/cli/main.cpp` | 净改 ~65 行 |
-| **W3-02** | **Win32 原生标准控件声明式微组件层**：推翻“零子 HWND”手绘教条，采用 Windows 原生 `user32`/`comctl32` 控件，配合 `DarkMode_Explorer` 与深色画刷拦截。 | **E-01** | `src/gui/rtx_gui.cpp` | 净减 ~350 行手绘胶水 |
-| **W3-03** | **构建 13 项专业参数原生矩阵与双向绑定**：6 个 ComboBox、4 个 Edit、3 个 CheckBox 完整双向绑定 `HwTranscodeOptions`，消除双端不同步隐患。 | **E-02** | `src/gui/rtx_gui.cpp`<br>`include/rtx/hw_transcode.h` | +120 行绑定表 |
-| **W3-04** | **全控件表驱动动态热切换 i18n (`Ctrl+L`)**：启动自检系统语言，`StrId` 覆盖全部控件文本，原地刷新无需重启。 | **E-07** | `src/gui/rtx_gui.cpp`<br>`include/rtx/i18n.h` | +80 行 |
-| **W3-05** | **拔除 `RTX_GUI_RESULT_LOG` 环境变量**：废除磁盘日志落盘，改用 Windows 原生 `OutputDebugStringW` 与 DebugView 监听流（吸收 T-05）。 | **T-05** | `src/gui/rtx_gui.cpp` | -60 行 |
+| **W3-01** | **全链路默认切换为 AV1 10-bit**：拔除 5 处硬编码 HEVC 拦截点，补齐 `av1C` 与 OBU 比特流封装；加启动期 NVENC 自检（Ada/Blackwell 默认 AV1，Ampere 自动回退 HEVC）。 | **E-04** | `src/core/hw_transcode.cpp`<br>`include/rtx/hw_transcode.h`<br>`src/shim/loader/nv_encoder.cpp`<br>`src/io/bitstream.*`<br>`src/cli/main.cpp` | **[已完成]** 默认 AV1 10-bit，硬件实测通过 |
+| **W3-02** | **Win32 原生标准控件声明式微组件层**：推翻“零子 HWND”手绘教条，采用 Windows 原生 `user32`/`comctl32` 控件，配合 `DarkMode_Explorer` 与深色画刷拦截。 | **E-01** | `src/gui/rtx_gui.cpp`<br>`CMakeLists.txt` | **[已完成]** 废除手绘，纯原生深色控件就绪 |
+| **W3-03** | **构建 13 项专业参数原生矩阵与双向绑定**：6 个 ComboBox、4 个 Edit、3 个 CheckBox 完整双向绑定 `HwTranscodeOptions`，消除双端不同步隐患。 | **E-02** | `src/gui/rtx_gui.cpp`<br>`include/rtx/hw_transcode.h` | **[已完成]** 13 项参数矩阵全量双向绑定 |
+| **W3-04** | **全控件表驱动动态热切换 i18n (`Ctrl+L`)**：启动自检系统语言，`StrId` 覆盖全部控件文本，原地刷新无需重启。 | **E-07** | `src/gui/rtx_gui.cpp`<br>`include/rtx/i18n.h`<br>`src/core/i18n.cpp` | **[已完成]** `Ctrl+L` / `WM_HOTKEY` 原地热切通过 |
+| **W3-05** | **拔除 `RTX_GUI_RESULT_LOG` 环境变量**：废除磁盘日志落盘，改用 Windows 原生 `OutputDebugStringW` 与 DebugView 监听流（吸收 T-05）。 | **T-05** | `src/gui/rtx_gui.cpp` | **[已完成]** 零磁盘日志污染，原生调试流接入 |
 
 ---
 

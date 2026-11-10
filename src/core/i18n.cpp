@@ -32,23 +32,21 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"NGX Plugins",                                                 // StatusNgxPlugins
         L"Frame Interpolation",                                         // StatusFrucEngine
         L"VRAM Pool Level",                                             // StatusVramWatermark
-        L"Fast transcode",                                              // ModeTranscodeFast
-        L"Master remaster",                                             // ModeRemasterMaster
-        L"OFA (hardware optical flow)",                                 // ModeInterpOffRuc
-        L"RIFE (TensorRT FP16)",                                        // ModeInterpRife
-        L"NGX plugins are missing",                                     // DialogMissingPluginsTitle
-        L"The RTX Video SDK feature DLLs were not found. Place them in "
-        L"plugins\\nvidia_rtx or install the SDK, then retry.",          // DialogMissingPluginsBody
-        L"Open plugin folder",                                          // BtnExplorePlugins
-        L"Build RIFE engine",                                           // BtnBuildRife
-        L"Input video",                                                 // DropTitle
-        L"Drop an MP4 / MKV file into the window",                      // DropHint
-        L"NVDEC decode - NVENC HEVC / H.264 encode - keeps the source "
-        L"resolution and bit depth",                                    // DropSupported
-        L"Output",                                                      // DropOutputPrefix
-        L"Codec  HEVC",                                                 // CodecLabelHevc
-        L"Codec  H.264",                                                // CodecLabelH264
-        L"Preset",                                                      // PresetLabel
+        L"Input File",                                                  // ParamInput
+        L"Output File",                                                 // ParamOutput
+        L"Video Codec",                                                 // ParamCodec
+        L"Resolution",                                                  // ParamResolution
+        L"NVENC Preset",                                                // ParamPreset
+        L"Rate Control",                                                // ParamRateControl
+        L"Bitrate (kbps)",                                              // ParamBitrate
+        L"Constant QP",                                                 // ParamCq
+        L"RTX VSR Super Resolution",                                    // ParamVsr
+        L"VSR Quality",                                                 // ParamVsrQuality
+        L"RTX TrueHDR (SDR->HDR10)",                                    // ParamTrueHdr
+        L"Peak Luminance (nits)",                                       // ParamPeakNits
+        L"Aspect & Orientation",                                        // ParamAspect
+        L"Audio Stream Copy (Passthrough)",                             // ParamAudioCopy
+        L"Browse...",                                                   // BtnBrowse
         L"Start hardware transcode",                                    // ButtonStart
         L"Stop transcode",                                              // ButtonStop
         L"Drop a file to begin",                                        // ButtonDropFirst
@@ -102,25 +100,24 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"NGX 增强插件",                                                 // StatusNgxPlugins
         L"AI 智能插帧引擎",                                              // StatusFrucEngine
         L"显存池安全水位",                                               // StatusVramWatermark
-        L"快速转码",                                                     // ModeTranscodeFast
-        L"母版级重制",                                                   // ModeRemasterMaster
-        L"OFA 硬件光流",                                                 // ModeInterpOffRuc
-        L"RIFE（TensorRT FP16）",                                        // ModeInterpRife
-        L"缺少 NGX 插件",                                                // DialogMissingPluginsTitle
-        L"未找到 RTX Video SDK 功能 DLL。请将其放入 plugins\\nvidia_rtx "
-        L"或安装 SDK 后重试。",                                          // DialogMissingPluginsBody
-        L"打开插件目录",                                                 // BtnExplorePlugins
-        L"构建 RIFE 引擎",                                               // BtnBuildRife
-        L"输入视频",                                                     // DropTitle
-        L"将 MP4 / MKV 文件拖入窗口",                                    // DropHint
-        L"NVDEC 解码 · NVENC HEVC / H.264 编码 · 保持源分辨率与位深",     // DropSupported
-        L"输出",                                                         // DropOutputPrefix
-        L"编码  HEVC",                                                   // CodecLabelHevc
-        L"编码  H.264",                                                  // CodecLabelH264
-        L"预设",                                                         // PresetLabel
+        L"输入文件",                                                     // ParamInput
+        L"输出文件",                                                     // ParamOutput
+        L"编码格式",                                                     // ParamCodec
+        L"目标分辨率",                                                   // ParamResolution
+        L"编码预设",                                                     // ParamPreset
+        L"码率控制",                                                     // ParamRateControl
+        L"目标码率 (kbps)",                                              // ParamBitrate
+        L"质量 QP",                                                      // ParamCq
+        L"启用 RTX VSR 超分辨率",                                        // ParamVsr
+        L"VSR 质量档位",                                                 // ParamVsrQuality
+        L"启用 RTX TrueHDR (SDR->HDR10)",                                // ParamTrueHdr
+        L"HDR 峰值亮度 (nits)",                                          // ParamPeakNits
+        L"画面画幅与旋转",                                               // ParamAspect
+        L"音频流无损直通 (Stream Copy)",                                 // ParamAudioCopy
+        L"浏览...",                                                      // BtnBrowse
         L"开始硬件转码",                                                 // ButtonStart
         L"停止转码",                                                     // ButtonStop
-        L"拖入文件后开始",                                               // ButtonDropFirst
+        L"准备就绪",                                                     // ButtonDropFirst
         L"任务遥测",                                                     // TelemetryTitle
         L"WDDM 异步 · 零拷贝主循环",                                     // TelemetrySubtitle
         L"进度",                                                         // ProgressLabel
@@ -171,21 +168,21 @@ constexpr const char* kStrIdNames[kStrIdCount] = {
     "StatusNgxPlugins",
     "StatusFrucEngine",
     "StatusVramWatermark",
-    "ModeTranscodeFast",
-    "ModeRemasterMaster",
-    "ModeInterpOffRuc",
-    "ModeInterpRife",
-    "DialogMissingPluginsTitle",
-    "DialogMissingPluginsBody",
-    "BtnExplorePlugins",
-    "BtnBuildRife",
-    "DropTitle",
-    "DropHint",
-    "DropSupported",
-    "DropOutputPrefix",
-    "CodecLabelHevc",
-    "CodecLabelH264",
-    "PresetLabel",
+    "ParamInput",
+    "ParamOutput",
+    "ParamCodec",
+    "ParamResolution",
+    "ParamPreset",
+    "ParamRateControl",
+    "ParamBitrate",
+    "ParamCq",
+    "ParamVsr",
+    "ParamVsrQuality",
+    "ParamTrueHdr",
+    "ParamPeakNits",
+    "ParamAspect",
+    "ParamAudioCopy",
+    "BtnBrowse",
     "ButtonStart",
     "ButtonStop",
     "ButtonDropFirst",

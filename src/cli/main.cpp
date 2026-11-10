@@ -82,6 +82,7 @@ struct Options {
     std::filesystem::path onnx;
     std::filesystem::path engine;
     std::string language;
+    VideoCodec codec = VideoCodec::AV1;
     int bitrate_kbps = 0;
     int preset = 5;
     int rate_control = 0;
@@ -97,9 +98,9 @@ void printHelp() {
               << "  CineRTX --input in.mp4 --output out.mp4 [options]\n"
               << "  CineRTX --viewport-self-test\n\n"
               << "Options:\n"
-              << "  --input PATH                 Container input (MP4/MKV); always remastered to\n"
-              << "                               4K HDR10 HEVC Main10 via VSR + TrueHDR\n"
+              << "  --input PATH                 Container input (MP4/MKV)\n"
               << "  --output PATH                Container output (MP4/MKV)\n"
+              << "  --codec av1|hevc|h264        Output video codec (default: av1)\n"
               << "  --bitrate KBPS               Encoder target bitrate (0 = auto)\n"
               << "  --preset 1..7                NVENC P1..P7 preset (default 5)\n"
               << "  --rate-control cbr|vbr|qp    NVENC rate control (default cbr)\n"
@@ -115,9 +116,8 @@ void printHelp() {
               << "  --sdr                        Force SDR native color space (default for SDR sources)\n"
               << "  --lang en|zh                 Output language (default: zh)\n"
               << "  --version, --help            Show version/help\n\n"
-              << "The product transcode is unconditional: every container input is decoded by\n"
-              << "NVDEC, remastered by RTX VSR + TrueHDR in device memory, and encoded as 4K\n"
-              << "HDR10 HEVC Main10.\n";
+              << "The product transcode: every container input is decoded by NVDEC, remastered by\n"
+              << "RTX VSR in device memory, and encoded as AV1 10-bit / HEVC Main10 / H.264.\n";
 }
 
 bool parseInteger(const std::string& text, int& value) {
@@ -181,6 +181,22 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.mode = Mode::Container;
         } else if (argument == "--output") {
             if (!requirePath(argc, argv, i, options.output_path)) {
+                return false;
+            }
+        } else if (argument == "--codec") {
+            if (!requireValue(argc, argv, i, value)) {
+                return false;
+            }
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char c) { return static_cast<char>(c | 0x20); });
+            if (value == "av1" || value == "0") {
+                options.codec = VideoCodec::AV1;
+            } else if (value == "hevc" || value == "h265" || value == "1") {
+                options.codec = VideoCodec::HEVC;
+            } else if (value == "h264" || value == "avc" || value == "2") {
+                options.codec = VideoCodec::H264;
+            } else {
+                error = "--codec must be av1, hevc or h264";
                 return false;
             }
         } else if (argument == "--rate-control") {
@@ -377,7 +393,7 @@ HwTranscodeOptions makeHwOptions(const Options& options) {
     hardware.width = options.width;
     hardware.height = options.height;
     hardware.frame_limit = options.frames_set ? options.frames : 0;
-    hardware.codec = VideoCodec::HEVC;
+    hardware.codec = options.codec;
     hardware.bit_depth = 10;
     hardware.bitrate_kbps = options.bitrate_kbps;
     hardware.preset = options.preset;

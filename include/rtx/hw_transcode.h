@@ -39,7 +39,7 @@ struct HwTranscodeOptions {
     int height = 0;
     int frame_limit = 0;  // 0 = consume the whole stream
 
-    VideoCodec codec = VideoCodec::HEVC;
+    VideoCodec codec = VideoCodec::AV1;
     int bit_depth = 0;  // 0 = preserve source depth
     int bitrate_kbps = 0;
     int preset = 5;
@@ -47,12 +47,14 @@ struct HwTranscodeOptions {
     int qp = 0;
     Rational fps{0, 1};
     bool hdr = true;
+    bool copy_audio = true;
 
     // Product remaster geometry. The product has no passthrough mode: decoded
     // NV12/P010 frames always traverse the NGX bridge (preprocess -> VSR ->
     // TrueHDR -> pack v2) before NVENC.
     int target_width = 0;   // 0 = 3840 default, resolved by the transcode path
     int target_height = 0;  // 0 = 2160 default
+    bool vsr_enabled = true;
     int vsr_quality = 2;    // 1..4, NGX VSR quality level
 
 

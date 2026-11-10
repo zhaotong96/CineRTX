@@ -39,6 +39,9 @@ std::vector<uint8_t> makeHevcConfigRecord(const uint8_t* annexb, size_t size);
 // Builds the ISO/IEC 14496-15 AVCDecoderConfigurationRecord (avcC).
 std::vector<uint8_t> makeAvcConfigRecord(const uint8_t* annexb, size_t size);
 
+// Builds the ISO/IEC 14496-15 AV1CodecConfigurationRecord (av1C).
+std::vector<uint8_t> makeAv1ConfigRecord(const uint8_t* obu_data, size_t size, bool ten_bit = true);
+
 // Extracts VPS/SPS/PPS from an Annex-B sequence header.
 std::vector<uint8_t> extractParameterSets(const uint8_t* annexb, size_t size);
 

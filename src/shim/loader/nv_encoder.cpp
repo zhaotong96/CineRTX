@@ -207,13 +207,15 @@ struct RtxEncoder {
     bool buildConfig(NV_ENC_CONFIG* out) {
         const bool ten_bit = config.input_format == RTX_PIXEL_P010;
         const bool hevc = config.codec == 0;
+        const bool av1 = config.codec == 1;
         const bool h264 = config.codec == 2;
-        if (!hevc && !h264) {
-            last_error = "stage-1 NVENC supports HEVC and H.264 sessions";
+        if (!hevc && !av1 && !h264) {
+            last_error = "stage-1 NVENC supports AV1, HEVC and H.264 sessions";
             return false;
         }
 
-        const GUID& codec = hevc ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
+        const GUID& codec = av1 ? NV_ENC_CODEC_AV1_GUID
+                                : (hevc ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID);
         const NV_ENC_TUNING_INFO tuning = tuningForPreset(config.preset);
 
         NV_ENC_PRESET_CONFIG preset_config{};
@@ -235,9 +237,14 @@ struct RtxEncoder {
         }
         *out = preset_config.presetCfg;
         out->version = NV_ENC_CONFIG_VER;
-        out->profileGUID = hevc ? (ten_bit ? NV_ENC_HEVC_PROFILE_MAIN10_GUID
-                                          : NV_ENC_HEVC_PROFILE_MAIN_GUID)
-                                : NV_ENC_H264_PROFILE_HIGH_GUID;
+        if (av1) {
+            out->profileGUID = NV_ENC_AV1_PROFILE_MAIN_GUID;
+        } else if (hevc) {
+            out->profileGUID = ten_bit ? NV_ENC_HEVC_PROFILE_MAIN10_GUID
+                                       : NV_ENC_HEVC_PROFILE_MAIN_GUID;
+        } else {
+            out->profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
+        }
         out->gopLength = config.gop_length > 0 ? static_cast<uint32_t>(config.gop_length)
                                                : kDefaultGop;
         out->frameIntervalP = 1;  // IPP: one compressed picture per input frame.
@@ -304,7 +311,28 @@ struct RtxEncoder {
                                                : NV_ENC_VUI_MATRIX_COEFFS_BT709);
         const uint32_t full_range = config.hdr.range == 1 ? 1u : 0u;
 
-        if (hevc) {
+        if (av1) {
+            NV_ENC_CONFIG_AV1& av1_config = out->encodeCodecConfig.av1Config;
+            av1_config.chromaFormatIDC = 1;
+            av1_config.level = NV_ENC_LEVEL_AV1_AUTOSELECT;
+            av1_config.tier = config.tier == 1 ? NV_ENC_TIER_AV1_1 : NV_ENC_TIER_AV1_0;
+            av1_config.idrPeriod = out->gopLength;
+            av1_config.repeatSeqHdr = 1;
+            av1_config.outputAnnexBFormat = 0;  // OBU format
+            av1_config.maxNumRefFramesInDPB = 4;
+            av1_config.inputBitDepth = ten_bit ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
+            av1_config.outputBitDepth = av1_config.inputBitDepth;
+            av1_config.outputMasteringDisplay = hdr ? 1u : 0u;
+            av1_config.outputMaxCll = hdr ? 1u : 0u;
+            av1_config.colorPrimaries = static_cast<NV_ENC_VUI_COLOR_PRIMARIES>(primaries);
+            av1_config.transferCharacteristics =
+                static_cast<NV_ENC_VUI_TRANSFER_CHARACTERISTIC>(transfer);
+            av1_config.matrixCoefficients = static_cast<NV_ENC_VUI_MATRIX_COEFFS>(matrix);
+            av1_config.colorRange = full_range;
+            if (hdr) {
+                av1_config.chromaSamplePosition = 2;  // Colocated with luma (0,0)
+            }
+        } else if (hevc) {
             NV_ENC_CONFIG_HEVC& hevc_config = out->encodeCodecConfig.hevcConfig;
             hevc_config.chromaFormatIDC = 1;
             hevc_config.level = NV_ENC_LEVEL_AUTOSELECT;
@@ -463,6 +491,9 @@ struct RtxEncoder {
         if (config.codec == 0 && config.hdr.enabled != 0) {
             picture.codecPicParams.hevcPicParams.pMasteringDisplay = &mastering;
             picture.codecPicParams.hevcPicParams.pMaxCll = &cll;
+        } else if (config.codec == 1 && config.hdr.enabled != 0) {
+            picture.codecPicParams.av1PicParams.pMasteringDisplay = &mastering;
+            picture.codecPicParams.av1PicParams.pMaxCll = &cll;
         }
 
         status = api.nvEncEncodePicture(session, &picture);
@@ -563,7 +594,7 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
     if (config == nullptr || config->width <= 0 || config->height <= 0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-    if (config->codec != 0 && config->codec != 2) {
+    if (config->codec != 0 && config->codec != 1 && config->codec != 2) {
         return RTX_ERR_UNSUPPORTED;
     }
     if (config->input_format != RTX_PIXEL_NV12 && config->input_format != RTX_PIXEL_P010) {
@@ -679,7 +710,9 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
               static_cast<int>(encode_config.rcParams.rateControlMode));
     NV_ENC_INITIALIZE_PARAMS initialize{};
     initialize.version = NV_ENC_INITIALIZE_PARAMS_VER;
-    initialize.encodeGUID = config->codec == 0 ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
+    initialize.encodeGUID = config->codec == 1 ? NV_ENC_CODEC_AV1_GUID
+                          : (config->codec == 0 ? NV_ENC_CODEC_HEVC_GUID
+                                                : NV_ENC_CODEC_H264_GUID);
     initialize.presetGUID = presetGuid(config->preset);
     initialize.encodeWidth = static_cast<uint32_t>(config->width);
     initialize.encodeHeight = static_cast<uint32_t>(config->height);

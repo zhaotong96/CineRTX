@@ -13,1457 +13,743 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0A00
-#endif
-#ifndef WINVER
-#define WINVER 0x0A00
-#endif
 
 #include "rtx/hw_transcode.h"
 #include "rtx/i18n.h"
 #include "rtx/runtime_env.h"
-#include "rtx/ngx_remaster.h"
-#include "rtx/nvidia_shim.h"
 #include "rtx/types.h"
-#include "rtx/vram_pool.h"
 
 #include <windows.h>
 #include <windowsx.h>
+#include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <uxtheme.h>
 
-#if defined(small)
-#undef small
-#endif
-
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <cstdarg>
-#include <cwchar>
 #include <filesystem>
 #include <format>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <variant>
 #include <vector>
 
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 int rtxCliMain(int argc, char** argv);
 
 namespace {
 
-constexpr UINT kTelemetryTimer = 1;
-constexpr UINT kExitTimer = 2;
-constexpr UINT kMsgDone = WM_APP + 1;
-constexpr UINT kMsgHardware = WM_APP + 2;
-constexpr UINT kMsgAutostart = WM_APP + 3;
-// The diagnostic probe posts this only when the plugin state actually changed,
-// so a healthy system never wakes the paint path (FMEA-03).
-constexpr UINT kMsgDiagnostics = WM_APP + 4;
-
-}  // namespace
-
-namespace rtx {
-
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4324)
-#endif
-struct alignas(64) TelemetrySnapshot {
-    std::atomic<uint64_t> frames_decoded{0};
-    std::atomic<uint64_t> frames_interpolated{0};
-    std::atomic<uint64_t> frames_encoded{0};
-    std::atomic<uint64_t> scene_cuts_bypassed{0};
-    std::atomic<uint64_t> vram_used_bytes{0};
-    std::atomic<uint64_t> vram_total_bytes{0};
-    std::atomic<uint64_t> device_to_host_bytes{0};
-    std::atomic<uint32_t> ewma_fps_x10{0};
-    std::atomic<uint32_t> pack_stage_us{0};
-    std::atomic<int32_t> av_sync_drift_us{0};
-    std::atomic<uint8_t> active_fruc_mode{0};
-    std::atomic<uint8_t> watermark_tier{0};
-    std::atomic<uint8_t> ngx_ready{0};
-    std::atomic<uint8_t> hardware_ready{0};
-
-    void reset() noexcept {
-        frames_decoded.store(0, std::memory_order_relaxed);
-        frames_interpolated.store(0, std::memory_order_relaxed);
-        frames_encoded.store(0, std::memory_order_relaxed);
-        scene_cuts_bypassed.store(0, std::memory_order_relaxed);
-        vram_used_bytes.store(0, std::memory_order_relaxed);
-        device_to_host_bytes.store(0, std::memory_order_relaxed);
-        ewma_fps_x10.store(0, std::memory_order_relaxed);
-        pack_stage_us.store(0, std::memory_order_relaxed);
-        av_sync_drift_us.store(0, std::memory_order_relaxed);
-        active_fruc_mode.store(0, std::memory_order_relaxed);
-        watermark_tier.store(0, std::memory_order_relaxed);
-    }
-};
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
-
-}  // namespace rtx
-
-namespace {
-
-// Phase-3 lock-free telemetry block (rtx::TelemetrySnapshot) plus the handful
-// of job-state counters the window owns.
-rtx::TelemetrySnapshot g_telemetry;
-
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4324) // Intentional cache-line isolation for job telemetry.
-#endif
-struct alignas(64) JobTelemetry {
-    std::atomic<uint32_t> running{0};
-    std::atomic<uint32_t> progressPermille{0};
-    std::atomic<uint32_t> cancelRequested{0};
-    std::atomic<uint32_t> zeroCopy{0};  // 0 unknown, 1 confirmed, 2 host copies
-    std::atomic<uint64_t> totalFrames{0};
-    std::atomic<uint64_t> elapsedMs{0};
-};
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
-
-static_assert(sizeof(JobTelemetry) % 64 == 0,
-              "job telemetry must not share a cache line with unrelated state");
-
-JobTelemetry g_job;
-std::atomic<bool> g_cancel{false};
-std::atomic<HWND> g_window{nullptr};
-bool g_selfTest = false;
-bool g_dirty = true;
-
-struct WorkerResult {
-    bool ok = false;
-    bool cancelled = false;
-    bool zeroCopy = false;
-    uint64_t d2h = 0;
-    uint64_t h2d = 0;
-    uint64_t frames = 0;
-    double elapsedMs = 0.0;
-    std::wstring title;
-    std::wstring detail;
+enum ControlId : int {
+    IDC_LBL_INPUT = 1001,
+    IDC_EDT_INPUT,
+    IDC_BTN_BROWSE_IN,
+    IDC_LBL_OUTPUT,
+    IDC_EDT_OUTPUT,
+    IDC_BTN_BROWSE_OUT,
+    IDC_LBL_CODEC,
+    IDC_CMB_CODEC,
+    IDC_LBL_PRESET,
+    IDC_CMB_PRESET,
+    IDC_LBL_RC,
+    IDC_CMB_RC,
+    IDC_LBL_BITRATE,
+    IDC_EDT_BITRATE,
+    IDC_LBL_QP,
+    IDC_EDT_QP,
+    IDC_LBL_RES,
+    IDC_CMB_RES,
+    IDC_LBL_GEOM,
+    IDC_CMB_GEOM,
+    IDC_CHK_VSR,
+    IDC_LBL_VSR_QUAL,
+    IDC_CMB_VSR_QUAL,
+    IDC_CHK_TRUEHDR,
+    IDC_LBL_PEAK_NITS,
+    IDC_EDT_PEAK_NITS,
+    IDC_CHK_AUDIO,
+    IDC_BTN_START,
+    IDC_BTN_STOP,
+    IDC_PROGRESS,
+    IDC_LBL_STATUS,
+    IDC_LBL_TELEMETRY,
 };
 
-std::mutex g_resultMutex;
-WorkerResult g_result;
-std::mutex g_gpuMutex;
-std::wstring g_gpuText;
-std::wstring g_ngxText;
-std::wstring g_frucText;
-bool g_hardwareProbeStarted = false;
-bool g_startupRecorded = false;
-bool g_headlessPaint = false;
-UINT g_forcedDpi = 0;
-double g_mainEntryMs = 0.0;
-double g_windowCreatedMs = 0.0;
-double g_updateMs = 0.0;
-double g_paintBufferMs = 0.0;
-double g_paintDrawMs = 0.0;
-double g_paintBlitMs = 0.0;
+constexpr UINT WM_APP_PROGRESS    = WM_APP + 10;
+constexpr UINT WM_APP_DONE        = WM_APP + 11;
+constexpr UINT WM_APP_TOGGLE_LANG = WM_APP + 20;
 
-std::wstring g_inputPath;
-std::wstring g_outputPath;
-std::wstring g_autostartPath;
-std::wstring g_status;
-int g_presetIndex = 1;  // P5, P6, P7
-constexpr int kPresets[] = {5, 6, 7};
+std::atomic<bool> g_cancelRequested{false};
+std::thread g_workerThread;
+bool g_isTranscoding = false;
 
-constexpr COLORREF kBg = RGB(18, 18, 18);
-constexpr COLORREF kCard = RGB(30, 30, 30);
-constexpr COLORREF kCard2 = RGB(24, 28, 32);
-constexpr COLORREF kAccent = RGB(118, 185, 0);
-constexpr COLORREF kAccentDim = RGB(72, 112, 8);
-constexpr COLORREF kText = RGB(232, 236, 239);
-constexpr COLORREF kMuted = RGB(154, 164, 175);
-constexpr COLORREF kBorder = RGB(44, 50, 56);
-constexpr COLORREF kDanger = RGB(190, 46, 38);
-constexpr COLORREF kBarBg = RGB(42, 48, 54);
-constexpr COLORREF kWarning = RGB(214, 168, 44);
-constexpr COLORREF kStatusBg = RGB(14, 15, 16);
+HBRUSH g_hbrBg = nullptr;
+HBRUSH g_hbrCtrl = nullptr;
+HFONT  g_hFont = nullptr;
+HFONT  g_hFontBold = nullptr;
 
-struct Theme {
-    UINT dpi = 96;
-    HFONT title = nullptr;
-    HFONT section = nullptr;
-    HFONT body = nullptr;
-    HFONT small = nullptr;
-    HFONT mono = nullptr;
-    HBRUSH bg = nullptr;
-    HBRUSH card = nullptr;
-    HBRUSH card2 = nullptr;
-    HBRUSH accent = nullptr;
-    HBRUSH accentDim = nullptr;
-    HBRUSH danger = nullptr;
-    HBRUSH barBg = nullptr;
-    HBRUSH statusBg = nullptr;
-    HPEN border = nullptr;
-    HDC mem = nullptr;
-    HBITMAP bitmap = nullptr;
-    HBITMAP oldBitmap = nullptr;
-    int width = 0;
-    int height = 0;
-};
-
-Theme g_theme;
-
-struct Zones {
-    RECT drop{};
-    RECT codec{};
-    RECT preset{};
-    RECT start{};
-    RECT statusBar{};
-
-    bool hit(const RECT& r, POINT p) {
-        return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
-    }
-};
-
-Zones g_zones;
-
-int S(int value) {
-    return MulDiv(value, static_cast<int>(g_theme.dpi), 96);
-}
-
-HFONT createFont(int pixelHeight, int weight, const wchar_t* face, DWORD pitch) {
-    return CreateFontW(-S(pixelHeight), 0, 0, 0, weight, FALSE, FALSE, FALSE,
-                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                       CLEARTYPE_QUALITY, pitch, face);
-}
-
-void destroyTheme() {
-    if (g_theme.mem != nullptr) {
-        if (g_theme.oldBitmap != nullptr) {
-            SelectObject(g_theme.mem, g_theme.oldBitmap);
-        }
-        if (g_theme.bitmap != nullptr) {
-            DeleteObject(g_theme.bitmap);
-        }
-        DeleteDC(g_theme.mem);
-    }
-    g_theme.mem = nullptr;
-    g_theme.bitmap = nullptr;
-    g_theme.oldBitmap = nullptr;
-    for (HFONT* font : {&g_theme.title, &g_theme.section, &g_theme.body, &g_theme.small,
-                        &g_theme.mono}) {
-        if (*font != nullptr) {
-            DeleteObject(*font);
-            *font = nullptr;
-        }
-    }
-    for (HBRUSH* brush : {&g_theme.bg, &g_theme.card, &g_theme.card2, &g_theme.accent,
-                          &g_theme.accentDim, &g_theme.danger, &g_theme.barBg,
-                          &g_theme.statusBg}) {
-        if (*brush != nullptr) {
-            DeleteObject(*brush);
-            *brush = nullptr;
-        }
-    }
-    if (g_theme.border != nullptr) {
-        DeleteObject(g_theme.border);
-        g_theme.border = nullptr;
-    }
-}
-
-void createTheme(UINT dpi) {
-    destroyTheme();
-    g_theme.dpi = dpi;
-    g_theme.title = createFont(25, FW_BOLD, L"Microsoft YaHei UI", DEFAULT_PITCH);
-    g_theme.section = createFont(15, FW_SEMIBOLD, L"Microsoft YaHei UI", DEFAULT_PITCH);
-    g_theme.body = createFont(14, FW_NORMAL, L"Microsoft YaHei UI", DEFAULT_PITCH);
-    g_theme.small = createFont(12, FW_NORMAL, L"Microsoft YaHei UI", DEFAULT_PITCH);
-    g_theme.mono = createFont(13, FW_NORMAL, L"Consolas", FIXED_PITCH | FF_MODERN);
-    g_theme.bg = CreateSolidBrush(kBg);
-    g_theme.card = CreateSolidBrush(kCard);
-    g_theme.card2 = CreateSolidBrush(kCard2);
-    g_theme.accent = CreateSolidBrush(kAccent);
-    g_theme.accentDim = CreateSolidBrush(kAccentDim);
-    g_theme.danger = CreateSolidBrush(kDanger);
-    g_theme.barBg = CreateSolidBrush(kBarBg);
-    g_theme.statusBg = CreateSolidBrush(kStatusBg);
-    g_theme.border = CreatePen(PS_SOLID, 1, kBorder);
-}
-
-void ensureBackBuffer(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return;
-    }
-    if (g_theme.mem != nullptr && g_theme.width == width && g_theme.height == height) {
-        return;
-    }
-    if (g_theme.mem != nullptr) {
-        SelectObject(g_theme.mem, g_theme.oldBitmap);
-        DeleteObject(g_theme.bitmap);
-        DeleteDC(g_theme.mem);
-    }
-    HDC screen = GetDC(nullptr);
-    g_theme.mem = CreateCompatibleDC(screen);
-    g_theme.bitmap = CreateCompatibleBitmap(screen, width, height);
-    ReleaseDC(nullptr, screen);
-    g_theme.oldBitmap = static_cast<HBITMAP>(SelectObject(g_theme.mem, g_theme.bitmap));
-    g_theme.width = width;
-    g_theme.height = height;
-}
-
-void fillRect(HDC dc, const RECT& rect, HBRUSH brush) {
-    FillRect(dc, &rect, brush);
-}
-
-void card(HDC dc, const RECT& rect, int radius, HBRUSH fill) {
-    HGDIOBJ oldBrush = SelectObject(dc, fill);
-    HGDIOBJ oldPen = SelectObject(dc, g_theme.border);
-    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-}
-
-void text(HDC dc, const std::wstring& value, RECT rect, HFONT font, COLORREF color,
-          UINT flags) {
-    SelectObject(dc, font);
-    SetTextColor(dc, color);
-    SetBkMode(dc, TRANSPARENT);
-    DrawTextW(dc, value.c_str(), static_cast<int>(value.size()), &rect,
-              flags | DT_NOPREFIX);
-}
-
-// Every localised label goes through here: no std::wstring is built for a
-// constant string, and an out-of-range id cannot crash the paint path.
-void text(HDC dc, rtx::StrId id, RECT rect, HFONT font, COLORREF color, UINT flags) {
-    text(dc, std::wstring(rtx::trW(id)), rect, font, color, flags);
-}
-
-std::wstring utf8ToWide(const std::string& value) {
-    if (value.empty()) {
-        return {};
-    }
-    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(),
-                                         static_cast<int>(value.size()), nullptr, 0);
-    if (size <= 0) {
-        return {};
-    }
-    std::wstring result(static_cast<size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
-                        result.data(), size);
-    return result;
-}
-
-std::string wideToUtf8(const std::wstring& value) {
-    if (value.empty()) {
-        return {};
-    }
-    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(),
-                                         static_cast<int>(value.size()), nullptr, 0,
-                                         nullptr, nullptr);
-    if (size <= 0) {
-        return {};
-    }
-    std::string result(static_cast<size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
-                        result.data(), size, nullptr, nullptr);
-    return result;
-}
-
-std::wstring fileName(const std::wstring& path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? path : path.substr(slash + 1);
-}
-
-std::wstring directOutputPath(const std::wstring& input) {
-    const size_t slash = input.find_last_of(L"\\/");
-    size_t dot = input.find_last_of(L'.');
-    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) {
-        dot = input.size();
-    }
-    return input.substr(0, dot) + L".remaster.mp4";
-}
-
-std::wstring formatFps(uint32_t times10) {
-    wchar_t buffer[64] = {};
-    std::swprintf(buffer, 64, L"%.1f FPS", static_cast<double>(times10) / 10.0);
-    return buffer;
-}
-
-std::wstring formatSeconds(uint64_t milliseconds) {
-    wchar_t buffer[64] = {};
-    std::swprintf(buffer, 64, L"%.2f s", static_cast<double>(milliseconds) / 1000.0);
-    return buffer;
-}
-
-std::wstring formatCount(uint64_t value, uint64_t total) {
-    wchar_t buffer[96] = {};
-    if (total > 0) {
-        std::swprintf(buffer, 96, L"%llu / %llu", static_cast<unsigned long long>(value),
-                      static_cast<unsigned long long>(total));
-    } else {
-        std::swprintf(buffer, 96, L"%llu", static_cast<unsigned long long>(value));
-    }
-    return buffer;
-}
-
-std::wstring formatVram(uint64_t used, uint64_t total) {
-    wchar_t buffer[96] = {};
-    if (total > 0) {
-        std::swprintf(buffer, 96, L"%.1f/%.1f GB", static_cast<double>(used) / 1073741824.0,
-                      static_cast<double>(total) / 1073741824.0);
-    } else {
-        std::swprintf(buffer, 96, L"-");
-    }
-    return buffer;
-}
-
-void setStatus(const std::wstring& value) {
-    g_status = value;
-    g_dirty = true;
-}
-
-void enableDarkTitleBar(HWND hwnd) {
-    BOOL dark = TRUE;
-    if (FAILED(DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)))) {
-        (void)DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
-    }
-    SendMessageW(hwnd, WM_NCACTIVATE, FALSE, 0);
-    SendMessageW(hwnd, WM_NCACTIVATE, TRUE, 0);
-}
-
-
-bool componentPresent(const RtxDiagnostics& diagnostics, const char* needle) {
-    for (uint32_t index = 0; index < diagnostics.component_count &&
-                             index < RTX_MAX_COMPONENTS;
-         ++index) {
-        const RtxComponentInfo& component = diagnostics.components[index];
-        if (component.present != 0 && std::strstr(component.name, needle) != nullptr) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// The bridge is the authoritative capability source: the shim cannot see the
-// feature DLLs because it never loads the proprietary host stub.  Opening the
-// bridge here also keeps the cuInit(0)/DXGI ordering required by the remaster.
-struct NgxProbe {
-    bool ready = false;
-    std::wstring text;
-};
-
-NgxProbe probeNgx() {
-    rtx::NgxRemasterBridge bridge;
-    std::string error;
-    if (!bridge.open(&error)) {
-        return NgxProbe{false, L"NGX: " + utf8ToWide(error)};
-    }
-    RtxNgxBridgeCaps caps{};
-    const RtxResult result = bridge.queryCaps(&caps);
-    if (result != RTX_OK) {
-        return NgxProbe{false, L"NGX: query_caps error " + std::to_wstring(result)};
-    }
-    if (caps.vsr_available != 0 && caps.truehdr_available != 0) {
-        return NgxProbe{true, L"NGX: VSR + TrueHDR Ready"};
-    }
-    std::wstring detail = utf8ToWide(caps.diagnostics);
-    return NgxProbe{false, detail.empty() ? L"NGX: unavailable" : L"NGX: " + detail};
-}
-
-// Background health probe.  It writes the three status-bar texts under a short
-// mutex and posts kMsgDiagnostics only when something changed, so a healthy
-// system costs one paint per state transition rather than one per second.
-void startHardwareProbe() {
-    if (g_hardwareProbeStarted) {
-        return;
-    }
-    g_hardwareProbeStarted = true;
-    std::thread([]() {
-        std::wstring hardware;
-        std::wstring fruc = L"FRUC: unavailable";
-        bool changed = false;
-
-        // Load and query the bridge before shim.probe() calls cuInit(0), exactly
-        // as the remaster path does.
-        const NgxProbe ngx_probe = probeNgx();
-        const std::wstring ngx = ngx_probe.text;
-        g_telemetry.ngx_ready.store(ngx_probe.ready ? 1 : 0, std::memory_order_relaxed);
-
-        rtx::NvidiaShim shim;
-        std::string error;
-        if (!shim.open(&error)) {
-            hardware = std::wstring(rtx::trW(rtx::StrId::StatusShimMissing)) + utf8ToWide(error);
-        } else {
-            RtxDiagnostics diagnostics{};
-            if (shim.probe(&diagnostics) == RTX_OK && diagnostics.device.name[0] != '\0') {
-                wchar_t buffer[256] = {};
-                std::swprintf(buffer, 256, L"%ls · SM %d.%d · %u.%u · D3D12/CUDA OK",
-                              utf8ToWide(diagnostics.device.name).c_str(),
-                              diagnostics.device.compute_major,
-                              diagnostics.device.compute_minor,
-                              diagnostics.device.driver_version / 100,
-                              diagnostics.device.driver_version % 100);
-                hardware = buffer;
-                g_telemetry.hardware_ready.store(1, std::memory_order_relaxed);
-                g_telemetry.vram_total_bytes.store(diagnostics.device.vram_bytes,
-                                                   std::memory_order_relaxed);
-            } else {
-                hardware = std::wstring(rtx::trW(rtx::StrId::StatusGpuMissing)) +
-                           utf8ToWide(diagnostics.summary);
-            }
-            const bool ofa = componentPresent(diagnostics, "NvOFFRUC");
-            const bool rife = componentPresent(diagnostics, "TensorRT");
-            if (ofa && rife) {
-                fruc = L"FRUC: OFA + RIFE present (execution pending)";
-            } else if (ofa) {
-                fruc = L"FRUC: OFA present (execution pending)";
-            } else if (rife) {
-                fruc = L"FRUC: RIFE runtime present (execution pending)";
-            }
-            g_telemetry.active_fruc_mode.store(ofa ? 1 : (rife ? 2 : 0),
-                                               std::memory_order_relaxed);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(g_gpuMutex);
-            changed = hardware != g_gpuText || ngx != g_ngxText || fruc != g_frucText;
-            g_gpuText = hardware;
-            g_ngxText = ngx;
-            g_frucText = fruc;
-        }
-        // Debugger-only trace: the status bar ellipsizes long diagnostics, so
-        // the full loader/plugin paths belong in the VS Output window.
-        OutputDebugStringW((L"[CineRTX] " + hardware + L" | " + ngx + L" | " + fruc + L"\n")
-                               .c_str());
-        if (changed) {
-            if (HWND window = g_window.load()) {
-                PostMessageW(window, kMsgDiagnostics, 0, 0);
-            }
-        }
-    }).detach();
-}
-
-double millisecondsSinceCreation() {
-    FILETIME creation{};
-    FILETIME exitTime{};
-    FILETIME kernel{};
-    FILETIME user{};
-    ULARGE_INTEGER started{};
-    if (GetProcessTimes(GetCurrentProcess(), &creation, &exitTime, &kernel, &user)) {
-        started.LowPart = creation.dwLowDateTime;
-        started.HighPart = creation.dwHighDateTime;
-    }
-    FILETIME now{};
-    GetSystemTimePreciseAsFileTime(&now);
-    ULARGE_INTEGER ended{};
-    ended.LowPart = now.dwLowDateTime;
-    ended.HighPart = now.dwHighDateTime;
-    return started.QuadPart != 0
-               ? static_cast<double>(ended.QuadPart - started.QuadPart) / 10000.0
-               : 0.0;
-}
-
-inline void debugTrace(const wchar_t* format, ...) {
-#if defined(_WIN32)
-    wchar_t buffer[1024];
+void guiLog(const wchar_t* fmt, ...) {
+    wchar_t buf[1024];
     va_list args;
-    va_start(args, format);
-    _vsnwprintf_s(buffer, sizeof(buffer) / sizeof(wchar_t), _TRUNCATE, format, args);
+    va_start(args, fmt);
+    _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, args);
     va_end(args);
-    ::OutputDebugStringW(buffer);
-#endif
+    OutputDebugStringW(buf);
 }
 
-void writeStartupLog(HWND hwnd, bool painted) {
-    const double elapsedMs = millisecondsSinceCreation();
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    if (painted) {
-        debugTrace(
-            L"[CineRTX:GUI] startup_ms=%.3f dpi=%u client=%dx%d headless=%d "
-            L"phases=main:%.2f,create:%.2f,update:%.2f "
-            L"paint=buffer:%.2f,draw:%.2f,blit:%.2f\n",
-            elapsedMs, g_theme.dpi, static_cast<int>(client.right - client.left),
-            static_cast<int>(client.bottom - client.top), g_headlessPaint ? 1 : 0,
-            g_mainEntryMs, g_windowCreatedMs, g_updateMs,
-            g_paintBufferMs, g_paintDrawMs, g_paintBlitMs);
-    } else {
-        debugTrace(
-            L"[CineRTX:GUI] startup_ms=NA painted=0 dpi=%u client=%dx%d visible=%d\n",
-            g_theme.dpi, static_cast<int>(client.right - client.left),
-            static_cast<int>(client.bottom - client.top),
-            IsWindowVisible(hwnd) ? 1 : 0);
+std::wstring utf8ToWide(const std::string& str) {
+    if (str.empty()) return {};
+    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), nullptr, 0);
+    std::wstring out(size, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), out.data(), size);
+    return out;
+}
+
+std::string wideToUtf8(const std::wstring& wstr) {
+    if (wstr.empty()) return {};
+    int size = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+void autoFillOutputPath(HWND hwnd) {
+    wchar_t inPath[MAX_PATH] = {};
+    GetDlgItemTextW(hwnd, IDC_EDT_INPUT, inPath, MAX_PATH);
+    if (inPath[0] == L'\0') return;
+
+    wchar_t outPath[MAX_PATH] = {};
+    GetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, outPath, MAX_PATH);
+    if (outPath[0] != L'\0') return;
+
+    int codecIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_CODEC));
+    const wchar_t* suffix = (codecIdx == 1) ? L"_remaster_hevc.mp4"
+                          : (codecIdx == 2) ? L"_remaster_h264.mp4"
+                                            : L"_remaster_av1.mp4";
+
+    std::filesystem::path in(inPath);
+    std::filesystem::path out = in.parent_path() / (in.stem().wstring() + suffix);
+    SetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, out.c_str());
+}
+
+void populateComboBoxes(HWND hwnd) {
+    const bool isZh = (rtx::currentLanguage() == rtx::Language::Zh);
+
+    // Codec
+    HWND hCodec = GetDlgItem(hwnd, IDC_CMB_CODEC);
+    int selCodec = ComboBox_GetCurSel(hCodec);
+    if (selCodec < 0) selCodec = 0;
+    ComboBox_ResetContent(hCodec);
+    ComboBox_AddString(hCodec, isZh ? L"AV1 10-bit (默认推荐)" : L"AV1 10-bit (Default)");
+    ComboBox_AddString(hCodec, L"HEVC Main10 (H.265)");
+    ComboBox_AddString(hCodec, L"H.264 High (8-bit SDR)");
+    ComboBox_SetCurSel(hCodec, selCodec);
+
+    // Preset
+    HWND hPreset = GetDlgItem(hwnd, IDC_CMB_PRESET);
+    int selPreset = ComboBox_GetCurSel(hPreset);
+    if (selPreset < 0) selPreset = 4; // P5
+    ComboBox_ResetContent(hPreset);
+    ComboBox_AddString(hPreset, L"P1 (Fastest / 最快)");
+    ComboBox_AddString(hPreset, L"P2 (Faster)");
+    ComboBox_AddString(hPreset, L"P3 (Fast)");
+    ComboBox_AddString(hPreset, L"P4 (Medium)");
+    ComboBox_AddString(hPreset, isZh ? L"P5 (平衡默认 / Balanced)" : L"P5 (Balanced / Default)");
+    ComboBox_AddString(hPreset, L"P6 (Better Quality)");
+    ComboBox_AddString(hPreset, isZh ? L"P7 (最高画质 / High Quality)" : L"P7 (Highest Quality)");
+    ComboBox_SetCurSel(hPreset, selPreset);
+
+    // Rate Control
+    HWND hRc = GetDlgItem(hwnd, IDC_CMB_RC);
+    int selRc = ComboBox_GetCurSel(hRc);
+    if (selRc < 0) selRc = 0;
+    ComboBox_ResetContent(hRc);
+    ComboBox_AddString(hRc, isZh ? L"CBR (恒定码率)" : L"CBR (Constant Bitrate)");
+    ComboBox_AddString(hRc, isZh ? L"VBR (动态码率)" : L"VBR (Variable Bitrate)");
+    ComboBox_AddString(hRc, isZh ? L"Constant QP (固定量化)" : L"Constant QP");
+    ComboBox_SetCurSel(hRc, selRc);
+
+    // Resolution
+    HWND hRes = GetDlgItem(hwnd, IDC_CMB_RES);
+    int selRes = ComboBox_GetCurSel(hRes);
+    if (selRes < 0) selRes = 0;
+    ComboBox_ResetContent(hRes);
+    ComboBox_AddString(hRes, isZh ? L"4K UHD (3840x2160 / 2160x3840 自适应)" : L"4K UHD (3840x2160 / 2160x3840 Auto)");
+    ComboBox_AddString(hRes, L"2K QHD (2560x1440)");
+    ComboBox_AddString(hRes, L"FHD (1920x1080)");
+    ComboBox_AddString(hRes, isZh ? L"保持原画分辨率 (Native)" : L"Native (Source Resolution)");
+    ComboBox_SetCurSel(hRes, selRes);
+
+    // Orientation / Geometry
+    HWND hGeom = GetDlgItem(hwnd, IDC_CMB_GEOM);
+    int selGeom = ComboBox_GetCurSel(hGeom);
+    if (selGeom < 0) selGeom = 0;
+    ComboBox_ResetContent(hGeom);
+    ComboBox_AddString(hGeom, isZh ? L"自动竖屏检测旋转 (9:16 / 16:9 智能适配)" : L"Auto Direct (9:16 Portrait / 16:9 Landscape)");
+    ComboBox_AddString(hGeom, isZh ? L"横屏填充黑边居中 (Pillarbox 3840x2160)" : L"Pillarbox (3840x2160 Center Pad)");
+    ComboBox_SetCurSel(hGeom, selGeom);
+
+    // VSR Quality
+    HWND hVsr = GetDlgItem(hwnd, IDC_CMB_VSR_QUAL);
+    int selVsr = ComboBox_GetCurSel(hVsr);
+    if (selVsr < 0) selVsr = 1; // Level 2
+    ComboBox_ResetContent(hVsr);
+    ComboBox_AddString(hVsr, L"Level 1 (Basic)");
+    ComboBox_AddString(hVsr, isZh ? L"Level 2 (推荐默认)" : L"Level 2 (Default)");
+    ComboBox_AddString(hVsr, L"Level 3 (High)");
+    ComboBox_AddString(hVsr, L"Level 4 (Ultra Quality)");
+    ComboBox_SetCurSel(hVsr, selVsr);
+}
+
+void updateUiLanguage(HWND hwnd) {
+    SetWindowTextW(hwnd, rtx::trW(rtx::StrId::AppTitle));
+    SetDlgItemTextW(hwnd, IDC_LBL_INPUT, rtx::trW(rtx::StrId::ParamInput));
+    SetDlgItemTextW(hwnd, IDC_BTN_BROWSE_IN, rtx::trW(rtx::StrId::BtnBrowse));
+    SetDlgItemTextW(hwnd, IDC_LBL_OUTPUT, rtx::trW(rtx::StrId::ParamOutput));
+    SetDlgItemTextW(hwnd, IDC_BTN_BROWSE_OUT, rtx::trW(rtx::StrId::BtnBrowse));
+    SetDlgItemTextW(hwnd, IDC_LBL_CODEC, rtx::trW(rtx::StrId::ParamCodec));
+    SetDlgItemTextW(hwnd, IDC_LBL_PRESET, rtx::trW(rtx::StrId::ParamPreset));
+    SetDlgItemTextW(hwnd, IDC_LBL_RC, rtx::trW(rtx::StrId::ParamRateControl));
+    SetDlgItemTextW(hwnd, IDC_LBL_BITRATE, rtx::trW(rtx::StrId::ParamBitrate));
+    SetDlgItemTextW(hwnd, IDC_LBL_QP, rtx::trW(rtx::StrId::ParamCq));
+    SetDlgItemTextW(hwnd, IDC_LBL_RES, rtx::trW(rtx::StrId::ParamResolution));
+    SetDlgItemTextW(hwnd, IDC_LBL_GEOM, rtx::trW(rtx::StrId::ParamAspect));
+    SetDlgItemTextW(hwnd, IDC_CHK_VSR, rtx::trW(rtx::StrId::ParamVsr));
+    SetDlgItemTextW(hwnd, IDC_LBL_VSR_QUAL, rtx::trW(rtx::StrId::ParamVsrQuality));
+    SetDlgItemTextW(hwnd, IDC_CHK_TRUEHDR, rtx::trW(rtx::StrId::ParamTrueHdr));
+    SetDlgItemTextW(hwnd, IDC_LBL_PEAK_NITS, rtx::trW(rtx::StrId::ParamPeakNits));
+    SetDlgItemTextW(hwnd, IDC_CHK_AUDIO, rtx::trW(rtx::StrId::ParamAudioCopy));
+    SetDlgItemTextW(hwnd, IDC_BTN_START, rtx::trW(rtx::StrId::ButtonStart));
+    SetDlgItemTextW(hwnd, IDC_BTN_STOP, rtx::trW(rtx::StrId::ButtonStop));
+    if (!g_isTranscoding) {
+        SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusReady));
     }
+    populateComboBoxes(hwnd);
 }
 
-void recordStartup(HWND hwnd) {
-    if (g_startupRecorded) {
+void syncControlStates(HWND hwnd) {
+    const int codecIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_CODEC));
+    const bool isH264 = (codecIdx == 2);
+    if (isH264) {
+        Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), BST_UNCHECKED);
+        EnableWindow(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), FALSE);
+        EnableWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), FALSE);
+    } else {
+        EnableWindow(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), !g_isTranscoding);
+        const bool hdrChecked = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR)) == BST_CHECKED);
+        EnableWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), hdrChecked && !g_isTranscoding);
+    }
+
+    const bool vsrChecked = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_VSR)) == BST_CHECKED);
+    EnableWindow(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL), vsrChecked && !g_isTranscoding);
+}
+
+void layoutControls(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    const int width = rc.right - rc.left;
+    const int pad = 16;
+    const int rowH = 26;
+    const int gapY = 8;
+    const int btnW = 80;
+    const int lblW = 125;
+
+    int y = pad;
+
+    // Row 1: Input Path
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_INPUT), pad, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_EDT_INPUT), pad + lblW, y, width - pad * 2 - lblW - btnW - 8, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_BTN_BROWSE_IN), width - pad - btnW, y, btnW, rowH, TRUE);
+    y += rowH + gapY;
+
+    // Row 2: Output Path
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_OUTPUT), pad, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_EDT_OUTPUT), pad + lblW, y, width - pad * 2 - lblW - btnW - 8, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_BTN_BROWSE_OUT), width - pad - btnW, y, btnW, rowH, TRUE);
+    y += rowH + gapY + 4;
+
+    // 2-Column Parameter Grid
+    const int colW = (width - pad * 3) / 2;
+    const int col2X = pad * 2 + colW;
+
+    // Grid Row 1: Codec (Left) vs Preset (Right)
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_CODEC), pad, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CMB_CODEC), pad + lblW, y, colW - lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_PRESET), col2X, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CMB_PRESET), col2X + lblW, y, colW - lblW, rowH, TRUE);
+    y += rowH + gapY;
+
+    // Grid Row 2: Rate Control (Left) vs QP (Right)
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_RC), pad, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CMB_RC), pad + lblW, y, colW - lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_QP), col2X, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_EDT_QP), col2X + lblW, y, colW - lblW, rowH, TRUE);
+    y += rowH + gapY;
+
+    // Grid Row 3: Bitrate (Left) vs Resolution (Right)
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_BITRATE), pad, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_EDT_BITRATE), pad + lblW, y, colW - lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_RES), col2X, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CMB_RES), col2X + lblW, y, colW - lblW, rowH, TRUE);
+    y += rowH + gapY;
+
+    // Grid Row 4: Orientation / Aspect (Left) vs Audio Copy (Right)
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_GEOM), pad, y + 4, lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CMB_GEOM), pad + lblW, y, colW - lblW, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CHK_AUDIO), col2X, y + 4, colW, rowH, TRUE);
+    y += rowH + gapY;
+
+    // Grid Row 5: VSR Check & Quality
+    MoveWindow(GetDlgItem(hwnd, IDC_CHK_VSR), pad, y + 4, lblW + 30, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL), pad + lblW + 35, y, colW - lblW - 35, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), col2X, y + 4, lblW + 30, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), col2X + lblW + 35, y, colW - lblW - 35, rowH, TRUE);
+    y += rowH + gapY + 12;
+
+    // Action Row: Start & Stop buttons
+    const int actionBtnW = 140;
+    const int actionBtnH = 34;
+    MoveWindow(GetDlgItem(hwnd, IDC_BTN_START), pad, y, actionBtnW, actionBtnH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_BTN_STOP), pad + actionBtnW + 12, y, actionBtnW, actionBtnH, TRUE);
+    y += actionBtnH + 12;
+
+    // Progress Bar
+    MoveWindow(GetDlgItem(hwnd, IDC_PROGRESS), pad, y, width - pad * 2, 20, TRUE);
+    y += 20 + 8;
+
+    // Status Label & Telemetry Label
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_STATUS), pad, y, width - pad * 2, 22, TRUE);
+    y += 24;
+    MoveWindow(GetDlgItem(hwnd, IDC_LBL_TELEMETRY), pad, y, width - pad * 2, 22, TRUE);
+}
+
+void onStartTranscode(HWND hwnd) {
+    if (g_isTranscoding) return;
+
+    wchar_t inPath[MAX_PATH] = {};
+    GetDlgItemTextW(hwnd, IDC_EDT_INPUT, inPath, MAX_PATH);
+    if (inPath[0] == L'\0' || !std::filesystem::exists(inPath)) {
+        MessageBoxW(hwnd, rtx::trW(rtx::StrId::StatusDropFileOnly), rtx::trW(rtx::StrId::AppTitle), MB_ICONWARNING);
         return;
     }
-    g_startupRecorded = true;
-    writeStartupLog(hwnd, true);
-}
 
-Zones computeLayout(int width, int height, int* headerBottom) {
-    const int margin = S(24);
-    const int statusHeight = S(24);
-    Zones zones;
-    int top = margin;
-    if (headerBottom != nullptr) {
-        *headerBottom = top + S(58);
-    }
-    top += S(58) + S(16);
-    zones.drop = RECT{margin, top, width - margin, top + S(88)};
-    top = zones.drop.bottom + S(16);
+    autoFillOutputPath(hwnd);
+    wchar_t outPath[MAX_PATH] = {};
+    GetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, outPath, MAX_PATH);
 
-    const int gap = S(12);
-    const int codecWidth = S(190);
-    const int presetWidth = S(150);
-    zones.codec = RECT{margin, top, margin + codecWidth, top + S(46)};
-    zones.preset = RECT{zones.codec.right + gap, top,
-                        zones.codec.right + gap + presetWidth, top + S(46)};
-    zones.start = RECT{zones.preset.right + gap, top, width - margin, top + S(46)};
+    rtx::HwTranscodeOptions opt;
+    opt.input_path = inPath;
+    opt.output_path = outPath;
 
-    zones.statusBar = RECT{0, height - statusHeight, width, height};
-    return zones;
-}
+    // Codec
+    int codecIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_CODEC));
+    opt.codec = (codecIdx == 1) ? rtx::VideoCodec::HEVC
+              : (codecIdx == 2) ? rtx::VideoCodec::H264
+                                : rtx::VideoCodec::AV1;
 
-// One status-bar cell: a muted caption above a high-contrast value.
-void drawStatusSlot(HDC dc, const RECT& cell, rtx::StrId caption, const std::wstring& value,
-                    COLORREF valueColor) {
-    RECT captionRect{cell.left + S(10), cell.top + S(3), cell.right - S(6), cell.top + S(12)};
-    RECT valueRect{cell.left + S(10), cell.top + S(11), cell.right - S(6), cell.bottom - S(2)};
-    text(dc, caption, captionRect, g_theme.small, kMuted,
-         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-    text(dc, value, valueRect, g_theme.small, valueColor,
-         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-}
+    // Preset
+    opt.preset = std::clamp(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_PRESET)) + 1, 1, 7);
 
-void drawStatusBar(HDC dc, const RECT& bar) {
-    fillRect(dc, bar, g_theme.statusBg);
-    const int width = bar.right - bar.left;
-    const int cellWidth = width / 4;
+    // Rate Control & Bitrate & QP
+    opt.rate_control = std::clamp(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_RC)), 0, 2);
+    wchar_t bitrateBuf[32] = {};
+    GetDlgItemTextW(hwnd, IDC_EDT_BITRATE, bitrateBuf, 32);
+    opt.bitrate_kbps = _wtoi(bitrateBuf);
 
-    std::wstring hardware;
-    std::wstring ngx;
-    std::wstring fruc;
-    {
-        std::lock_guard<std::mutex> lock(g_gpuMutex);
-        hardware = g_gpuText.empty() ? std::wstring(rtx::trW(rtx::StrId::StatusGpuProbing))
-                                     : g_gpuText;
-        ngx = g_ngxText;
-        fruc = g_frucText;
-    }
+    wchar_t qpBuf[32] = {};
+    GetDlgItemTextW(hwnd, IDC_EDT_QP, qpBuf, 32);
+    opt.qp = std::clamp(_wtoi(qpBuf), 0, 51);
 
-    const uint64_t d2h = g_telemetry.device_to_host_bytes.load(std::memory_order_relaxed);
-    const uint64_t vram_used = g_telemetry.vram_used_bytes.load(std::memory_order_relaxed);
-    const uint64_t vram_total = g_telemetry.vram_total_bytes.load(std::memory_order_relaxed);
-    const uint32_t fps = g_telemetry.ewma_fps_x10.load(std::memory_order_relaxed);
-    const uint8_t tier = g_telemetry.watermark_tier.load(std::memory_order_relaxed);
-
-    wchar_t telemetry[192] = {};
-    std::swprintf(telemetry, 192, L"D2H: %llu B · VRAM: %ls (%ls) · %ls",
-                  static_cast<unsigned long long>(d2h), formatVram(vram_used, vram_total).c_str(),
-                  utf8ToWide(rtx::watermarkTierName(static_cast<rtx::WatermarkTier>(tier))).c_str(), formatFps(fps).c_str());
-
-    RECT cell{bar.left, bar.top, bar.left + cellWidth, bar.bottom};
-    drawStatusSlot(dc, cell, rtx::StrId::StatusHardware, hardware, kText);
-    cell = RECT{cell.right, bar.top, cell.right + cellWidth, bar.bottom};
-    drawStatusSlot(dc, cell, rtx::StrId::StatusNgxPlugins,
-                   ngx.empty() ? std::wstring(L"-") : ngx,
-                   g_telemetry.ngx_ready.load(std::memory_order_relaxed) != 0 ? kText : kWarning);
-    cell = RECT{cell.right, bar.top, cell.right + cellWidth, bar.bottom};
-    drawStatusSlot(dc, cell, rtx::StrId::StatusFrucEngine, fruc.empty() ? std::wstring(L"-") : fruc,
-                   kText);
-    cell = RECT{cell.right, bar.top, bar.right, bar.bottom};
-    drawStatusSlot(dc, cell, rtx::StrId::StatusVramWatermark, telemetry,
-                   tier == 2 ? kDanger : (tier == 1 ? kWarning : kAccent));
-
-    // 1 px top border and vertical separators.
-    HPEN pen = CreatePen(PS_SOLID, 1, kBorder);
-    HGDIOBJ old = SelectObject(dc, pen);
-    MoveToEx(dc, bar.left, bar.top, nullptr);
-    LineTo(dc, bar.right, bar.top);
-    for (int index = 1; index < 4; ++index) {
-        const int x = bar.left + cellWidth * index;
-        MoveToEx(dc, x, bar.top + S(4), nullptr);
-        LineTo(dc, x, bar.bottom - S(4));
-    }
-    SelectObject(dc, old);
-    DeleteObject(pen);
-}
-
-void drawFrame(HDC dc, int width, int height) {
-    const RECT full{0, 0, width, height};
-    fillRect(dc, full, g_theme.bg);
-
-    int headerBottom = 0;
-    const Zones zones = computeLayout(width, height, &headerBottom);
-    g_zones = zones;
-    const int margin = S(24);
-
-    RECT accent{margin, margin + S(4), margin + S(4), margin + S(48)};
-    fillRect(dc, accent, g_theme.accent);
-    text(dc, rtx::StrId::AppTitle,
-         RECT{margin + S(16), margin - S(2), width - margin, margin + S(34)},
-         g_theme.title, kText, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    std::wstring gpu;
-    {
-        std::lock_guard<std::mutex> lock(g_gpuMutex);
-        gpu = g_gpuText.empty() ? std::wstring(rtx::trW(rtx::StrId::StatusGpuProbing)) : g_gpuText;
-    }
-    text(dc, gpu, RECT{margin + S(17), margin + S(32), width - margin, headerBottom},
-         g_theme.small, kMuted, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-    text(dc, rtx::StrId::AppSubtitle,
-         RECT{width - S(300), margin, width - margin, margin + S(24)}, g_theme.small,
-         kMuted, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
-
-    card(dc, zones.drop, S(10), g_theme.card);
-    text(dc, rtx::StrId::DropTitle,
-         RECT{zones.drop.left + S(16), zones.drop.top + S(9), zones.drop.right - S(16),
-              zones.drop.top + S(28)},
-         g_theme.small, kAccent, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-    if (g_inputPath.empty()) {
-        text(dc, rtx::StrId::DropHint,
-             RECT{zones.drop.left + S(16), zones.drop.top + S(30), zones.drop.right - S(16),
-                  zones.drop.top + S(60)},
-             g_theme.section, kText, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        text(dc, rtx::StrId::DropSupported,
-             RECT{zones.drop.left + S(16), zones.drop.top + S(59), zones.drop.right - S(16),
-                  zones.drop.top + S(82)},
-             g_theme.small, kMuted, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    // Resolution
+    int resIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_RES));
+    if (resIdx == 1) {
+        opt.target_width = 2560;
+        opt.target_height = 1440;
+    } else if (resIdx == 2) {
+        opt.target_width = 1920;
+        opt.target_height = 1080;
+    } else if (resIdx == 3) {
+        opt.target_width = 0;
+        opt.target_height = 0;
     } else {
-        text(dc, g_inputPath,
-             RECT{zones.drop.left + S(16), zones.drop.top + S(29), zones.drop.right - S(16),
-                  zones.drop.top + S(53)},
-             g_theme.body, kText, DT_PATH_ELLIPSIS | DT_SINGLELINE | DT_VCENTER);
-        text(dc, std::wstring(rtx::trW(rtx::StrId::DropOutputPrefix)) + L"  " +
-                    fileName(g_outputPath),
-             RECT{zones.drop.left + S(16), zones.drop.top + S(55), zones.drop.right - S(16),
-                  zones.drop.top + S(79)},
-             g_theme.small, kMuted, DT_END_ELLIPSIS | DT_SINGLELINE | DT_VCENTER);
+        opt.target_width = 3840;
+        opt.target_height = 2160;
     }
 
-    card(dc, zones.codec, S(9), g_theme.card2);
-    text(dc, std::wstring(rtx::trW(rtx::StrId::CodecLabelHevc)) + L" · 4K HDR10",
-         zones.codec, g_theme.body, kText, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-    card(dc, zones.preset, S(9), g_theme.card2);
-    wchar_t presetLabel[64] = {};
-    std::swprintf(presetLabel, 64, L"%ls  P%d", rtx::trW(rtx::StrId::PresetLabel),
-                  kPresets[g_presetIndex]);
-    text(dc, presetLabel, zones.preset, g_theme.body, kText,
-         DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    // VSR
+    opt.vsr_enabled = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_VSR)) == BST_CHECKED);
+    opt.vsr_quality = std::clamp(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL)) + 1, 1, 4);
 
-    const bool running = g_job.running.load(std::memory_order_relaxed) != 0;
-    fillRect(dc, zones.start, running ? g_theme.danger : g_theme.accent);
-    text(dc, running ? rtx::StrId::ButtonStop
-                     : (g_inputPath.empty() ? rtx::StrId::ButtonDropFirst
-                                            : rtx::StrId::ButtonStart),
-         zones.start, g_theme.section, RGB(255, 255, 255),
-         DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    // HDR
+    opt.hdr = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR)) == BST_CHECKED);
+    opt.copy_audio = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_AUDIO)) == BST_CHECKED);
 
-    const int top = zones.start.bottom + S(16);
-    const RECT progressCard{margin, top, width - margin, zones.statusBar.top - S(8)};
-    if (progressCard.bottom > progressCard.top + S(80)) {
-        card(dc, progressCard, S(10), g_theme.card);
-        text(dc, rtx::StrId::TelemetryTitle,
-             RECT{progressCard.left + S(16), progressCard.top + S(9),
-                  progressCard.right - S(16), progressCard.top + S(31)},
-             g_theme.section, kText, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-        text(dc, rtx::StrId::TelemetrySubtitle,
-             RECT{progressCard.left + S(200), progressCard.top + S(9),
-                  progressCard.right - S(16), progressCard.top + S(31)},
-             g_theme.small, kMuted, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    g_cancelRequested.store(false, std::memory_order_relaxed);
+    opt.cancel = &g_cancelRequested;
 
-        const RECT barBg{progressCard.left + S(16), progressCard.top + S(43),
-                         progressCard.right - S(16), progressCard.top + S(53)};
-        card(dc, barBg, S(5), g_theme.barBg);
-        const uint32_t permille = g_job.progressPermille.load(std::memory_order_relaxed);
-        const uint64_t total = g_job.totalFrames.load(std::memory_order_relaxed);
-        RECT fill = barBg;
-        if (permille > 0) {
-            fill.right = barBg.left +
-                         static_cast<int>((barBg.right - barBg.left) * permille / 1000);
-            if (fill.right - fill.left < S(6)) {
-                fill.right = fill.left + S(6);
-            }
-            card(dc, fill, S(5), g_theme.accent);
-        } else if (running && total == 0) {
-            const int span = barBg.right - barBg.left;
-            const int segment = span / 4;
-            const int offset = static_cast<int>((GetTickCount64() / 6) % (span + segment));
-            fill.left = barBg.left + offset - segment;
-            fill.right = fill.left + segment;
-            if (fill.left < barBg.left) {
-                fill.left = barBg.left;
-            }
-            if (fill.right > barBg.right) {
-                fill.right = barBg.right;
-            }
-            if (fill.right > fill.left) {
-                card(dc, fill, S(5), g_theme.accentDim);
-            }
+    g_isTranscoding = true;
+    EnableWindow(GetDlgItem(hwnd, IDC_BTN_START), FALSE);
+    EnableWindow(GetDlgItem(hwnd, IDC_BTN_STOP), TRUE);
+    SendMessageW(GetDlgItem(hwnd, IDC_PROGRESS), PBM_SETPOS, 0, 0);
+    SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusWorking));
+
+    guiLog(L"[CineRTX GUI] Starting transcode: %ls -> %ls (codec=%d)\n", inPath, outPath, static_cast<int>(opt.codec));
+
+    opt.progress = [hwnd](const rtx::HwTranscodeProgress& p) {
+        int pct = 0;
+        if (p.total_frames > 0) {
+            pct = static_cast<int>(static_cast<double>(p.frames_encoded) * 1000.0 / p.total_frames);
         }
-
-        wchar_t progressLabel[96] = {};
-        if (total > 0) {
-            std::swprintf(progressLabel, 96, L"%ls  %.1f%%",
-                          rtx::trW(rtx::StrId::ProgressLabel),
-                          static_cast<double>(permille) / 10.0);
-        } else {
-            std::swprintf(progressLabel, 96, L"%ls  %ls", rtx::trW(rtx::StrId::ProgressLabel),
-                          rtx::trW(running ? rtx::StrId::ProgressWorking
-                                           : rtx::StrId::ProgressIdle));
-        }
-        text(dc, progressLabel,
-             RECT{progressCard.left + S(16), progressCard.top + S(57),
-                  progressCard.right - S(16), progressCard.top + S(77)},
-             g_theme.small, kMuted, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-
-        const uint64_t encoded = g_telemetry.frames_encoded.load(std::memory_order_relaxed);
-        const uint64_t elapsed = g_job.elapsedMs.load(std::memory_order_relaxed);
-        const uint32_t fps = g_telemetry.ewma_fps_x10.load(std::memory_order_relaxed);
-        const uint32_t zeroCopy = g_job.zeroCopy.load(std::memory_order_relaxed);
-        const int column = (progressCard.right - progressCard.left - S(48)) / 4;
-        const int statTop = progressCard.top + S(84);
-        const rtx::StrId labels[4] = {rtx::StrId::StatThroughput, rtx::StrId::StatFrames,
-                                      rtx::StrId::StatElapsed, rtx::StrId::StatZeroCopy};
-        std::wstring values[4];
-        values[0] = running || fps > 0 ? formatFps(fps) : std::wstring(rtx::trW(rtx::StrId::ValueDash));
-        values[1] = formatCount(encoded, total);
-        values[2] = elapsed > 0 ? formatSeconds(elapsed)
-                                : std::wstring(rtx::trW(rtx::StrId::ValueDash));
-        if (zeroCopy == 1) {
-            values[3] = rtx::trW(rtx::StrId::ValueZeroCopyClean);
-        } else if (zeroCopy == 2) {
-            values[3] = rtx::trW(rtx::StrId::ValueHostCopies);
-        } else {
-            values[3] = running ? rtx::trW(rtx::StrId::ValueRunning)
-                                : rtx::trW(rtx::StrId::ValueDash);
-        }
-        for (int index = 0; index < 4; ++index) {
-            const int left = progressCard.left + S(16) + column * index;
-            text(dc, labels[index], RECT{left, statTop, left + column - S(8), statTop + S(18)},
-                 g_theme.small, kMuted, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
-            text(dc, values[index],
-                 RECT{left, statTop + S(18), left + column - S(8), statTop + S(42)},
-                 index == 3 ? g_theme.mono : g_theme.section,
-                 index == 3 && zeroCopy == 1 ? kAccent : kText,
-                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        }
-
-        text(dc, g_status,
-             RECT{progressCard.left + S(16), progressCard.top + S(133),
-                  progressCard.right - S(16), progressCard.bottom - S(10)},
-             g_theme.body, kMuted, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-    }
-
-    drawStatusBar(dc, zones.statusBar);
-}
-
-void paint(HWND hwnd, HDC target) {
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    const int width = client.right - client.left;
-    const int height = client.bottom - client.top;
-    const double started = millisecondsSinceCreation();
-    ensureBackBuffer(width, height);
-    if (g_theme.mem == nullptr) {
-        return;
-    }
-    const double buffered = millisecondsSinceCreation();
-    drawFrame(g_theme.mem, width, height);
-    const double drawn = millisecondsSinceCreation();
-    BitBlt(target, 0, 0, width, height, g_theme.mem, 0, 0, SRCCOPY);
-    const double blitted = millisecondsSinceCreation();
-    if (!g_startupRecorded) {
-        g_paintBufferMs = buffered - started;
-        g_paintDrawMs = drawn - buffered;
-        g_paintBlitMs = blitted - drawn;
-    }
-}
-
-struct JobSnapshot {
-    std::wstring input;
-    std::wstring output;
-    int preset = 5;
-};
-
-void writeResultLog(const WorkerResult& result, const JobSnapshot& job) {
-    debugTrace(
-        L"[CineRTX:Bench] ok=%d cancelled=%d frames=%llu elapsed_ms=%.3f zero_copy=%d "
-        L"d2h_bytes=%llu h2d_bytes=%llu input=%s output=%s title=%s detail=%s\n",
-        result.ok ? 1 : 0, result.cancelled ? 1 : 0,
-        static_cast<unsigned long long>(result.frames), result.elapsedMs, result.zeroCopy,
-        static_cast<unsigned long long>(result.d2h), static_cast<unsigned long long>(result.h2d),
-        job.input.c_str(), job.output.c_str(), result.title.c_str(), result.detail.c_str());
-}
-
-void runJob(JobSnapshot job) {
-    rtx::HwTranscodeOptions options;
-    options.input_path = wideToUtf8(job.input);
-    options.output_path = wideToUtf8(job.output);
-    // The GUI drives the same single product chain as the CLI: 4K HDR10 HEVC
-    // Main10 with VSR + TrueHDR always enabled.  There is no passthrough or
-    // codec choice to keep the two front ends functionally identical.
-    options.codec = rtx::VideoCodec::HEVC;
-    options.target_width = 0;
-    options.target_height = 0;
-    options.vsr_quality = 2;
-    options.bit_depth = 10;
-    options.preset = job.preset;
-    options.hdr = true;
-    options.cancel = &g_cancel;
-    options.progress = [](const rtx::HwTranscodeProgress& progress) {
-        g_telemetry.frames_decoded.store(progress.frames_decoded, std::memory_order_relaxed);
-        g_telemetry.frames_encoded.store(progress.frames_encoded, std::memory_order_relaxed);
-        g_job.totalFrames.store(progress.total_frames, std::memory_order_relaxed);
-        g_job.elapsedMs.store(static_cast<uint64_t>(progress.elapsed_ms),
-                              std::memory_order_relaxed);
-        if (progress.total_frames > 0) {
-            const uint64_t permille =
-                static_cast<uint64_t>(progress.frames_decoded) * 1000 /
-                static_cast<uint64_t>(progress.total_frames);
-            g_job.progressPermille.store(
-                static_cast<uint32_t>(permille > 1000 ? 1000 : permille),
-                std::memory_order_relaxed);
-        }
+        int fps10 = static_cast<int>((p.elapsed_ms > 0 ? (p.frames_encoded * 10000.0 / p.elapsed_ms) : 0.0));
+        PostMessageW(hwnd, WM_APP_PROGRESS, static_cast<WPARAM>(pct), static_cast<LPARAM>(fps10));
     };
 
-    const auto result = rtx::runNvidiaRemasterTranscode(options);
-    WorkerResult completed;
-    if (result.has_value()) {
-        const rtx::HwTranscodeReport& report = result.value();
-        completed.ok = true;
-        completed.zeroCopy = report.zero_copy_main_loop;
-        completed.d2h = report.decoder_device_to_host_bytes;
-        completed.h2d = report.encoder_host_to_device_bytes;
-        completed.frames = static_cast<uint64_t>(report.frames_encoded);
-        completed.elapsedMs = report.elapsed_ms;
-        wchar_t title[256] = {};
-        const double fps = report.elapsed_ms > 0
-                               ? static_cast<double>(report.frames_encoded) * 1000.0 /
-                                     report.elapsed_ms
-                               : 0.0;
-        std::swprintf(title, 256, L"%ls · %lld · %.1f FPS · %ls",
-                      rtx::trW(rtx::StrId::StatusDonePrefix),
-                      static_cast<long long>(report.frames_encoded), fps,
-                      report.zero_copy_main_loop ? rtx::trW(rtx::StrId::ValueZeroCopyClean)
-                                                 : rtx::trW(rtx::StrId::ValueHostCopies));
-        completed.title = title;
-        completed.detail = std::wstring(rtx::trW(rtx::StrId::DropOutputPrefix)) + L" " + job.output;
-        g_job.progressPermille.store(1000, std::memory_order_relaxed);
-        g_job.zeroCopy.store(report.zero_copy_main_loop ? 1 : 2, std::memory_order_relaxed);
-        g_telemetry.device_to_host_bytes.store(report.decoder_device_to_host_bytes,
-                                               std::memory_order_relaxed);
-        g_telemetry.ewma_fps_x10.store(static_cast<uint32_t>(fps * 10.0),
-                                       std::memory_order_relaxed);
-    } else if (!result.has_value() && result.error().code == rtx::ErrorCode::State && g_cancel.load()) {
-        completed.cancelled = true;
-        completed.title = rtx::trW(rtx::StrId::StatusCancelled);
-        completed.detail = job.input;
-    } else {
-        completed.title = rtx::trW(rtx::StrId::StatusFailed);
-        completed.detail = utf8ToWide(result.error().message);
-        if (!result.error().detail.empty()) {
-            completed.detail += L"：" + utf8ToWide(result.error().detail);
-        }
-        completed.detail += L"（" + job.output + L"）";
+    if (g_workerThread.joinable()) {
+        g_workerThread.join();
     }
 
-    {
-        std::lock_guard<std::mutex> lock(g_resultMutex);
-        g_result = completed;
-    }
-    writeResultLog(completed, job);
-    g_job.running.store(0, std::memory_order_relaxed);
-    if (HWND window = g_window.load()) {
-        PostMessageW(window, kMsgDone, 0, 0);
+    g_workerThread = std::thread([hwnd, opt]() {
+        auto result = rtx::runNvidiaRemasterTranscode(opt);
+        PostMessageW(hwnd, WM_APP_DONE, result.has_value() ? 1 : 0, 0);
+    });
+}
+
+void onStopTranscode(HWND hwnd) {
+    if (!g_isTranscoding) return;
+    g_cancelRequested.store(true, std::memory_order_release);
+    SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusStopping));
+    EnableWindow(GetDlgItem(hwnd, IDC_BTN_STOP), FALSE);
+}
+
+void onBrowseInput(HWND hwnd) {
+    wchar_t fileName[MAX_PATH] = {};
+    OPENFILENAMEW ofn{
+        .lStructSize = sizeof(OPENFILENAMEW),
+        .hwndOwner = hwnd,
+        .lpstrFilter = L"Video Files (*.mp4;*.mkv;*.mov;*.ts)\0*.mp4;*.mkv;*.mov;*.ts\0All Files (*.*)\0*.*\0",
+        .lpstrFile = fileName,
+        .nMaxFile = MAX_PATH,
+        .Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+    };
+    if (GetOpenFileNameW(&ofn)) {
+        SetDlgItemTextW(hwnd, IDC_EDT_INPUT, fileName);
+        SetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, L"");
+        autoFillOutputPath(hwnd);
     }
 }
 
-void startJob(HWND hwnd) {
-    if (g_job.running.load() != 0) {
-        return;
-    }
-    if (g_inputPath.empty()) {
-        setStatus(rtx::trW(rtx::StrId::DropHint));
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return;
-    }
-    g_outputPath = directOutputPath(g_inputPath);
-    if (g_outputPath == g_inputPath) {
-        setStatus(rtx::trW(rtx::StrId::StatusSamePath));
-        InvalidateRect(hwnd, nullptr, FALSE);
-        return;
-    }
-    startHardwareProbe();
-    g_cancel.store(false);
-    g_job.running.store(1, std::memory_order_relaxed);
-    g_job.progressPermille.store(0, std::memory_order_relaxed);
-    g_job.cancelRequested.store(0, std::memory_order_relaxed);
-    g_job.zeroCopy.store(0, std::memory_order_relaxed);
-    g_job.totalFrames.store(0, std::memory_order_relaxed);
-    g_job.elapsedMs.store(0, std::memory_order_relaxed);
-    g_telemetry.reset();
-    g_telemetry.frames_decoded.store(0, std::memory_order_relaxed);
-    g_telemetry.frames_encoded.store(0, std::memory_order_relaxed);
-    g_telemetry.ewma_fps_x10.store(0, std::memory_order_relaxed);
-    g_telemetry.device_to_host_bytes.store(0, std::memory_order_relaxed);
-    setStatus(rtx::trW(rtx::StrId::StatusWorking));
-
-    JobSnapshot job;
-    job.input = g_inputPath;
-    job.output = g_outputPath;
-    job.preset = kPresets[g_presetIndex];
-    try {
-        std::thread(runJob, std::move(job)).detach();
-    } catch (...) {
-        g_job.running.store(0, std::memory_order_relaxed);
-        setStatus(rtx::trW(rtx::StrId::StatusNoThread));
-    }
-    InvalidateRect(hwnd, nullptr, FALSE);
-}
-
-void cancelJob() {
-    if (g_job.running.load() == 0) {
-        return;
-    }
-    g_cancel.store(true);
-    g_job.cancelRequested.store(1, std::memory_order_relaxed);
-    setStatus(rtx::trW(rtx::StrId::StatusStopping));
-}
-
-void setInput(const std::wstring& path) {
-    g_inputPath = path;
-    g_outputPath = directOutputPath(path);
-    setStatus(rtx::trW(rtx::StrId::StatusReady));
-}
-
-void chooseFile(HWND hwnd) {
-    if (g_job.running.load() != 0) {
-        return;
-    }
-    wchar_t filePath[32768] = {};
-    OPENFILENAMEW ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFile = filePath;
-    ofn.nMaxFile = static_cast<DWORD>(sizeof(filePath) / sizeof(wchar_t));
-    ofn.lpstrFilter =
-        L"Video Files (*.mp4;*.mkv;*.mov;*.avi;*.ts;*.webm)\0*.mp4;*.mkv;*.mov;*.avi;*.ts;*.webm\0All Files (*.*)\0*.*\0";
-    ofn.nFilterIndex = 1;
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-
-    if (GetOpenFileNameW(&ofn) != 0) {
-        setInput(filePath);
-        startHardwareProbe();
-        InvalidateRect(hwnd, nullptr, FALSE);
+void onBrowseOutput(HWND hwnd) {
+    wchar_t fileName[MAX_PATH] = {};
+    OPENFILENAMEW ofn{
+        .lStructSize = sizeof(OPENFILENAMEW),
+        .hwndOwner = hwnd,
+        .lpstrFilter = L"MP4 Video (*.mp4)\0*.mp4\0Matroska (*.mkv)\0*.mkv\0All Files (*.*)\0*.*\0",
+        .lpstrFile = fileName,
+        .nMaxFile = MAX_PATH,
+        .Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST
+    };
+    if (GetSaveFileNameW(&ofn)) {
+        SetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, fileName);
     }
 }
 
-void updateFps() {
-    static ULONGLONG lastTick = 0;
-    static uint64_t lastFrames = 0;
-    if (g_job.running.load() == 0) {
-        lastTick = 0;
-        lastFrames = 0;
-        return;
-    }
-    const ULONGLONG now = GetTickCount64();
-    const uint64_t frames = g_telemetry.frames_encoded.load(std::memory_order_relaxed);
-    if (lastTick == 0) {
-        lastTick = now;
-        lastFrames = frames;
-        return;
-    }
-    const ULONGLONG elapsed = now - lastTick;
-    if (elapsed >= 400 && frames >= lastFrames) {
-        const uint32_t fpsTimes10 =
-            static_cast<uint32_t>((frames - lastFrames) * 10000 / elapsed);
-        g_telemetry.ewma_fps_x10.store(fpsTimes10, std::memory_order_relaxed);
-        lastTick = now;
-        lastFrames = frames;
-    }
-}
-
-void showCompletedResult() {
-    WorkerResult result;
-    {
-        std::lock_guard<std::mutex> lock(g_resultMutex);
-        result = g_result;
-    }
-    if (result.title.empty()) {
-        return;
-    }
-    if (result.cancelled) {
-        setStatus(result.title);
-    } else {
-        setStatus(result.title + L" · " + result.detail);
-    }
-    g_dirty = true;
-}
-
-void toggleLanguage(HWND hwnd) {
-    rtx::toggleLanguage();
-    // A language switch must not restart the job: only the paint path re-reads
-    // the tables, and the table index is an atomic byte.
-    g_dirty = true;
-    InvalidateRect(hwnd, nullptr, FALSE);
-}
-
-namespace ui {
-
-struct StartJobEvent { HWND hwnd = nullptr; };
-struct CancelJobEvent {};
-struct NextPresetEvent {};
-struct ToggleLanguageEvent { HWND hwnd = nullptr; };
-struct JobCompletedEvent {};
-
-using EventMsg = std::variant<
-    StartJobEvent,
-    CancelJobEvent,
-    NextPresetEvent,
-    ToggleLanguageEvent,
-    JobCompletedEvent
->;
-
-template <class... Ts>
-struct Overloaded : Ts... {
-    using Ts::operator()...;
-};
-template <class... Ts>
-Overloaded(Ts...) -> Overloaded<Ts...>;
-
-inline void dispatchEvent(const EventMsg& event) {
-    std::visit(Overloaded{
-        [](const StartJobEvent& ev) {
-            startJob(ev.hwnd);
-        },
-        [](const CancelJobEvent&) {
-            cancelJob();
-        },
-        [](const NextPresetEvent&) {
-            g_presetIndex = (g_presetIndex + 1) % 3;
-            g_dirty = true;
-        },
-        [](const ToggleLanguageEvent& ev) {
-            toggleLanguage(ev.hwnd);
-        },
-        [](const JobCompletedEvent&) {
-            showCompletedResult();
-        }
-    }, event);
-}
-
-}  // namespace ui
-
-LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    switch (message) {
+LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
         case WM_CREATE: {
-            g_window.store(hwnd);
-            createTheme(g_forcedDpi != 0 ? g_forcedDpi : GetDpiForWindow(hwnd));
-            enableDarkTitleBar(hwnd);
+            g_hbrBg = CreateSolidBrush(RGB(24, 24, 24));
+            g_hbrCtrl = CreateSolidBrush(RGB(36, 36, 36));
+
+            g_hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            g_hFontBold = CreateFontW(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+            BOOL dark = TRUE;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+
+            // Create Controls
+            auto createCtrl = [&](const wchar_t* cls, const wchar_t* txt, DWORD style, int id) -> HWND {
+                HWND h = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, hwnd, (HMENU)(intptr_t)id, GetModuleHandleW(nullptr), nullptr);
+                SendMessageW(h, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+                SetWindowTheme(h, L"DarkMode_Explorer", nullptr);
+                return h;
+            };
+
+            createCtrl(L"STATIC", L"Input:", 0, IDC_LBL_INPUT);
+            createCtrl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, IDC_EDT_INPUT);
+            createCtrl(L"BUTTON", L"Browse...", BS_PUSHBUTTON, IDC_BTN_BROWSE_IN);
+
+            createCtrl(L"STATIC", L"Output:", 0, IDC_LBL_OUTPUT);
+            createCtrl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, IDC_EDT_OUTPUT);
+            createCtrl(L"BUTTON", L"Browse...", BS_PUSHBUTTON, IDC_BTN_BROWSE_OUT);
+
+            createCtrl(L"STATIC", L"Codec:", 0, IDC_LBL_CODEC);
+            createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_CODEC);
+
+            createCtrl(L"STATIC", L"Preset:", 0, IDC_LBL_PRESET);
+            createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_PRESET);
+
+            createCtrl(L"STATIC", L"Rate Control:", 0, IDC_LBL_RC);
+            createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_RC);
+
+            createCtrl(L"STATIC", L"Bitrate:", 0, IDC_LBL_BITRATE);
+            createCtrl(L"EDIT", L"0", WS_BORDER | ES_NUMBER, IDC_EDT_BITRATE);
+
+            createCtrl(L"STATIC", L"QP:", 0, IDC_LBL_QP);
+            createCtrl(L"EDIT", L"24", WS_BORDER | ES_NUMBER, IDC_EDT_QP);
+
+            createCtrl(L"STATIC", L"Resolution:", 0, IDC_LBL_RES);
+            createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_RES);
+
+            createCtrl(L"STATIC", L"Aspect:", 0, IDC_LBL_GEOM);
+            createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_GEOM);
+
+            createCtrl(L"BUTTON", L"Enable RTX VSR", BS_AUTOCHECKBOX, IDC_CHK_VSR);
+            Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_VSR), BST_CHECKED);
+
+            createCtrl(L"STATIC", L"VSR Quality:", 0, IDC_LBL_VSR_QUAL);
+            createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_VSR_QUAL);
+
+            createCtrl(L"BUTTON", L"Enable TrueHDR", BS_AUTOCHECKBOX, IDC_CHK_TRUEHDR);
+            Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), BST_CHECKED);
+
+            createCtrl(L"STATIC", L"Peak Nits:", 0, IDC_LBL_PEAK_NITS);
+            createCtrl(L"EDIT", L"1000", WS_BORDER | ES_NUMBER, IDC_EDT_PEAK_NITS);
+
+            createCtrl(L"BUTTON", L"Audio Passthrough", BS_AUTOCHECKBOX, IDC_CHK_AUDIO);
+            Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_AUDIO), BST_CHECKED);
+
+            HWND hStart = createCtrl(L"BUTTON", L"Start Transcode", BS_DEFPUSHBUTTON, IDC_BTN_START);
+            SendMessageW(hStart, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+            HWND hStop = createCtrl(L"BUTTON", L"Stop", BS_PUSHBUTTON, IDC_BTN_STOP);
+            EnableWindow(hStop, FALSE);
+
+            HWND hProg = createCtrl(PROGRESS_CLASSW, L"", 0, IDC_PROGRESS);
+            SendMessageW(hProg, PBM_SETRANGE32, 0, 1000);
+
+            createCtrl(L"STATIC", L"Ready", 0, IDC_LBL_STATUS);
+            createCtrl(L"STATIC", L"FPS: - | Frames: 0 | Ctrl+L: 切换语言", 0, IDC_LBL_TELEMETRY);
+
             DragAcceptFiles(hwnd, TRUE);
-            g_status = rtx::trW(rtx::StrId::StatusReady);
-            SetTimer(hwnd, kTelemetryTimer, 16, nullptr);
-            // Probe as soon as the window exists: the status bar must report
-            // the real GPU/NGX state on launch, not only after the first job.
-            startHardwareProbe();
+            RegisterHotKey(hwnd, 1, MOD_CONTROL, 'L');
+            updateUiLanguage(hwnd);
+            syncControlStates(hwnd);
             return 0;
         }
-        case WM_DPICHANGED: {
-            createTheme(g_forcedDpi != 0 ? g_forcedDpi : HIWORD(wParam));
-            const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left,
-                         suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
-            g_dirty = true;
+
+        case WM_SIZE:
+            layoutControls(hwnd);
             return 0;
-        }
-        case WM_SIZE: {
-            ensureBackBuffer(LOWORD(lParam), HIWORD(lParam));
-            g_dirty = true;
-            return 0;
-        }
-        case WM_GETMINMAXINFO: {
-            auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
-            info->ptMinTrackSize.x = S(760);
-            info->ptMinTrackSize.y = S(520);
-            return 0;
-        }
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_PAINT: {
-            PAINTSTRUCT paintStruct{};
-            HDC dc = BeginPaint(hwnd, &paintStruct);
-            paint(hwnd, dc);
-            EndPaint(hwnd, &paintStruct);
-            recordStartup(hwnd);
-            return 0;
-        }
+
         case WM_DROPFILES: {
-            HDROP drop = reinterpret_cast<HDROP>(wParam);
-            const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-            if (count > 0 && g_job.running.load() == 0) {
-                wchar_t path[32768] = {};
-                if (DragQueryFileW(drop, 0, path, 32768) > 0) {
-                    const DWORD attributes = GetFileAttributesW(path);
-                    if (attributes != INVALID_FILE_ATTRIBUTES &&
-                        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-                        setInput(path);
-                        startHardwareProbe();
-                    } else {
-                        setStatus(rtx::trW(rtx::StrId::StatusDropFileOnly));
-                    }
-                }
-            } else if (count > 0) {
-                setStatus(rtx::trW(rtx::StrId::StatusBusy));
+            HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+            wchar_t path[MAX_PATH] = {};
+            if (DragQueryFileW(hDrop, 0, path, MAX_PATH) > 0) {
+                SetDlgItemTextW(hwnd, IDC_EDT_INPUT, path);
+                SetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, L"");
+                autoFillOutputPath(hwnd);
             }
-            DragFinish(drop);
-            InvalidateRect(hwnd, nullptr, FALSE);
+            DragFinish(hDrop);
             return 0;
         }
-        case WM_LBUTTONDOWN: {
-            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            if (g_zones.hit(g_zones.start, point)) {
-                if (g_job.running.load() != 0) {
-                    ui::dispatchEvent(ui::CancelJobEvent{});
-                } else if (g_inputPath.empty()) {
-                    chooseFile(hwnd);
-                } else {
-                    ui::dispatchEvent(ui::StartJobEvent{hwnd});
+
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            int code = HIWORD(wParam);
+
+            if (code == BN_CLICKED) {
+                if (id == IDC_BTN_START) {
+                    onStartTranscode(hwnd);
+                } else if (id == IDC_BTN_STOP) {
+                    onStopTranscode(hwnd);
+                } else if (id == IDC_BTN_BROWSE_IN) {
+                    onBrowseInput(hwnd);
+                } else if (id == IDC_BTN_BROWSE_OUT) {
+                    onBrowseOutput(hwnd);
+                } else if (id == IDC_CHK_VSR || id == IDC_CHK_TRUEHDR) {
+                    syncControlStates(hwnd);
                 }
-            } else if (g_job.running.load() == 0 && g_zones.hit(g_zones.preset, point)) {
-                ui::dispatchEvent(ui::NextPresetEvent{});
-            } else if (g_job.running.load() == 0 && g_zones.hit(g_zones.drop, point)) {
-                chooseFile(hwnd);
+            } else if (code == CBN_SELCHANGE) {
+                if (id == IDC_CMB_CODEC) {
+                    syncControlStates(hwnd);
+                }
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
-        case WM_MOUSEMOVE: {
+
+        case WM_HOTKEY:
+        case WM_APP_TOGGLE_LANG: {
+            rtx::Language next = (rtx::currentLanguage() == rtx::Language::Zh) ? rtx::Language::En : rtx::Language::Zh;
+            rtx::setLanguage(next);
+            updateUiLanguage(hwnd);
             return 0;
         }
+
         case WM_KEYDOWN: {
-            // Ctrl+L: atomic language flip, no restart, no re-layout.
-            if (wParam == 'L' && (GetKeyState(VK_CONTROL) & 0x8000) != 0) {
-                ui::dispatchEvent(ui::ToggleLanguageEvent{hwnd});
+            if ((wParam == 'L' || wParam == 'l') &&
+                ((GetKeyState(VK_CONTROL) < 0) || ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0))) {
+                rtx::Language next = (rtx::currentLanguage() == rtx::Language::Zh) ? rtx::Language::En : rtx::Language::Zh;
+                rtx::setLanguage(next);
+                updateUiLanguage(hwnd);
                 return 0;
             }
             break;
         }
-        case WM_SETCURSOR:
-            if (LOWORD(lParam) == HTCLIENT) {
-                POINT point{};
-                GetCursorPos(&point);
-                ScreenToClient(hwnd, &point);
-                if (g_zones.hit(g_zones.start, point) || g_zones.hit(g_zones.codec, point) ||
-                    g_zones.hit(g_zones.preset, point) || g_zones.hit(g_zones.drop, point)) {
-                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
-                    return TRUE;
-                }
-            }
-            break;
-        case WM_TIMER:
-            if (wParam == kTelemetryTimer) {
-                updateFps();
-                if (g_job.running.load() != 0) {
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                } else if (g_dirty) {
-                    g_dirty = false;
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
-                return 0;
-            }
-            if (wParam == kExitTimer) {
-                KillTimer(hwnd, kExitTimer);
-                if (!g_startupRecorded) {
-                    g_startupRecorded = true;
-                    writeStartupLog(hwnd, false);
-                }
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            break;
-        case kMsgDone:
-            ui::dispatchEvent(ui::JobCompletedEvent{});
-            InvalidateRect(hwnd, nullptr, FALSE);
+
+        case WM_APP_PROGRESS: {
+            int permille = static_cast<int>(wParam);
+            double fps = static_cast<double>(lParam) / 10.0;
+            SendMessageW(GetDlgItem(hwnd, IDC_PROGRESS), PBM_SETPOS, permille, 0);
+
+            wchar_t buf[128];
+            _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"Progress: %.1f%%  |  Speed: %.1f FPS", static_cast<double>(permille) / 10.0, fps);
+            SetDlgItemTextW(hwnd, IDC_LBL_TELEMETRY, buf);
             return 0;
-        case kMsgAutostart:
-            if (!g_autostartPath.empty()) {
-                setInput(g_autostartPath);
-                startJob(hwnd);
+        }
+
+        case WM_APP_DONE: {
+            bool ok = (wParam == 1);
+            g_isTranscoding = false;
+            EnableWindow(GetDlgItem(hwnd, IDC_BTN_START), TRUE);
+            EnableWindow(GetDlgItem(hwnd, IDC_BTN_STOP), FALSE);
+
+            if (g_workerThread.joinable()) {
+                g_workerThread.join();
+            }
+
+            if (ok) {
+                SendMessageW(GetDlgItem(hwnd, IDC_PROGRESS), PBM_SETPOS, 1000, 0);
+                SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusDonePrefix));
+                MessageBoxW(hwnd, L"Transcode successfully completed!", rtx::trW(rtx::StrId::AppTitle), MB_ICONINFORMATION);
+            } else {
+                SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusFailed));
+                MessageBoxW(hwnd, L"Transcode failed or was cancelled.", rtx::trW(rtx::StrId::AppTitle), MB_ICONERROR);
             }
             return 0;
-        case kMsgHardware:
-        case kMsgDiagnostics:
-            g_dirty = true;
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        case WM_CLOSE:
-            if (g_job.running.load() != 0) {
-                cancelJob();
-                return 0;
-            }
-            DestroyWindow(hwnd);
-            return 0;
+        }
+
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdc, RGB(225, 230, 235));
+            SetBkColor(hdc, RGB(24, 24, 24));
+            return reinterpret_cast<LRESULT>(g_hbrBg);
+        }
+
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLORBTN: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdc, RGB(240, 245, 250));
+            SetBkColor(hdc, RGB(36, 36, 36));
+            return reinterpret_cast<LRESULT>(g_hbrCtrl);
+        }
+
         case WM_DESTROY:
-            KillTimer(hwnd, kTelemetryTimer);
-            KillTimer(hwnd, kExitTimer);
-            g_window.store(nullptr);
-            g_cancel.store(true);
-            destroyTheme();
+            UnregisterHotKey(hwnd, 1);
+            if (g_workerThread.joinable()) {
+                g_cancelRequested.store(true, std::memory_order_release);
+                g_workerThread.join();
+            }
+            if (g_hbrBg) DeleteObject(g_hbrBg);
+            if (g_hbrCtrl) DeleteObject(g_hbrCtrl);
+            if (g_hFont) DeleteObject(g_hFont);
+            if (g_hFontBold) DeleteObject(g_hFontBold);
             PostQuitMessage(0);
             return 0;
-        default:
-            break;
     }
-    return DefWindowProcW(hwnd, message, wParam, lParam);
-}
-
-int attachParentConsole() {
-    const HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
-    const DWORD outputType =
-        (output != nullptr && output != INVALID_HANDLE_VALUE) ? GetFileType(output) : FILE_TYPE_UNKNOWN;
-    const HANDLE error = GetStdHandle(STD_ERROR_HANDLE);
-    const DWORD errorType =
-        (error != nullptr && error != INVALID_HANDLE_VALUE) ? GetFileType(error) : FILE_TYPE_UNKNOWN;
-    const bool outputRedirected = outputType == FILE_TYPE_PIPE || outputType == FILE_TYPE_DISK;
-    const bool errorRedirected = errorType == FILE_TYPE_PIPE || errorType == FILE_TYPE_DISK;
-    if (!outputRedirected || !errorRedirected) {
-        if (!AttachConsole(ATTACH_PARENT_PROCESS) && !AllocConsole()) {
-            return -1;
-        }
-        SetConsoleOutputCP(CP_UTF8);
-        SetConsoleCP(CP_UTF8);
-        FILE* consoleStream = nullptr;
-        if (!outputRedirected) {
-            freopen_s(&consoleStream, "CONOUT$", "w", stdout);
-        }
-        if (!errorRedirected) {
-            freopen_s(&consoleStream, "CONOUT$", "w", stderr);
-        }
-        freopen_s(&consoleStream, "CONIN$", "r", stdin);
-    }
-    return 0;
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 }  // namespace
 
-extern "C" int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR /*commandLine*/, int showCommand) {
     rtx::initRuntimeEnvironment();
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    g_mainEntryMs = millisecondsSinceCreation();
-    g_selfTest = false;
-    g_gpuText = rtx::trW(rtx::StrId::StatusGpuProbing);
 
-    bool hasCliArguments = false;
-    bool forceGui = false;
-    int argumentCount = 0;
-    std::vector<std::string> cliArguments;
-    if (LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount)) {
-        for (int index = 0; index < argumentCount; ++index) {
-            if (index > 0 && std::wcscmp(arguments[index], L"--gui") == 0) {
-                forceGui = true;
-                continue;
-            }
-            if (index > 0 && std::wcscmp(arguments[index], L"--viewport") == 0) {
-                continue;
-            }
-            if (index > 0) {
-                hasCliArguments = true;
-            }
-            const int length = WideCharToMultiByte(CP_UTF8, 0, arguments[index], -1,
-                                                   nullptr, 0, nullptr, nullptr);
-            std::string narrow(length > 0 ? static_cast<size_t>(length) : 0, '\0');
-            if (length > 1) {
-                WideCharToMultiByte(CP_UTF8, 0, arguments[index], -1, narrow.data(),
-                                    length, nullptr, nullptr);
-                narrow.resize(static_cast<size_t>(length - 1));
-            } else {
-                narrow.clear();
-            }
-            cliArguments.push_back(std::move(narrow));
+    INITCOMMONCONTROLSEX icce{
+        .dwSize = sizeof(INITCOMMONCONTROLSEX),
+        .dwICC = ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_UPDOWN_CLASS | ICC_BAR_CLASSES
+    };
+    InitCommonControlsEx(&icce);
+
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv != nullptr && argc > 1) {
+        std::vector<std::string> cliArgs;
+        cliArgs.reserve(static_cast<size_t>(argc));
+        for (int i = 0; i < argc; ++i) {
+            cliArgs.push_back(wideToUtf8(argv[i]));
         }
-        LocalFree(arguments);
+        LocalFree(argv);
+
+        std::vector<char*> cliPtrs;
+        cliPtrs.reserve(cliArgs.size() + 1);
+        for (auto& s : cliArgs) {
+            cliPtrs.push_back(s.data());
+        }
+        cliPtrs.push_back(nullptr);
+        return rtxCliMain(static_cast<int>(cliArgs.size()), cliPtrs.data());
     }
-    if (hasCliArguments && !forceGui) {
-        attachParentConsole();
-        std::vector<char*> cliPointers;
-        cliPointers.reserve(cliArguments.size() + 1);
-        for (std::string& argument : cliArguments) {
-            cliPointers.push_back(argument.data());
-        }
-        cliPointers.push_back(nullptr);
-        const int exitCode = rtxCliMain(static_cast<int>(cliArguments.size()), cliPointers.data());
-        std::fflush(stdout);
-        std::fflush(stderr);
-        FreeConsole();
-        return exitCode;
+    if (argv != nullptr) {
+        LocalFree(argv);
     }
 
-    WNDCLASSEXW windowClass{};
-    windowClass.cbSize = sizeof(windowClass);
-    windowClass.style = CS_HREDRAW | CS_VREDRAW;
-    windowClass.lpfnWndProc = windowProc;
-    windowClass.hInstance = instance;
-    windowClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = nullptr;
-    windowClass.lpszClassName = L"RtxTranscodeSingleExe";
-    windowClass.hIconSm = windowClass.hIcon;
-    if (RegisterClassExW(&windowClass) == 0) {
+    WNDCLASSEXW wc{
+        .cbSize = sizeof(WNDCLASSEXW),
+        .style = CS_HREDRAW | CS_VREDRAW,
+        .lpfnWndProc = windowProc,
+        .hInstance = instance,
+        .hIcon = LoadIconW(nullptr, IDI_APPLICATION),
+        .hCursor = LoadCursorW(nullptr, IDC_ARROW),
+        .hbrBackground = nullptr,
+        .lpszClassName = L"CineRtxNativeGui",
+        .hIconSm = LoadIconW(nullptr, IDI_APPLICATION)
+    };
+    if (RegisterClassExW(&wc) == 0) {
         return 1;
     }
 
-    const UINT dpi = g_forcedDpi != 0 ? g_forcedDpi : GetDpiForSystem();
-    RECT windowRect{0, 0, MulDiv(920, dpi, 96), MulDiv(620, dpi, 96)};
-    AdjustWindowRectExForDpi(&windowRect, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
-    HWND hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, windowClass.lpszClassName,
-                                rtx::trW(rtx::StrId::AppTitle),
-                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                                CW_USEDEFAULT, CW_USEDEFAULT,
-                                windowRect.right - windowRect.left,
-                                windowRect.bottom - windowRect.top, nullptr, nullptr,
-                                instance, nullptr);
+    const UINT dpi = GetDpiForSystem();
+    RECT wr{0, 0, MulDiv(880, dpi, 96), MulDiv(580, dpi, 96)};
+    AdjustWindowRectExForDpi(&wr, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+
+    HWND hwnd = CreateWindowExW(
+        WS_EX_ACCEPTFILES,
+        wc.lpszClassName,
+        rtx::trW(rtx::StrId::AppTitle),
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        wr.right - wr.left, wr.bottom - wr.top,
+        nullptr, nullptr, instance, nullptr
+    );
     if (hwnd == nullptr) {
         return 1;
     }
-    g_windowCreatedMs = millisecondsSinceCreation();
-    const int showState =
-        (showCommand == SW_SHOWDEFAULT || showCommand == SW_HIDE) ? SW_SHOWNORMAL : showCommand;
-    ShowWindow(hwnd, showState);
-    g_updateMs = millisecondsSinceCreation();
-    UpdateWindow(hwnd);
-    if (!g_startupRecorded) {
-        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
-    }
-    if (g_selfTest && !g_startupRecorded) {
-        if (HDC dc = GetDC(hwnd)) {
-            g_headlessPaint = true;
-            paint(hwnd, dc);
-            ReleaseDC(hwnd, dc);
-            recordStartup(hwnd);
-        }
-    }
-    if (g_selfTest) {
-        SetTimer(hwnd, kExitTimer, 3000, nullptr);
-    }
-    if (!g_autostartPath.empty()) {
-        PostMessageW(hwnd, kMsgAutostart, 0, 0);
-    }
 
-    MSG message{};
-    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+    ShowWindow(hwnd, showCommand == SW_HIDE ? SW_SHOWNORMAL : showCommand);
+    UpdateWindow(hwnd);
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.message == WM_KEYDOWN && (msg.wParam == 'L' || msg.wParam == 'l') &&
+            ((GetKeyState(VK_CONTROL) < 0) || ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0))) {
+            rtx::Language next = (rtx::currentLanguage() == rtx::Language::Zh) ? rtx::Language::En : rtx::Language::Zh;
+            rtx::setLanguage(next);
+            updateUiLanguage(hwnd);
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
-    return static_cast<int>(message.wParam);
+    return static_cast<int>(msg.wParam);
 }

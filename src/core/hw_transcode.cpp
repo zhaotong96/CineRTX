@@ -18,6 +18,7 @@
 #include <deque>
 #include <filesystem>
 #include <format>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -47,6 +48,8 @@ int32_t encoderCodec(VideoCodec codec) {
     switch (codec) {
         case VideoCodec::HEVC:
             return 0;
+        case VideoCodec::AV1:
+            return 1;
         case VideoCodec::H264:
             return 2;
         default:
@@ -385,7 +388,7 @@ private:
         report.input_height = info_.height;
         report.output_width = is_remaster ? target_width_ : info_.width;
         report.output_height = is_remaster ? target_height_ : info_.height;
-        report.output_codec = options.codec == VideoCodec::HEVC ? "hevc" : "h264";
+        report.output_codec = videoCodecName(options.codec);
         {
             const auto ext = options.output_path.extension().string();
             if (!ext.empty() && ext.front() == '.') {
@@ -419,6 +422,16 @@ private:
             return err(ErrorCode::DllMissing, "no NVIDIA CUDA device is available to rtx_shim", diagnostics_.summary);
         }
         report.device = diagnostics_.device.name;
+
+        if (options_.codec == VideoCodec::AV1 &&
+            (diagnostics_.device.compute_major < 8 ||
+             (diagnostics_.device.compute_major == 8 && diagnostics_.device.compute_minor < 9))) {
+            options_.codec = VideoCodec::HEVC;
+            report.output_codec = "hevc";
+            std::cerr << "[WARN] GPU (SM " << diagnostics_.device.compute_major << "."
+                      << diagnostics_.device.compute_minor
+                      << ") lacks hardware AV1 NVENC; automatically falling back to HEVC Main10.\n";
+        }
 
         const int source_depth = info_.bit_depth > 8 ? 10 : 8;
         int output_depth = 10;
@@ -577,10 +590,17 @@ public:
                        shim_.encoderLastError(encoder_.get()));
         }
         sequence_header.resize(header_size);
-        output_info_.extradata =
-            options_.codec == VideoCodec::HEVC
-                ? makeHevcConfigRecord(sequence_header.data(), sequence_header.size())
-                : makeAvcConfigRecord(sequence_header.data(), sequence_header.size());
+        output_info_.annex_b = (options_.codec != VideoCodec::AV1);
+        if (options_.codec == VideoCodec::AV1) {
+            output_info_.extradata =
+                makeAv1ConfigRecord(sequence_header.data(), sequence_header.size(), options_.hdr);
+        } else if (options_.codec == VideoCodec::HEVC) {
+            output_info_.extradata =
+                makeHevcConfigRecord(sequence_header.data(), sequence_header.size());
+        } else {
+            output_info_.extradata =
+                makeAvcConfigRecord(sequence_header.data(), sequence_header.size());
+        }
         if (output_info_.extradata.empty()) {
             return err(ErrorCode::Internal, "cannot build the ISO-BMFF codec configuration record");
         }
@@ -721,8 +741,8 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
     if (options.input_path.empty() || options.output_path.empty()) {
         return err(ErrorCode::InvalidArgument, "container transcode requires input and output paths");
     }
-    if (options.codec != VideoCodec::HEVC && options.codec != VideoCodec::H264) {
-        return err(ErrorCode::Unsupported, "stage-1 NVENC supports HEVC and H.264 output");
+    if (options.codec != VideoCodec::HEVC && options.codec != VideoCodec::AV1 && options.codec != VideoCodec::H264) {
+        return err(ErrorCode::Unsupported, "stage-1 NVENC supports AV1, HEVC and H.264 output");
     }
 
     const Clock::time_point started = Clock::now();
@@ -940,8 +960,12 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
     if (options.input_path.empty() || options.output_path.empty()) {
         return err(ErrorCode::InvalidArgument, "remaster transcode requires input and output paths");
     }
-    if (options.codec != VideoCodec::HEVC) {
-        return err(ErrorCode::Unsupported, "the VSR-remaster path outputs 10-bit HEVC Main10 only");
+    if (options.codec != VideoCodec::HEVC && options.codec != VideoCodec::AV1 && options.codec != VideoCodec::H264) {
+        return err(ErrorCode::Unsupported, "the VSR-remaster path supports AV1, HEVC and H.264 output");
+    }
+    if (options.hdr && options.codec == VideoCodec::H264) {
+        return err(ErrorCode::InvalidArgument,
+                   "TrueHDR requires 10-bit encoding (AV1 or HEVC); H.264 only supports 8-bit SDR");
     }
     if (options.vsr_quality < 1 || options.vsr_quality > 4) {
         return err(ErrorCode::InvalidArgument, "vsr_quality must be in 1..4");

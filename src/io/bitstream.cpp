@@ -758,6 +758,23 @@ std::vector<uint8_t> makeAvcConfigRecord(const uint8_t* annexb, size_t size) {
     return out;
 }
 
+std::vector<uint8_t> makeAv1ConfigRecord(const uint8_t* obu_data, size_t size, bool ten_bit) {
+    if (obu_data == nullptr || size == 0) {
+        return {};
+    }
+    if (size >= 4 && obu_data[0] == 0x81) {
+        return std::vector<uint8_t>(obu_data, obu_data + size);
+    }
+    std::vector<uint8_t> out;
+    out.reserve(4 + size);
+    out.push_back(0x81);
+    out.push_back(0x0C);
+    out.push_back(ten_bit ? 0x4C : 0x0C);
+    out.push_back(0x00);
+    out.insert(out.end(), obu_data, obu_data + size);
+    return out;
+}
+
 int hevcConfigBitDepth(const uint8_t* record, size_t size) {
     if (record == nullptr || size < 18 || record[0] != 1) {
         return 0;
