@@ -35,7 +35,6 @@
 
 #include "d3d12_interop.h"
 #include "p010_pack_runtime.h"
-#include "rife_builder.h"
 #if defined(RTX_HAVE_NGX_SDK)
 #include "ngx_d3d12_bridge.h"
 #endif
@@ -797,12 +796,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
               "ms ngx=" + std::to_string(ngx_ms) + "ms pack=" + std::to_string(pack_ms) + "ms");
     return RTX_OK;
 #endif
-}
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_build_rife_engine(
-    const RtxNgxRifeBuildParams* params,
-    RtxNgxRifeBuildResult* result) {
-    return rtx::ngx::buildRifeEngineInBridge(params, result);
 }
 
 }  // extern "C"

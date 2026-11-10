@@ -49,13 +49,6 @@ option(RTX_BUILD_GUI "Build CineRTX with the Win32 DirectComposition GUI front e
 option(RTX_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 set(RTX_VIDEO_SDK_ROOT "" CACHE PATH
     "NVIDIA RTX Video SDK v1.1.0 root containing include/ and lib/Windows/x64/nvsdk_ngx_s.lib")
-# Both SDKs are provisioned from a SHA-256 pinned archive under build/external by
-# cmake/RtxNvidiaSdks.cmake, so these two roots default to the extracted tree and
-# only need to be set to override it with a hand-installed SDK.
-set(RTX_OF_SDK_ROOT "" CACHE PATH
-    "NVIDIA Optical Flow SDK 5.0.7 root containing NvOFFRUC/Interface/NvOFFRUC.h")
-set(RTX_TENSORRT_ROOT "" CACHE PATH
-    "TensorRT 10.13.3.9 root containing include/NvInfer.h and lib/nvinfer_10.lib")
 
 # Shared staging root for provisioned externals (Ninja/Zig kits, the RTX Video
 # SDK archive) and for the evaluation NGX plugin.  Deliberately independent of
@@ -122,7 +115,7 @@ if(WIN32)
 endif()
 
 if(MSVC)
-    target_compile_options(rtx_project_options INTERFACE /std:c++latest /W4 /permissive- /EHsc /utf-8)
+    target_compile_options(rtx_project_options INTERFACE /std:c++latest /W4 /permissive- /EHsc /utf-8 /arch:AVX2)
     if(RTX_WARNINGS_AS_ERRORS)
         target_compile_options(rtx_project_options INTERFACE /WX)
     endif()
@@ -175,62 +168,6 @@ set_target_properties(rtx_core PROPERTIES
 if(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
     target_link_libraries(rtx_core PUBLIC Threads::Threads)
-endif()
-
-# NVIDIA Optical Flow SDK 5.0.7 and TensorRT 10.13.3.9: pinned archive, SHA-256
-# verification, extraction into build/external and the runtime deployment list.
-# Same offline-first contract as the RTX Video SDK block further down.  The
-# TensorRT root it resolves feeds the RIFE support target below.
-include(cmake/RtxNvidiaSdks.cmake)
-
-# RIFE/TensorRT configuration and tensor marshalling.  This target is
-# MIT/Apache-2.0 and never includes a TensorRT header in the always-compiled
-# path: rife_engine.cpp is compiled against the SDK only when RTX_HAVE_TENSORRT
-# is defined, otherwise it exposes the documented diagnostic surface.
-add_library(rtx_rife_support STATIC
-    src/shim/backends/trt_rife.cpp
-    src/shim/backends/tensorrt/rife_engine.cpp)
-add_library(rtx::rife_support ALIAS rtx_rife_support)
-target_link_libraries(rtx_rife_support PUBLIC rtx_core)
-# PUBLIC: the CLI includes rife_engine.h to drive --build-rife.
-target_include_directories(rtx_rife_support PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/backends/tensorrt")
-set_target_properties(rtx_rife_support PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 23
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF)
-
-# TensorRT is compiled against (headers only) and never linked: trt_dynamic.cpp
-# resolves createInferBuilder_INTERNAL, createNvOnnxParser_INTERNAL and
-# getInferLibVersion with GetProcAddress, so CineRTX.exe keeps the clean PE
-# import table required by docs/spec/gate3.md and a host without the runtime
-# degrades to the external trtexec path instead of failing to start.  The import
-# libraries are still discovered for diagnostics but are deliberately absent
-# from every link line.
-# TensorRT headers are strictly isolated to Zone C (rtx_ngx_bridge.dll) and never included by GPL code
-
-# CUDA pre/post-processing kernels for the RIFE pack stage.  Optional: the CPU
-# reference implementation in rife_pack_runtime.cpp stays authoritative when no
-# CUDA toolchain is present.
-include(CheckLanguage)
-check_language(CUDA)
-if(CMAKE_CUDA_COMPILER)
-    enable_language(CUDA)
-    add_library(rtx_rife_pack_cuda STATIC src/shim/backends/tensorrt/rife_pack.cu)
-    target_link_libraries(rtx_rife_pack_cuda PUBLIC rtx_project_options)
-    set_target_properties(rtx_rife_pack_cuda PROPERTIES
-        CUDA_STANDARD 17
-        CUDA_STANDARD_REQUIRED ON
-        POSITION_INDEPENDENT_CODE ON)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "120" CACHE STRING "CUDA architectures (sm_120 = Blackwell)")
-    endif()
-    target_link_libraries(rtx_rife_support PRIVATE rtx_rife_pack_cuda)
-    target_compile_definitions(rtx_rife_support PRIVATE RTX_HAVE_CUDA_PACK=1)
-    message(STATUS "CUDA pack kernels: enabled (architectures ${CMAKE_CUDA_ARCHITECTURES})")
-else()
-    message(STATUS "CUDA toolchain not found; RIFE pack uses the CPU reference path")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -301,11 +238,40 @@ target_compile_definitions(rtx_core PUBLIC
 # The SDK-free archive is built on every platform because the test suite
 # exercises the C ABI in-process.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# RGBA16F -> P010 pack kernel (ACT-01)
+#
+# Generated into ${CMAKE_BINARY_DIR}/generated/p010_pack_ptx.h from p010_pack.ptx
+# ---------------------------------------------------------------------------
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(RTX_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${RTX_GENERATED_DIR}")
+set(RTX_PTX_HEADER "${RTX_GENERATED_DIR}/p010_pack_ptx.h")
+
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_ptx.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
+            "${RTX_PTX_HEADER}"
+    RESULT_VARIABLE _rtx_embed_result)
+if(NOT _rtx_embed_result EQUAL 0)
+    message(FATAL_ERROR "p010_pack PTX embedding failed (${_rtx_embed_result})")
+endif()
+
+add_custom_command(
+    OUTPUT "${RTX_PTX_HEADER}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_ptx.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
+            "${RTX_PTX_HEADER}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_ptx.py"
+    COMMENT "Generating p010_pack_ptx.h in build tree"
+    VERBATIM)
+
 set(RTX_NGX_BRIDGE_SOURCES
     src/shim/ngx_bridge/bridge_exports.cpp
     src/shim/ngx_bridge/p010_pack_runtime.cpp
     src/shim/ngx_bridge/d3d12_interop.cpp
-    src/shim/ngx_bridge/rife_builder.cpp)
+    "${RTX_PTX_HEADER}")
 
 if(WIN32)
     add_library(rtx_ngx_bridge SHARED
@@ -316,7 +282,8 @@ if(WIN32)
     target_include_directories(rtx_ngx_bridge PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
-        "${RTX_NVCODEC_INCLUDE_DIR}")
+        "${RTX_NVCODEC_INCLUDE_DIR}"
+        "${RTX_GENERATED_DIR}")
     set_target_properties(rtx_ngx_bridge PROPERTIES
         OUTPUT_NAME rtx_ngx_bridge
         CXX_STANDARD 23
@@ -328,6 +295,10 @@ if(WIN32)
         # Setting MSVC_RUNTIME_LIBRARY to MultiThreaded aligns the CRT and prevents LNK2038.
         set_property(TARGET rtx_ngx_bridge PROPERTY
             MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_link_options(rtx_ngx_bridge PRIVATE "/INCREMENTAL:NO")
+        set_target_properties(rtx_ngx_bridge PROPERTIES
+            PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
+            COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
     endif()
     # Canonical staging outside the product tree; CineRTX.exe mirrors this
     # directory into <exe_dir>/plugins/nvidia_rtx at build time.
@@ -342,7 +313,8 @@ target_compile_definitions(rtx_ngx_bridge_static PUBLIC RTX_SHIM_STATIC=1)
 target_include_directories(rtx_ngx_bridge_static PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
-    "${RTX_NVCODEC_INCLUDE_DIR}")
+    "${RTX_NVCODEC_INCLUDE_DIR}"
+    "${RTX_GENERATED_DIR}")
 set_target_properties(rtx_ngx_bridge_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_STANDARD 23
@@ -356,32 +328,6 @@ else()
     target_link_libraries(rtx_core PUBLIC rtx_ngx_bridge_static)
     target_compile_definitions(rtx_core PUBLIC RTX_EMBEDDED_NGX_BRIDGE=1)
 endif()
-
-# ---------------------------------------------------------------------------
-# Optical-flow FRUC bridge (Zone B/C, MIT OR Apache-2.0) -- static, in-image
-#
-# Pure C ABI firewall: the GPL core never sees an NVIDIA structure, only
-# include/shim/fruc_bridge_abi.h.  NvOFFRUC.dll is resolved with LoadLibraryExW
-# at run time and nothing proprietary is linked, so the bridge inlines into the
-# single executable while the PE import table stays clean.
-# ---------------------------------------------------------------------------
-add_library(rtx_fruc_bridge_static STATIC
-    src/shim/backends/offruc/offruc_bridge.cpp)
-add_library(rtx::fruc_bridge ALIAS rtx_fruc_bridge_static)
-target_link_libraries(rtx_fruc_bridge_static PRIVATE rtx_project_options)
-if(CMAKE_DL_LIBS)
-    target_link_libraries(rtx_fruc_bridge_static PRIVATE ${CMAKE_DL_LIBS})
-endif()
-target_compile_definitions(rtx_fruc_bridge_static PUBLIC RTX_FRUC_BRIDGE_STATIC=1)
-target_include_directories(rtx_fruc_bridge_static PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/backends/offruc")
-set_target_properties(rtx_fruc_bridge_static PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 23
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF)
-target_link_libraries(rtx_core PUBLIC rtx_fruc_bridge_static)
 
 if(WIN32)
     set(RTX_NGX_ROOT_DIR "")
@@ -518,39 +464,6 @@ if(WIN32)
 endif()
 
 # ---------------------------------------------------------------------------
-# RGBA16F -> P010 pack kernel (ACT-01)
-#
-# The kernel is authored in CUDA (p010_pack.cu) and shipped as PTX text so the
-# runtime never links cudart64_*.dll.  The checked-in p010_pack_ptx.h is the
-# default; set RTX_REGENERATE_PTX=ON together with RTX_NVRTC_DLL and
-# RTX_CUDA_INCLUDE to rebuild it from the .cu source during configure.
-# ---------------------------------------------------------------------------
-option(RTX_REGENERATE_PTX "Regenerate p010_pack_ptx.h from p010_pack.cu" OFF)
-set(RTX_NVRTC_DLL "" CACHE FILEPATH "Path to nvrtc64_*.dll for PTX regeneration")
-set(RTX_CUDA_INCLUDE "" CACHE PATH "CUDA include directory for PTX regeneration")
-
-set(RTX_PTX_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack_ptx.h")
-if(RTX_REGENERATE_PTX)
-    if(NOT RTX_NVRTC_DLL OR NOT RTX_CUDA_INCLUDE)
-        message(FATAL_ERROR
-            "RTX_REGENERATE_PTX=ON requires RTX_NVRTC_DLL and RTX_CUDA_INCLUDE")
-    endif()
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    execute_process(
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_p010_ptx.py"
-                --nvrtc "${RTX_NVRTC_DLL}" --cuda-include "${RTX_CUDA_INCLUDE}"
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        RESULT_VARIABLE _rtx_ptx_result)
-    if(NOT _rtx_ptx_result EQUAL 0)
-        message(FATAL_ERROR "p010_pack PTX regeneration failed (${_rtx_ptx_result})")
-    endif()
-endif()
-if(NOT EXISTS "${RTX_PTX_HEADER}")
-    message(FATAL_ERROR
-        "missing ${RTX_PTX_HEADER}; run tools/gen_p010_ptx.py or enable RTX_REGENERATE_PTX")
-endif()
-
-# ---------------------------------------------------------------------------
 # CineRTX -- the single self-contained deliverable.
 #
 # One image, two personalities.  With no arguments it is the Win32
@@ -558,18 +471,16 @@ endif()
 # runs the full CLI, so CTest keeps its captured stdio because
 # attachParentConsole() detects a redirected pipe and skips AttachConsole().
 #
-# There is deliberately no rtx_copy_shim_runtime step here: rtx_shim and
-# rtx_fruc_bridge are static archives that rtx_core already links.  The
-# proprietary NGX bridge is a plugin DLL: canonical staging lives at
-# build/external/plugins/nvidia_rtx and is mirrored to
-# <exe_dir>/plugins/nvidia_rtx so CineRTX.exe finds it without environment
-# variables; it is never linked into the executable.  On non-Windows hosts the
-# SDK-free bridge is inlined instead.
+# There is deliberately no rtx_copy_shim_runtime step here: rtx_shim is a
+# static archive that rtx_core already links.  The proprietary NGX bridge is a
+# plugin DLL: canonical staging lives at build/external/plugins/nvidia_rtx and
+# is mirrored to <exe_dir>/plugins/nvidia_rtx so CineRTX.exe finds it without
+# environment variables; it is never linked into the executable.  On
+# non-Windows hosts the SDK-free bridge is inlined instead.
 # ---------------------------------------------------------------------------
 if(WIN32 AND RTX_BUILD_GUI)
     set(RTX_CINERTX_SOURCES
         src/gui/rtx_gui.cpp
-        src/gui/dcomp_viewport.cpp
         src/cli/main.cpp
         src/cli/shim_probe.cpp)
 else()
@@ -581,13 +492,13 @@ endif()
 
 add_executable(CineRTX ${RTX_CINERTX_SOURCES})
 add_executable(rtx::cinertx ALIAS CineRTX)
-target_link_libraries(CineRTX PRIVATE rtx_core rtx_rife_support)
+target_link_libraries(CineRTX PRIVATE rtx_core)
 if(WIN32)
     # CommandLineToArgvW: wWinMain rebuilds argv as UTF-8 so non-ASCII paths work.
     target_link_libraries(CineRTX PRIVATE shell32)
 endif()
 if(WIN32 AND RTX_BUILD_GUI)
-    target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 comdlg32 d3d12 dxgi dcomp)
+    target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 comdlg32 d3d12 dxgi)
 endif()
 if(CMAKE_DL_LIBS)
     target_link_libraries(CineRTX PRIVATE ${CMAKE_DL_LIBS})
@@ -598,11 +509,10 @@ target_include_directories(CineRTX PRIVATE
 target_compile_definitions(CineRTX PRIVATE
     RTX_VERSION_STRING="${PROJECT_VERSION}")
 if(WIN32 AND RTX_BUILD_GUI)
-    target_compile_definitions(CineRTX PRIVATE RTX_HAVE_DCOMP_VIEWPORT=1)
     if(MSVC)
         target_compile_options(CineRTX PRIVATE /O1 /Gy /Gs-)
         target_link_options(CineRTX PRIVATE
-            /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /OPT:REF /OPT:ICF)
+            /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /OPT:REF /OPT:ICF /INCREMENTAL:NO)
     else()
         target_compile_options(CineRTX PRIVATE
             -Os -ffunction-sections -fdata-sections)
@@ -617,7 +527,9 @@ set_target_properties(CineRTX PROPERTIES
     OUTPUT_NAME "CineRTX"
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF)
+    CXX_EXTENSIONS OFF
+    PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
+    COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
 
 if(WIN32)
     # The bridge must stay a separately loaded Independent Module, but the
@@ -681,20 +593,6 @@ if(WIN32)
     # a generator expression would add a dependency edge back to CineRTX and
     # form a cycle with the dependency below.
     # -----------------------------------------------------------------------
-    if(RTX_NVIDIA_RUNTIME_DLLS)
-        add_custom_target(rtx_stage_nvidia_runtimes ALL
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${_rtx_ngx_runtime_dir}"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${RTX_NVIDIA_RUNTIME_DLLS}
-                "${_rtx_ngx_runtime_dir}/"
-            COMMAND ${CMAKE_COMMAND}
-                "-DSTAGE_DIR=${_rtx_ngx_runtime_dir}"
-                "-DREQUIRED_FILES=${RTX_NVIDIA_REQUIRED_RUNTIME_FILES}"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyStagedFiles.cmake"
-            COMMENT "Staging the NVIDIA Optical Flow and TensorRT runtimes beside CineRTX.exe"
-            VERBATIM)
-        add_dependencies(CineRTX rtx_stage_nvidia_runtimes)
-    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -711,10 +609,8 @@ if(RTX_BUILD_TESTS)
         tests/test_io.cpp
         tests/unit/test_audio_stream_copy.cpp
         tests/test_main.cpp
-        tests/test_offruc_bridge.cpp
         tests/test_pingpong_pipeline.cpp
         tests/test_rational.cpp
-        tests/test_rife.cpp
         tests/test_shim.cpp
         tests/test_status.cpp
         tests/test_types.cpp
@@ -722,14 +618,7 @@ if(RTX_BUILD_TESTS)
 
     add_executable(rtx_tests ${RTX_TEST_SOURCES}
         src/cli/shim_probe.cpp)
-    # DynamicLibrary, the shim ABI objects and the FRUC bridge all arrive
-    # transitively through rtx_core (which links both static archives), so they
-    # must not be compiled again here: duplicate COFF symbols would break the
-    # link.  The tests call the bridge entry points directly instead of
-    # LoadLibrary-ing a DLL.  On Windows the real NGX bridge is a separately
-    # loaded plugin, so the SDK-free stub archive is linked explicitly to keep
-    # the ABI tests in-process; on other platforms rtx_core already carries it.
-    target_link_libraries(rtx_tests PRIVATE rtx_core rtx_rife_support rtx_project_options)
+    target_link_libraries(rtx_tests PRIVATE rtx_core rtx_project_options)
     if(WIN32)
         target_link_libraries(rtx_tests PRIVATE rtx_ngx_bridge_static)
     endif()
@@ -745,22 +634,21 @@ if(RTX_BUILD_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/loader"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/shim")
+    if(MSVC)
+        target_link_options(rtx_tests PRIVATE "/INCREMENTAL:NO")
+    endif()
     set_target_properties(rtx_tests PROPERTIES
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
-        CXX_EXTENSIONS OFF)
+        CXX_EXTENSIONS OFF
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
+        COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
 
     # Per-test timeouts: a hung spin loop or blocked dynamic load must fail with
     # the test name in the log instead of consuming the whole CI job (CTest's
     # default is 1500 s per test).
     add_test(NAME rtx_unit_tests COMMAND rtx_tests)
     set_tests_properties(rtx_unit_tests PROPERTIES TIMEOUT 300)
-
-
-
-    # Gate 5 (W7): pure C ABI isolation and hard-cut duplicate bypass contract.
-    add_test(NAME rtx_fruc_abi_contract_test COMMAND rtx_tests --filter=fruc_abi_*)
-    set_tests_properties(rtx_fruc_abi_contract_test PROPERTIES TIMEOUT 120)
 
     # Gate 6 (W9): DirectComposition viewport throttle / occlusion / self-heal.
     add_test(NAME cli_gui_viewport_smoke_test COMMAND CineRTX --viewport-self-test)

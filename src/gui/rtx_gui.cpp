@@ -20,9 +20,6 @@
 #define WINVER 0x0A00
 #endif
 
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-#include "dcomp_viewport.h"
-#endif
 #include "rtx/hw_transcode.h"
 #include "rtx/i18n.h"
 #include "rtx/runtime_env.h"
@@ -182,11 +179,6 @@ std::wstring g_autostartPath;
 std::wstring g_status;
 int g_presetIndex = 1;  // P5, P6, P7
 constexpr int kPresets[] = {5, 6, 7};
-
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-rtx::gui::DcompViewport g_viewport;
-bool g_viewportRequested = false;
-#endif
 
 constexpr COLORREF kBg = RGB(18, 18, 18);
 constexpr COLORREF kCard = RGB(30, 30, 30);
@@ -1183,18 +1175,6 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             // Probe as soon as the window exists: the status bar must report
             // the real GPU/NGX state on launch, not only after the first job.
             startHardwareProbe();
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-            if (g_viewportRequested) {
-                RECT client{};
-                GetClientRect(hwnd, &client);
-                std::string error;
-                if (!g_viewport.create(hwnd, static_cast<uint32_t>(client.right - client.left),
-                                       static_cast<uint32_t>(client.bottom - client.top),
-                                       &error)) {
-                    g_status = utf8ToWide(error);
-                }
-            }
-#endif
             return 0;
         }
         case WM_DPICHANGED: {
@@ -1210,12 +1190,6 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         case WM_SIZE: {
             ensureBackBuffer(LOWORD(lParam), HIWORD(lParam));
             g_dirty = true;
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-            if (g_viewport.valid()) {
-                std::string error;
-                (void)g_viewport.resize(LOWORD(lParam), HIWORD(lParam), &error);
-            }
-#endif
             return 0;
         }
         case WM_GETMINMAXINFO: {
@@ -1275,12 +1249,6 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_MOUSEMOVE: {
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-            if (g_viewport.valid()) {
-                (void)g_viewport.setCursor(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
-                                           g_viewport.clientRect().right);
-            }
-#endif
             return 0;
         }
         case WM_KEYDOWN: {
@@ -1312,14 +1280,6 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                     g_dirty = false;
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-                if (g_viewport.valid()) {
-                    // The throttle decides; the window does not second-guess it.
-                    const bool occluded = IsIconic(hwnd) == FALSE && IsWindowVisible(hwnd) == FALSE;
-                    (void)g_viewport.present(static_cast<double>(GetTickCount64()) / 1000.0,
-                                             occluded, IsIconic(hwnd) != FALSE);
-                }
-#endif
                 return 0;
             }
             if (wParam == kExitTimer) {
@@ -1359,9 +1319,6 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             KillTimer(hwnd, kExitTimer);
             g_window.store(nullptr);
             g_cancel.store(true);
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-            g_viewport.destroy();
-#endif
             destroyTheme();
             PostQuitMessage(0);
             return 0;
@@ -1405,9 +1362,6 @@ extern "C" int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCom
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_mainEntryMs = millisecondsSinceCreation();
     g_selfTest = false;
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-    g_viewportRequested = false;
-#endif
     g_gpuText = rtx::trW(rtx::StrId::StatusGpuProbing);
 
     bool hasCliArguments = false;
@@ -1421,9 +1375,6 @@ extern "C" int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCom
                 continue;
             }
             if (index > 0 && std::wcscmp(arguments[index], L"--viewport") == 0) {
-#if defined(RTX_HAVE_DCOMP_VIEWPORT)
-                g_viewportRequested = true;
-#endif
                 continue;
             }
             if (index > 0) {

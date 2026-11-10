@@ -1,0 +1,23 @@
+我已完成针对委托书 [`docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家调研委托书.md`](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家调研委托书.md) 及全仓源码、构建脚本与 55 篇文档的深度取证，并在右侧 Canvas 中为您生成了正式报告《CineRTX 阶段六：架构全面瘦身与专业级产品化专家裁决与技术方案》。
+
+针对您在原始需求中提出的核查问题与核心架构痛点，核心取证结论如下：
+
+* **关于组件库概念与 UI 停滞根因（需求 1–3）**：现有文档 [`docs/gui/RTX转码引擎GUI演进方案评估.md`](../gui/RTX转码引擎GUI演进方案评估.md) 与 [`docs/phase5/CineRTX 阶段五预研专家调研.md`](../phase5/CineRTX 阶段五预研专家调研.md)（决议 503）不仅没有引入组件库，反而因为担心 Win32 原生控件在暗色模式下出现浅灰边框，**明令禁止创建任何原生子控件 HWND，强制要求全 GDI 手绘**。这直接导致 [`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp) 耗费 1,073 行代码去手绘标题栏和圆角矩形，却连一个输入框或下拉框都没有，且在 `runJob()` 中将编码器、4K 分辨率、VSR 等级全部写死。阶段六方案正式废除该教条，直接采用 Windows 原生标准控件（`WC_COMBOBOXW`、`WC_EDITW`、`WC_BUTTONW` `BS_AUTOCHECKBOX`、`TRACKBAR_CLASS`）配合 `SetWindowTheme(hCtrl, L"DarkMode_Explorer", nullptr)` 与 `WM_CTLCOLOR*` 深色画刷拦截，在不引入任何第三方 GUI 库的前提下，用 `< 180` 行声明式网格代码完整暴露 13 项可调参数，并直接拔除默认未启用的 [`src/gui/dcomp_viewport.cpp`](../../src/gui/dcomp_viewport.cpp)（-427 行）。
+* **关于默认切换至 AV1 编码的 5 处源码拦截点（需求 4）**：除 [`include/rtx/hw_transcode.h`](../../include/rtx/hw_transcode.h) 默认值写死 `VideoCodec::HEVC` 外，[`src/core/hw_transcode.cpp`](../../src/core/hw_transcode.cpp) 内部存在 4 处硬编码阻断（第 34 行 `encoderCodec()` 对 AV1 返回 `-1`、第 652 行 `options.codec != VideoCodec::HEVC` 直接报错退出、第 289 行 `output_codec` 二元三目判断、第 433 行 `openMuxer()` 缺少 `av1C` ConfigRecord 与 OBU 封装分支）。方案已给出全部 5 处解锁代码，并加入启动期 NVENC 硬件能力自检（RTX 40/50 系默认运行 AV1 10-bit，无 AV1 编码单元的 RTX 30 系自动无感回退至 HEVC Main10）。
+* **关于 `build\external\plugins\nvidia_rtx` 临时文件污染（需求 5）**：根因在于 [`CMakeLists.txt`](../../CMakeLists.txt) 第 64 行默认采用 `RelWithDebInfo`，且第 259–261 行将 `rtx_ngx_bridge` 的 `RUNTIME_OUTPUT_DIRECTORY` 直接指向了插件目录，导致 MSVC 链接器默认开启 `/INCREMENTAL` 并在该目录下倾倒 `rtx_ngx_bridge.ilk`（~5.96 MB）和 `rtx_ngx_bridge.pdb`（~15.6 MB）。通过在 [`CMakeLists.txt`](../../CMakeLists.txt) 中注入 `/INCREMENTAL:NO` 并将 `PDB_OUTPUT_DIRECTORY` 重定向至 `${CMAKE_BINARY_DIR}/symbols` 即可彻底根治。
+* **关于全仓 55 篇文档一致性审计（需求 6–8）**：经核查 [`docs/README.md`](../README.md) 索引的全部 55 篇文档，目前**并未全部更新至最新，且存在 6 处严重的前后矛盾**：
+1. **生命周期规范冲突**：[`docs/phase4/CineRTX_全仓反Slop与极简架构重塑工程施工方案.md`](../phase4/CineRTX_全仓反Slop与极简架构重塑工程施工方案.md)（§2.2）强制要求两段式 `initialize()`/`shutdown()`，直接酿成了需求 10 指出的全仓反 RAII 乱象。
+2. **UI 路线冲突**：[`docs/TODO/ui_refactor_and_plugin_status.md`](../TODO/ui_refactor_and_plugin_status.md) 与阶段五决议 503 严禁原生 HWND 子控件，与阶段六原生组件化冲突。
+3. **阶段五定义分裂**：[`docs/TODO/phase5_roadmap_and_spec.md`](../TODO/phase5_roadmap_and_spec.md) 将阶段五定义为“双平面微内核 DAG + Blackwell FP8”，而实际交付的 [`docs/phase5/CineRTX_Phase5_全媒体可用性与工程化落地实施总结报告.md`](../phase5/CineRTX_Phase5_全媒体可用性与工程化落地实施总结报告.md) 是“音频流复制 + 9:16 竖屏智能几何 + SDR 原生保持”。
+4. **产品契约与语言混杂**：根目录 [`README.md`](../../README.md) 中英混排且仍宣称“无特性开关、仅支持 HEVC Main10、89/89 测试”，与 [`src/cli/main.cpp`](../../src/cli/main.cpp) 及阶段五/六现状脱节。
+5. **架构文档幽灵模块**：[`docs/spec/architecture.md`](../spec/architecture.md) 仍残留已在阶段四物理删除的 `CpuReferenceBackend`、`PipelineScheduler`、`TraceRecorder` 描述。
+6. **打包脚本冲突**：`tools/package.ps1`（排除 `nv*.dll`，体积 38.6 MB）与 `tools/package_release.py`（捆绑未接线的 TensorRT 巨型 DLL 导致膨胀至 1.3 GB）策略相悖。
+
+
+* **关于 C++26 指定初始化器、100% RAII、去 Slop 与砍削 3.4 万行代码（需求 9–13）**：
+* **5 万行代码的膨胀真相**：全仓 49,042 行代码中，单是提交进源码树的自动生成 PTX 头文件 [`src/shim/ngx_bridge/p010_pack_ptx.h`](../../src/shim/ngx_bridge/p010_pack_ptx.h)（925 KB）与着色器头文件就占了 **~24,500 行（50%）**；未接线的 RIFE/FRUC 插帧死代码（[`include/rtx/rife.h`](../../include/rtx/rife.h)、手写 `Sha256`、`trt_rife.cpp`）占了 **~4,100 行**；单实现虚接口（[`include/rtx/io.h`](../../include/rtx/io.h) 中的 `IDemuxer`/`IMuxer`）、在已静态链接 `rtx_shim_static` 下仍套娃动态加载 16 个函数指针的 [`include/rtx/nvidia_shim.h`](../../include/rtx/nvidia_shim.h)、0 引用的 `PingPongRing`（[`src/shim/ngx_bridge/d3d12_interop.h`](../../src/shim/ngx_bridge/d3d12_interop.h)）与 `FrameBuffer` CPU 内存池（[`src/core/types.cpp`](../../src/core/types.cpp)）及对应冗余测试占了 **~6,000 行**。
+* **全套重构对策**：报告第 6–10 章已给出拔除 [`src/core/types.cpp`](../../src/core/types.cpp)（收拢为 70 行 `constexpr` 聚合头文件 [`include/rtx/types.h`](../../include/rtx/types.h)）、将 9 个两段式类改造为 `static std::expected<T, Status> create(...)` 100% RAII 工厂（唯一受控特例为 `rtx_ngx_bridge.dll` 的 `extern "C"` C ABI 导出边界，内部首行即桥接至 `std::unique_ptr<BridgeImpl>`）、用 `std::expected` 替换 [`include/rtx/mpmc_ring.h`](../../include/rtx/mpmc_ring.h) 中的 `SmallExpected`，以及在 [`CMakeLists.txt`](../../CMakeLists.txt) 补齐 `/arch:AVX2` 确保 MSVC 2026 (`cl 19.51`) 100% 产出 `ymm` 256-bit 指令的完整方案。
+
+
+
+您可以审阅右侧 Canvas 中的完整技术方案；如果需要我将该报告直接同步上传至 Google Drive 的 [`docs/phase6`](docs/phase6) 目录，或立即按报告中的四步施工蓝图生成各核心源码文件的完整替换补丁，请随时告知。

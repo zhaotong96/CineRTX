@@ -147,3 +147,16 @@
 | **53** | [`phase5/CineRTX_Phase5_全媒体可用性与工程化落地施工方案.md`](phase5/CineRTX_Phase5_全媒体可用性与工程化落地施工方案.md) | 阶段五全媒体工业可用性施工方案（PLAN-PHASE5-MEDIA-USABILITY-20261108，音频透传、9:16竖屏自适应、SDR直通与发布闭环） | `phase5-plan`, `audio-mux`, `smart-geometry`, `sdr-passthrough`, `packaging` |
 | **54** | [`phase5/CineRTX_Phase5_全媒体可用性与工程化落地实施总结报告.md`](phase5/CineRTX_Phase5_全媒体可用性与工程化落地实施总结报告.md) | 阶段五工程实施终期总结报告（Wave 1~4 全波次交付验收、音画合流全保真、竖屏4K直出、93项单测全绿及绿色发布包闭环） | `phase5-report`, `acceptance`, `audio-verified`, `portrait-4k`, `release-closure` |
 
+---
+
+## 十、 阶段六 架构全面瘦身与专业级产品化 (`docs/phase6/`)
+
+本目录收录阶段六（架构全面瘦身、现代 C++26 纯化、Win32 原生交互控件、AV1 默认及 5 万行代码大刀阔斧精简）的专家委托与核心设计档案。
+
+| 序号 | 规范与调研文档 | 核心内容 | 索引关键字 |
+| :---: | :--- | :--- | :--- |
+| **55** | [`phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家调研委托书.md`](phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家调研委托书.md) | 阶段六架构全面瘦身、现代 C++26 纯化与专业级产品化领域专家深度调研委托书（十三大关键议题：原生UI组件、调参矩阵、AV1默认、绝对RAII、types.cpp重构、MSVC向量化实证、拔除冗余削减5万行代码） | `phase6-commission`, `native-ui`, `av1-default`, `designated-initializers`, `strict-raii`, `anti-slop`, `codebase-slimming` |
+| **56** | [`phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md`](phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) | 阶段六十三大核心议题专家终审裁决与一体化工程施工方案（DOC-VERDICT-PHASE6-REFACTOR-001，废除手绘教条、Win32原生标准控件、AV1 10-bit默认、100% RAII重塑、MSVC AVX2实证、外科手术式砍削3.4万行代码） | `phase6-verdict`, `native-controls`, `av1-unlocked`, `strict-raii`, `avx2-ymm`, `codebase-slash` |
+| **57** | [`phase6/CineRTX_Phase6_专家取证与交付审查报告.md`](phase6/CineRTX_Phase6_专家取证与交付审查报告.md) | 阶段六全仓源码与55篇历史文档深度取证执行摘要报告（UI停滞根因、AV1五处拦截点、构建文件污染、六大历史文档矛盾及5万行代码膨胀真相） | `phase6-forensics`, `doc-audit`, `slop-diagnosis`, `codebase-truth` |
+| **58** | [`phase6/CineRTX_Phase6_第一阶段构建治理与死代码切除施工方案.md`](phase6/CineRTX_Phase6_第一阶段构建治理与死代码切除施工方案.md) | 阶段六第一波次施工实施方案（PLAN-PHASE6-WAVE1-CLEANSE-20261110，阻断增量链接、符号隔离、删除源码树内嵌PTX、切除RIFE/FRUC/DComp死代码、净砍3万行代码） | `phase6-wave1`, `cmake-hygiene`, `ptx-dynamic-gen`, `dead-code-removal`, `slimming-plan` |
+

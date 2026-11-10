@@ -25,12 +25,10 @@
 #include <string>
 #include <vector>
 
-#include "rife_engine.h"
 #include "rtx/hw_transcode.h"
 #include "rtx/i18n.h"
 #include "rtx/runtime_env.h"
 #include "rtx/ngx_remaster.h"
-#include "rtx/rife.h"
 #include "rtx/status.h"
 #include "rtx/types.h"
 #include "rtx/vram_pool.h"
@@ -56,7 +54,6 @@ enum class Mode {
     None,
     Probe,
     Container,
-    BuildRife,
     ViewportSelfTest,
     Help,
     Version,
@@ -98,8 +95,7 @@ void printHelp() {
               << "Usage:\n"
               << "  CineRTX --probe [--json]\n"
               << "  CineRTX --input in.mp4 --output out.mp4 [options]\n"
-              << "  CineRTX --viewport-self-test\n"
-              << "  CineRTX --build-rife --onnx model.onnx --engine model.engine\n\n"
+              << "  CineRTX --viewport-self-test\n\n"
               << "Options:\n"
               << "  --input PATH                 Container input (MP4/MKV); always remastered to\n"
               << "                               4K HDR10 HEVC Main10 via VSR + TrueHDR\n"
@@ -117,8 +113,6 @@ void printHelp() {
               << "  --quiet, --verbose           Logging verbosity\n"
               << "  --truehdr                    Enable TrueHDR inverse tone mapping (SDR -> HDR10)\n"
               << "  --sdr                        Force SDR native color space (default for SDR sources)\n"
-              << "  --4k-profile                 Allow a 4K RIFE workspace\n"
-              << "  --no-cuda-graph              Omit --useCudaGraph from trtexec\n"
               << "  --lang en|zh                 Output language (default: zh)\n"
               << "  --version, --help            Show version/help\n\n"
               << "The product transcode is unconditional: every container input is decoded by\n"
@@ -170,8 +164,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.mode = Mode::Probe;
         } else if (argument == "--viewport-self-test") {
             options.mode = Mode::ViewportSelfTest;
-        } else if (argument == "--build-rife") {
-            options.mode = Mode::BuildRife;
         } else if (argument == "--lang") {
             if (!requireValue(argc, argv, i, options.language)) {
                 return false;
@@ -469,41 +461,6 @@ int runHardwareMode(const Options& options) {
     return 0;
 }
 
-int buildRife(const Options& options) {
-    if (options.onnx.empty() || options.engine.empty()) {
-        std::cerr << "error: --build-rife requires --onnx and --engine\n";
-        return 2;
-    }
-    RifeEngineBuildRequest request;
-    request.onnx_path = options.onnx;
-    request.engine_path = options.engine;
-    request.width = options.width;
-    request.height = options.height;
-    request.fp16 = true;
-    request.verbose = options.verbose;
-
-    std::cout << "# TensorRT baseline: " << kRifeTensorRtBaseline
-              << " (10.14+ regresses RIFE v4.25 activation memory)\n";
-
-    const Result<RifeEngineBuildReport> report = buildRifeEngine(request);
-    if (!report.has_value()) {
-        std::cerr << "error: " << report.error().toString() << "\n";
-        return 1;
-    }
-    const RifeEngineBuildReport& value = report.value();
-    if (value.built_in_process) {
-        std::cout << "engine: " << options.engine.string() << " (" << value.engine_bytes << " bytes)\n";
-    } else {
-        if (!value.runtime_note.empty()) {
-            std::cerr << "note: " << value.runtime_note << "\n";
-        }
-        std::cout << value.trtexec_command << "\n";
-    }
-    std::cout << "onnx_sha256: " << value.onnx_sha256 << "\n";
-    std::cout << "sidecar: " << value.sidecar_path << "\n";
-    return 0;
-}
-
 // Headless verification of the DirectComposition viewport contract (Gate 6).
 int runViewportSelfTest() {
     gui::ViewportThrottle throttle;
@@ -614,8 +571,6 @@ int rtxCliMain(int argc, char** argv) {
             return runProbe(options);
         case Mode::ViewportSelfTest:
             return runViewportSelfTest();
-        case Mode::BuildRife:
-            return buildRife(options);
         case Mode::Container:
             return runHardwareMode(options);
         case Mode::None:

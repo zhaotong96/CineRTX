@@ -3,8 +3,8 @@
 //
 // Shim and NGX bridge ABI contract tests.
 //
-// The single-EXE deliverable ships no sidecar DLLs: rtx_shim, rtx_ngx_bridge and
-// rtx_fruc_bridge are static archives that rtx_core links, so these tests call
+// The single-EXE deliverable ships no sidecar DLLs: rtx_shim and rtx_ngx_bridge
+// are static archives that rtx_core links, so these tests call
 // the C ABI entry points directly.  The boundary under test is unchanged --
 // fixed-width structs, opaque handles and the RtxResult code set still cross it,
 // and NvidiaShim::loadEmbedded() / NgxRemasterBridge::bindEmbedded() bind the
