@@ -31,7 +31,7 @@ build/cmake/zig-windows/rtx_tests.exe
 Expected:
 
 ```text
-[==========] 89 test(s) run, 0 failed (520 ms)
+[==========] 79 test(s) run, 0 failed
 ```
 
 The shim, NGX bridge and FRUC bridge archives are linked directly into
@@ -99,22 +99,20 @@ macOS with the same include path.
 | `test_hdr.cpp` | 9 | TrueHDR parameter ranges, mastering presets, VUI field values, SEI 137/144 payload layout, emulation prevention, prefix NAL, AV1 OBU, sidecar and JSON round trip |
 | `test_i18n.cpp` | 2 | Strongly-typed i18n table bounds and switch latency |
 | `test_io.cpp` | 6 | FFmpeg availability diagnostics, zero-disk memory AVIO read/seek/write, memory demux parse, memory container round trip |
-| `test_offruc_bridge.cpp` | 4 | FRUC bridge C ABI called directly from the linked archive: ABI version, scene-cut duplicate bypass, static-frame bypass, config rejection |
-| `test_pingpong_pipeline.cpp` | 3 | Even/odd ping-pong scheduling: slot parity, event disable timing, scene-cut duplicate |
 | `test_rational.cpp` | 6 | Normalisation, parsing/formatting, 128-bit cross-multiplication comparison, arithmetic, drift compensation, invalid configuration |
-| `test_rife.cpp` | 7 | 32-pixel alignment, TensorRT 10.13.3.9 gate, config validation, `trtexec` command, input packing, output unpacking, round trip |
 | `test_shim.cpp` | 9 | Shim C ABI binding and symbol resolution, ABI version and result names, probe diagnostics, probe JSON ASCII/UTF-8 escaping, NGX bridge ABI, headless D3D12↔CUDA interop round trip |
 | `test_status.cpp` | 5 | Success/failure construction, stable error names, `std::expected` alias `Result<T>` and `Result<void>`, `fromBool` |
 | `test_types.cpp` | 5 | Format metadata, alignment/sizes, `TaggedHandle` type safety, metadata clone, device residency |
 | `test_vram.cpp` | 14 | Pool spec bytes, 8 GB budget fit, encode depth covering B-frames, budget validation, pool lifecycle, lease move semantics, hysteresis, TDR guard, device-backed pool, watermarks |
+| `test_audio_stream_copy.cpp` | 4 | Audio stream copy demux/mux, packet read, smart geometry portrait & pillarbox |
 
-Total: **89 cases**.
+Total: **79 cases**.
 
 ## 5. CTest entries
 
 | Test | Command | Assertion |
 | --- | --- | --- |
-| `rtx_unit_tests` | `rtx_tests` | All 89 cases pass |
+| `rtx_unit_tests` | `rtx_tests` | All 79 cases pass |
 | `rtx_fruc_abi_contract_test` | `rtx_tests --filter=fruc_abi_*` | Gate 5: pure C ABI isolation and the hard-cut duplicate bypass |
 | `cli_gui_viewport_smoke_test` | `CineRTX --viewport-self-test` | Gate 6: DirectComposition viewport throttle, occlusion bypass and split clamp |
 

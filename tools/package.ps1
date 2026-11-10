@@ -111,7 +111,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item -LiteralPath $exe -Destination $stage
 
-foreach ($name in @('README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'COPYING.EXCEPTION')) {
+foreach ($name in @('README.md', 'README_zh.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'COPYING.EXCEPTION')) {
     $source = Join-Path $repo $name
     if (-not (Test-Path -LiteralPath $source)) {
         throw "missing release file: $name"

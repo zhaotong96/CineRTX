@@ -1,5 +1,10 @@
 # 二阶段 W4/W5/W6 施工与 Gate 2 状态报告
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 - 日期：2026-10-24
 - 施工计划：`docs/phase2_expert_verdict_analysis_and_action_plan.md`
 - 验收主机：[REDACTED_HOST] / NVIDIA GeForce RTX 5060 Laptop GPU，8151 MiB，驱动 617.14，compute capability 12.0

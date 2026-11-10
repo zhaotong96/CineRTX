@@ -1,5 +1,10 @@
 # CineRTX Phase 4: Modern C++26 架构重构与代码风格对齐全栈工程施工方案
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 **方案编号**: PLAN-PHASE4-MODERN-CPP26-20261031  
 **生效基线**: CineRTX Phase 3 验收交付态（Git Commit: `46dbaac`，137 项单测全绿，单 EXE 自包含闭环）  
 **对齐规约**: 现代 C++ 规范与通用解耦工程指南  

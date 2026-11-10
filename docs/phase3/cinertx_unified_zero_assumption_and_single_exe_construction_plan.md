@@ -1,5 +1,10 @@
 # CineRTX 阶段三终极重构施工方案：零假设工具链自举、单 EXE 产物收敛与 nv-codec-headers 规范化接入
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 > **状态**：已闭环就绪 (Completed & Verified — 2026-11-01)  
 > **责任执行**：Antigravity Agent  
 > **核心工作区**：`[REDACTED_PROJ]`  

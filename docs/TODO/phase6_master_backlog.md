@@ -54,14 +54,15 @@
 
 ---
 
-### 波次四：全案文档一致性对齐与发布闭环 (Wave 4: Docs SSOT & Release Closure)
+### 波次四：全案文档一致性对齐与发布闭环 (Wave 4: Docs SSOT & Release Closure) [已闭环完成 - 2026-11-10]
 * **目标**：彻底正本清源 6 大历史文档矛盾，交付顶级开源标准双语 README 与轻量化发布包。
+* **实测成果**：全案 36 篇历史文档统一切除矛盾并加盖 `[HISTORICAL-SUPERSEDED]` 归档印记；完成 `docs/README.md`、`docs/spec/architecture.md` 与 `docs/spec/testing.md` 权威重构；根目录交付顶级开源标准物理分离双语说明（英文 `README.md` 与中文 `README_zh.md` 双向锚点互链）；轻量化重构 `tools/package_release.py`，免安装绿色发布包体积从 1.5+ GB 瘦身至 **34.35 MB**（包含 SHA-256 校验和清单，实测验证成功）。
 
-| 任务编号 | 任务名称与核心动作 | 对应专家议题 | 涉及文件 | 预估代码净减 |
-| :---: | :--- | :---: | :--- | :---: |
-| **W4-01** | **全案历史文档 SSOT 归档与矛盾纠偏**：对齐 6 大矛盾，将 `docs/phase1`~`phase5` 历史工单打上 `[HISTORICAL-SUPERSEDED]` 印记，重写 `architecture.md` 与 `testing.md`。 | **E-06** | `docs/README.md`<br>`docs/spec/architecture.md`<br>`docs/spec/testing.md` | 重构 4 篇基线 |
-| **W4-02** | **根目录双语 README 物理分离**：拆分为纯英文 `README.md` 与纯中文 `README_zh.md`，顶部双向锚点互链，同步更新 AV1 默认与原生 UI。 | **E-08** | `README.md`<br>`README_zh.md` | 重构 |
-| **W4-03** | **自动化绿色免安装发布包轻量化重构**：更新 `tools/package_release.py`，剔除 TensorRT 巨型依赖，绿色压缩包从 1.3 GB 瘦身至几十 MB 纯净版。 | **T-06** | `tools/package_release.py` | 纯净轻量化 |
+| 任务编号 | 任务名称与核心动作 | 对应专家议题 | 涉及文件 | 实测状态与效果 |
+| :---: | :--- | :--- :---: | :--- | :---: |
+| **W4-01** | **全案历史文档 SSOT 归档与矛盾纠偏**：对齐 6 大矛盾，将 `docs/phase1`~`phase5` 历史工单打上 `[HISTORICAL-SUPERSEDED]` 印记，重写 `architecture.md` 与 `testing.md`。 | **E-06** | `docs/README.md`<br>`docs/spec/architecture.md`<br>`docs/spec/testing.md`<br>`docs/phase1`~`phase5` 全案 | **[已完成]** 36 篇历史工单归档印记就绪，3 篇基线重构对齐 |
+| **W4-02** | **根目录双语 README 物理分离**：拆分为纯英文 `README.md` 与纯中文 `README_zh.md`，顶部双向锚点互链，同步更新 AV1 默认与原生 UI。 | **E-08** | `README.md`<br>`README_zh.md`<br>`tools/package.ps1` | **[已完成]** 顶级开源标准物理分离双语文档交付 |
+| **W4-03** | **自动化绿色免安装发布包轻量化重构**：更新 `tools/package_release.py`，剔除 TensorRT 巨型依赖，绿色压缩包从 1.5+ GB 瘦身至 34.35 MB 纯净版。 | **T-06** | `tools/package_release.py` | **[已完成]** 绿色包自包含纯净发布（34.35 MB），实测通过 |
 
 ---
 

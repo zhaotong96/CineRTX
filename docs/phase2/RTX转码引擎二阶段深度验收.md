@@ -1,5 +1,10 @@
 # **RTX 超分辨率与 HDR 离线转码引擎二阶段（W4）专家验收裁定 暨 路线 A/B 深度技术批复报告**
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 ## **1\. 专家总体裁定与阶段性验收结论**
 
 通过对工程团队呈报的二阶段技术攻坚成果暨领域专家深度咨询建议书（文档编号 RTX-EXPERT-CONSULT-20261024-PHASE2）1、内部二阶段返工复验核准暨 W4 互操作里程碑验收报告（文档编号 RTX-ACCEPT-20261024-W4-MILESTONE）2 以及工作区最新同步的构建配置与核心源码树3 进行交叉穿透审计，专家评审组确认项目在目标验证硬件环境 [REDACTED_HOST]（搭载 NVIDIA GeForce RTX 5060 Laptop GPU，Blackwell 架构 sm\_120，8123 MiB GDDR7 显存，128-bit 位宽，驱动版本 617.14，CUDA 13.4，NVENC v209，Windows 11）1 上已取得决定性的底层突破。工程团队在一阶段专家验收后彻底扭转了研发作风，不仅全量、扎实地清零了首轮审查指出的 P0 与 P1 级架构技术债，而且在极具挑战性的 Blackwell 移动平台上攻克了无头（Headless）Direct3D 12 与 CUDA 外部显存的零拷贝双向互操作难题1。在宿主机客观缺乏 NVIDIA 专有闭源 RTX Video SDK 动态库与 Nsight Systems 命令行工具的外部环境限制下，主架构师拒绝虚假提报 Gate 2 终审、如实剥离并呈报挂起事项的工程诚实度，完全契合商业生产级软件的工程伦理与交付准则2。  

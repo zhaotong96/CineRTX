@@ -1,5 +1,10 @@
 # CineRTX 纯 GPU 硬件零拷贝转码与视频重制引擎 · 领域专家终审与开源就绪请求书
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 > **文档标识**：`DOSSIER-FINAL-SIGNOFF-20261025`  
 > **归档路径**：[`docs/phase2/CineRTX_领域专家终审与开源就绪请求书.md`](file:///C:/[REDACTED_PROJ]/docs/phase2/CineRTX_%E9%A2%86%E5%9F%9F%E4%B8%93%E5%AE%B6%E7%BB%88%E5%AE%A1%E4%B8%8E%E5%BC%80%E6%BA%90%E5%B0%B1%E7%BB%AA%E8%AF%B7%E6%B1%82%E4%B9%A6.md)  
 > **起草日期**：2026-10-25  

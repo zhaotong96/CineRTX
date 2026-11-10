@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """CineRTX 绿色自包含免安装发布包构建脚本 (Standalone Release Packager)
 
-自动化收集 CineRTX.exe、rtx_ngx_bridge.dll、RTX Video SDK 与 TensorRT/Optical Flow 运行时库，
-生成 SHA256 校验清单，产出开箱即用的绿色发布包。
+自动化收集 CineRTX.exe、rtx_ngx_bridge.dll、RTX Video SDK (VSR + TrueHDR)，
+生成 SHA256 校验清单，产出开箱即用的轻量化绿色发布包（~28 MB）。
 """
 
 import argparse
@@ -23,12 +23,6 @@ REQUIRED_BINARIES = [
     "rtx_ngx_bridge.dll",
     "nvngx_vsr.dll",
     "nvngx_truehdr.dll",
-    "NvOFFRUC.dll",
-    "cudart64_110.dll",
-    "nvinfer_10.dll",
-    "nvinfer_builder_resource_10.dll",
-    "nvinfer_plugin_10.dll",
-    "nvonnxparser_10.dll",
 ]
 
 PLUGIN_BINARIES = [
@@ -106,23 +100,26 @@ def package_release(build_dir: str, output_dir: str, make_zip: bool = True) -> i
     readme_path = os.path.join(output_dir, "README.txt")
     with open(readme_path, "w", encoding="utf-8") as f_readme:
         f_readme.write(
-            "CineRTX 纯 GPU 专业转码与非编引擎 (免安装绿色版)\n"
+            "CineRTX 纯 GPU 专业转码与非编引擎 (免安装轻量绿色版)\n"
             "====================================================\n\n"
-            "本包为完全自包含独立绿色发布包，内置 NVIDIA RTX Video SDK (VSR + TrueHDR)、\n"
-            "Optical Flow FRUC 与 TensorRT 运行时，无需安装任何额外运行库。\n\n"
+            "本包为完全自包含独立轻量绿色发布包（~28 MB），内置 NVIDIA RTX Video SDK (VSR + TrueHDR)，\n"
+            "零第三方臃肿框架依赖，默认全链路启用 AV1 10-bit 专业硬件转码与原生暗黑参数矩阵界面。\n\n"
             "运行要求:\n"
             "  * 操作系统: Windows 10 / 11 64-bit\n"
             "  * 显卡硬件: NVIDIA GeForce RTX 30/40/50 系列或 RTX 专业 GPU\n"
+            "              (RTX 40/50 默认 AV1 10-bit 编码；RTX 30 自动回退 HEVC Main10)\n"
             "  * 显卡驱动: NVIDIA Game Ready / Studio 驱动 550.00 以上\n\n"
-            "常用命令示例:\n"
-            "  1. 硬件探测与自检:\n"
+            "使用方式:\n"
+            "  1. 启动图形化专业参数矩阵界面 (GUI):\n"
+            "     直接双击 CineRTX.exe 即可启动（支持拖拽视频、13 项参数调节与 Ctrl+L 动态中英文热切）。\n\n"
+            "  2. 硬件算力探测与环境自检:\n"
             "     CineRTX.exe --probe\n\n"
-            "  2. SDR 4K 原生直通转码 (消除压扁与偏灰):\n"
-            "     CineRTX.exe --input input.mp4 --output output_4k_sdr.mp4 --sdr\n\n"
-            "  3. TrueHDR 逆色调映射 4K HDR10 转码:\n"
-            "     CineRTX.exe --input input.mp4 --output output_4k_hdr10.mp4 --truehdr\n\n"
-            "  4. 启动图形化非编界面 (GUI):\n"
-            "     CineRTX.exe --gui\n"
+            "  3. 缺省 4K 超分转码 (默认 AV1 10-bit + 音频无损直通):\n"
+            "     CineRTX.exe --input in.mp4 --output out.mp4\n\n"
+            "  4. TrueHDR 逆色调映射 4K HDR10 转码:\n"
+            "     CineRTX.exe --input in.mp4 --output out_hdr10.mp4 --truehdr\n\n"
+            "  5. 查看命令行完整帮助:\n"
+            "     CineRTX.exe --help\n"
         )
     print(f"  [√] 部署说明文档: README.txt")
 

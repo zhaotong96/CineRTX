@@ -1,5 +1,10 @@
 # CineRTX Phase 5: 全媒体工业可用性与产品化落地工程施工方案
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 **方案编号**: PLAN-PHASE5-MEDIA-USABILITY-20261108  
 **生效基线**: Git Commit `145d79d`（核心画质热修已闭环，89 项单元测试全绿）  
 **签发机构**: CineRTX 架构委员会 / 阶段五工程指挥部  

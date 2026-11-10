@@ -1,5 +1,10 @@
 # **CineRTX 全仓演进 Modern C++26 架构重构与代码风格对齐领域专家裁决报告**
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 ## **一、 全景架构适配性评估与参考规范对齐总纲**
 
 针对 CineRTX 高性能非线性离线转码、HDR 逆色调映射及 AI 超分辨率重制引擎向 Modern C++26 演进的工程诉求，架构审查对主工程全量源码拓扑与[REDACTED]进行了交叉比对与穿透式审计1。CineRTX 的底层运行环境建立在 NVIDIA Ada Lovelace（sm\_89）与 Blackwell（sm\_120，典型基准设备为搭载 8,151 MiB GDDR7 显存的 RTX 5060 Laptop GPU）异构硬件之上，通过单文件自包含静态 FFmpeg（典型体积约 8.45 MB，严格收敛于 Gate 3.0 规定的 8.0 MB 至 12.0 MB 黄金体积包络且零外部媒体 DLL 依赖）处理容器解封装与交织复用，依托纯 C ABI 防火墙动态调度 NVDEC、NVENC、D3D12 与 NGX、TensorRT 及 NvOFFRUC 算子1。与此同时，在现代 C++ 工业级工程体系中，高内聚架构展现了极高的抽象密度，涵盖了无单例依赖注入、显式生命周期管理、强类型标签化句柄、变体消息总线、线程安全容器包装以及声明式范围视图。  

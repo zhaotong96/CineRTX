@@ -1,5 +1,10 @@
 # **CineRTX 纯 GPU 转码引擎：GitHub 开源协议识别异常 (License: Other) 深度法务与架构裁定报告**
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 ## **一、 领域专家委员会总体裁定与签批决议**
 
 针对 CineRTX 工程组与系统架构团队呈交的《CineRTX 纯 GPU 转码引擎：GitHub 开源许可证识别异常 (License: Other) 深度调查与专家咨询请求书》（文档标识：DOSSIER-LICENSE-INVESTIGATION-20261025）1，领域专家委员会已联合开源法务与供应链安全审查组、异构系统架构组，对工作区内的 LICENSE、COPYING.EXCEPTION、LICENSE-MIT、LICENSE-APACHE、README.md、docs/spec/compliance.md 以及本地合规门禁脚本 tools/check\_spdx.ps1 进行了穿透式法务核验与探测算法复盘1。  

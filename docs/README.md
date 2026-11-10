@@ -2,17 +2,10 @@
 
 本项目的所有技术规范、架构决策、阶段报告与历史专家评审记录均归纳整理于本目录，供开发者与协作者快速检索与索引。
 
-> **当前产品契约（2026-10-29）**：`CineRTX.exe` 是唯一目标和产物，GUI 与 CLI
-> 的容器输入只有一条像素路径：NVDEC → RTX VSR + TrueHDR → 4K HDR10 HEVC
-> Main10。没有透传模式、没有功能开关、没有前端差异；功能是否可用只由运行期
-> NVIDIA 组件是否存在决定。Optical Flow SDK 5.0.7 与 TensorRT 10.13.3.9 由 CMake
-> 在 configure 阶段按 SHA-256 钉住的归档自动供给（缓存与解压均在
-> `build/external`），运行库部署到 `CineRTX.exe` 同级；TensorRT 以
-> `GetProcAddress` 在运行期解析，不进入 PE 导入表。本文索引中的历史报告可能保留
-> 当时的 `--remaster` 开关、`rtx-transcode*.exe` 目标或容器透传命令，那些记录仅作
-> 历史证据，当前行为以根目录 `README.md`、`docs/spec/architecture.md` 与
-> `include/rtx/hw_transcode.h` 为准。NvOFFRUC/RIFE 插帧执行尚未接入产品
-> 主循环，详见根目录 README 的 Limitations。
+> **当前产品契约（2026-11-10，Phase 6 权威裁决基线）**：`CineRTX.exe` 是唯一交付目标和单一双模式（Win32 原生 UI / 控制台 CLI）自包含可执行程序。
+> 媒体流水线执行确定性纯 GPU 零拷贝路径：NVDEC 硬件解码 → RTX VSR + TrueHDR 设备显存重制（D3D12/CUDA 零拷贝互操作）→ P010 打包 → NVENC 默认硬件编码为 **AV1 10-bit**（Ada/Blackwell sm_89+ 默认 AV1；旧代架构自动平滑回退 HEVC Main10）。
+> 彻底推翻 GDI 零子 HWND 自绘教条，换装 Win32 Common Controls v6 原生暗黑交互矩阵（13 项专业参数双向绑定，支持 Ctrl+L 原地热切中英文），拔除磁盘调试日志改用 Windows 原生调试输出。
+> 全仓 100% 践行现代 C++26 绝对 RAII（零两段式 initialize/shutdown/destroy），物理隔离 PDB 符号至 symbols/ 目录并彻底切除 RIFE/FRUC/ONNX 冗余死代码，全仓代码由 4.9 万行大幅瘦身，绿色免安装发布包降至 ~34 MB。本文索引中 Phase 1 ~ Phase 5 历史报告均已打上 `[HISTORICAL-SUPERSEDED]` 归档印记，当前权威系统实现一律以根目录 `README.md`、`docs/spec/architecture.md` 与 `docs/TODO/phase6_master_backlog.md` 为准。
 
 ---
 

@@ -1,6 +1,11 @@
 # CineRTX 阶段五：全媒体可用性与工程化落地实施终期总结报告
 
 > [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
+> [!NOTE]
 > **工程基线**：Commit `145d79d`  
 > **实施周期**：阶段五（Wave 1 ~ Wave 4 全波次交付）  
 > **执行环境**：Windows 11 x64, Visual Studio 2026 MSVC (v18.11), CMake 4.3.1, Ninja 1.13, NVIDIA GeForce RTX 5060 Laptop GPU (sm_120, CUDA 13.5, Driver 572.16)  

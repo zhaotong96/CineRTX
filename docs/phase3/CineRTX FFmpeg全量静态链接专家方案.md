@@ -1,5 +1,10 @@
 # **CineRTX 纯 GPU 转码与非编引擎：FFmpeg 全量静态链接与单 EXE 自包含架构重构终审裁定与全栈施工规范书**
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 **文档标识**：VERDICT-FFMPEG-STATIC-CONSOLIDATION-20261026 \| **关联呈报档案**：DOSSIER-FFMPEG-STATIC-CONSOLIDATION-20261026（《CineRTX 纯 GPU 转码与非编引擎：FFmpeg 全量静态链接与单 EXE 自包含架构重构协助调查与专家咨询请求书》）1 及 VERDICT-PHASE3-ARCHITECTURE-202610252 \| **签发机构**：CineRTX 领域专家评审委员会（异构系统架构组 / 核心流水线工委会 / 开源法务与供应链审查组）1 \| **适用工程基线**：CineRTX v0.1.0（Git Commit: 32a396f, Branch: main）向 CineRTX v0.2.0（Phase 3 前置 P0 级架构纯化与 W7–W9 演进）1 \| **目标硬件与环境包络**：NVIDIA GeForce RTX 5060 Laptop GPU（Blackwell 架构，sm\_120，8,151 MiB GDDR7，Driver 617.14，CUDA 13.4，Windows 11 24H2，Visual Studio 2022 MSVC 19.40+ / C++20）1
 
 ## **一、 委员会总体裁定决议与自包含架构第一性原理复盘**

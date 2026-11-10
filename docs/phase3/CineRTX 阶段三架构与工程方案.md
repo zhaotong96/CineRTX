@@ -1,5 +1,10 @@
 # **CineRTX 纯 GPU 转码与非编引擎：阶段三 (Phase 3 / v0.2.0) 架构演进裁定与全栈工程施工规范书**
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 **文档标识**：VERDICT-PHASE3-ARCHITECTURE-20261025 \| **关联呈报档案**：DOSSIER-PHASE3-PREPARATION-20261025（《CineRTX 纯 GPU 转码与非编引擎：阶段三架构演进与工程筹备协助调查与专家咨询请求书》）1 \| **签发机构**：CineRTX 领域专家评审委员会（异构系统架构组 / 深度学习引擎审查组 / 开源法务与供应链审查组）1 \| **适用工程基线**：CineRTX v0.1.0（Git Commit: 32a396f, Branch: main）向 CineRTX v0.2.0（Phase 3，工期 W7–W9）演进1 \| **目标硬件与环境包络**：NVIDIA GeForce RTX 5060 Laptop GPU（Blackwell 架构，sm\_120，8,151 MiB GDDR7，128-bit 位宽，Driver 617.14，CUDA 13.4，Windows 11 24H2，MSVC 2022 / Zig 0.13 Clang / Linux GCC）1
 
 ## **一、 委员会总体裁定决议与阶段三架构演进总纲**

@@ -1,5 +1,10 @@
 # **CineRTX 纯 GPU 视频重制与非编引擎深度静态代码审计与架构全景审查报告**
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 ## **一、 执行摘要 (Executive Summary)**
 
 针对 CineRTX 代码库（版本 0.1.0）的深度静态代码审计与架构全景审查表明，该引擎在纯 GPU 零拷贝多媒体管线设计、无头（Headless）DirectX 12 与 CUDA 外部资源互操作、离线 PTX 预编译驱动级 JIT 加载以及 GPLv3 与专有驱动 EULA 的双层动态隔离方面展现了极高的系统工程水准1。尽管代码库已在 MSVC C++20 与 Zig/Clang 双工具链下通过全量编译，并跑通了单元测试与 SPDX 许可证校验，但脱离单线程合成自测（run\_interop\_selftest）与 CPU 参考路径的表象后，深入底层驱动交互语义与多线程异步并发边界的穷尽式审查揭示了 **12 项关键架构隐患与微观实现缺陷**，其中包括 **3 项 Critical 级**、**4 项 High 级**、**4 项 Medium 级** 与 **1 项 Low 级**1。

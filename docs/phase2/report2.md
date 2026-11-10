@@ -268,6 +268,11 @@ v3 显存全程平坦(3850→3835 MiB),系统内存又已恢复 8.4GB(周期性 
 
 # 施工完成 — W5/W6 + GUI 一体化施工令执行完毕
 
+> [!NOTE]
+> **[HISTORICAL-SUPERSEDED] 本文档为历史阶段归档文件**  
+> 本文档记录的内容已被 **阶段六（Phase 6）架构全面瘦身与专业级产品化专家裁决方案**（参见 [docs/phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md](../phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) 及 [docs/TODO/phase6_master_backlog.md](../TODO/phase6_master_backlog.md)）全量演进与替代。当前权威系统设计请以根目录 [README.md](../../README.md)、[docs/spec/architecture.md](../spec/architecture.md) 为准。
+
+
 按核准施工令 `RTX-PLAN-20261024-W5W6-GUI-UNIFIED` 与交接文档完成全部剩余施工。**核心成果：P0-1 生产级 GPU-only remaster 链路已实现并在 RTX 5060 实机贯通，Gate 2.1 以 128.7 FPS 通过(红线 60),Gate 2.2/2.3/Gate GUI 通过，Gate 2.4 GPU 侧达标**。完整证据见 [phase2_w5_w6_final_acceptance_report.md](C:\[REDACTED_PROJ]\docs\phase2_w5_w6_final_acceptance_report.md)。
 
 ## 各门禁结果
