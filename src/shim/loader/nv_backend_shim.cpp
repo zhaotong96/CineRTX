@@ -275,6 +275,66 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_probe(RtxDiagnostics* diagnostics)
     return RTX_OK;
 }
 
+// Phase 8 (Task 8-A1): every sm_75+ NVIDIA device visible to the driver.
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_enumerate_devices(RtxGpuTopology* topology) {
+    if (topology == nullptr) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::memset(topology, 0, sizeof(*topology));
+    ProbeState state = probeNvidia();
+    if (!state.cuda_loaded || !state.cuda_initialized) {
+        return RTX_ERR_DLL_MISSING;
+    }
+    int device_count = 0;
+    using rtx_shim::cuda::CUDA_SUCCESS;
+    if (state.driver.cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
+        return RTX_ERR_NOT_FOUND;
+    }
+    const int bounded = device_count < RTX_MAX_GPUS ? device_count : RTX_MAX_GPUS;
+    for (int index = 0; index < bounded; ++index) {
+        rtx_shim::cuda::CUdevice device = 0;
+        if (state.driver.cuDeviceGet(&device, index) != CUDA_SUCCESS) {
+            continue;
+        }
+        RtxDeviceInfo& info = topology->devices[topology->device_count];
+        std::memset(&info, 0, sizeof(info));
+        char name[RTX_MAX_DEVICE_NAME] = {};
+        state.driver.cuDeviceGetName(name, RTX_MAX_DEVICE_NAME, device);
+        copyText(info.name, std::string(name));
+        size_t total_memory = 0;
+        state.driver.cuDeviceTotalMem(&total_memory, device);
+        info.vram_bytes = total_memory;
+        int major = 0;
+        int minor = 0;
+        state.driver.cuDeviceGetAttribute(
+            &major, rtx_shim::cuda::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+        state.driver.cuDeviceGetAttribute(
+            &minor, rtx_shim::cuda::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+        info.compute_major = major;
+        info.compute_minor = minor;
+        char luid[8] = {};
+        unsigned int node_mask = 0;
+        if (state.driver.cuDeviceGetLuid(luid, &node_mask, device) == CUDA_SUCCESS) {
+            std::memcpy(info.luid, luid, 8);
+            info.luid_node_mask = node_mask;
+        }
+        info.capabilities = RTX_CAP_NVDEC | RTX_CAP_NVENC_HEVC10;
+        if (major > 8 || (major == 8 && minor >= 9)) {
+            info.capabilities |= RTX_CAP_NVENC_AV1;
+        }
+        if (componentPresent(state, "nvngx_vsr.dll") ||
+            componentPresent(state, "libnvngx_vsr.so")) {
+            info.capabilities |= RTX_CAP_VSR;
+        }
+        if (componentPresent(state, "nvngx_truehdr.dll") ||
+            componentPresent(state, "libnvngx_truehdr.so")) {
+            info.capabilities |= RTX_CAP_TRUEHDR;
+        }
+        topology->device_count++;
+    }
+    return topology->device_count > 0 ? RTX_OK : RTX_ERR_NOT_FOUND;
+}
+
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendConfig* config,
                                                              RtxBackend** backend) {
     if (backend == nullptr) {

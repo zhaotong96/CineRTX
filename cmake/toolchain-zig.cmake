@@ -167,6 +167,15 @@ endif()
 set(CMAKE_CXX_COMPILER "${RTX_ZIG_EXECUTABLE}")
 set(CMAKE_CXX_COMPILER_ARG1 "c++")
 
+# The mingw-w64 headers bundled with Zig do not ship the Windows SDK Minidump
+# API declarations (runtime_env.cpp needs <minidumpapiset.h>).  This directory
+# holds the minimal faithful shim and is searched only as a standard include,
+# after every user -I, so MSVC builds with the real Windows SDK never see it.
+if(CMAKE_HOST_WIN32 AND EXISTS "${_rtx_repo_root}/cmake/mingw-compat/minidumpapiset.h")
+    list(APPEND CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES
+        "${_rtx_repo_root}/cmake/mingw-compat")
+endif()
+
 # CMake otherwise looks for a GNU-style ar/ranlib next to the compiler.
 # Zig ships LLVM's ar, which understands `qc` and `s`.
 set(CMAKE_CXX_ARCHIVE_CREATE

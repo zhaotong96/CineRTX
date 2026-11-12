@@ -25,7 +25,9 @@
 #include <string>
 #include <vector>
 
+#include "rtx/daemon_rpc.h"
 #include "rtx/hw_transcode.h"
+#include "rtx/multi_gpu_scheduler.h"
 #include "rtx/i18n.h"
 #include "rtx/runtime_env.h"
 #include "rtx/ngx_remaster.h"
@@ -33,7 +35,6 @@
 #include "rtx/types.h"
 #include "rtx/vram_pool.h"
 #include "shim_probe.h"
-#include "viewport_throttle.h"
 
 #if defined(_WIN32)
 extern "C" {
@@ -54,7 +55,8 @@ enum class Mode {
     None,
     Probe,
     Container,
-    ViewportSelfTest,
+    DaemonStdio,
+    DaemonHttp,
     Help,
     Version,
 };
@@ -75,18 +77,30 @@ struct Options {
     bool fps_set = false;
     bool four_k_profile = false;
     bool no_cuda_graph = false;
-    bool truehdr = false;
+    bool truehdr = true;
     bool hdr_set = false;
     std::filesystem::path input_path;
     std::filesystem::path output_path;
-    std::filesystem::path onnx;
-    std::filesystem::path engine;
     std::string language;
     VideoCodec codec = VideoCodec::AV1;
     int bitrate_kbps = 0;
     int preset = 5;
     int rate_control = 0;
     int qp = 0;
+    // Phase 6.1: replaced the dead neural-inference struct members (the
+    // RIFE/TensorRT targets were pruned in Phase 6 Wave 1) with the
+    // wired-through product options the GUI exposes.
+    int peak_nits = 1000;
+    int geometry_mode = 0;
+    bool copy_audio = true;
+    // Phase 7: fused colour-science options.
+    std::filesystem::path lut_path;
+    bool hdr10plus = false;
+    // Phase 8: multi-GPU / GOP-segmentation options.
+    int gpu = -1;              // -1 = auto (device 0)
+    int gop_split = 1;         // 1 = single continuous transcode
+    int fault_inject_frame = 0;  // 0 = no simulated TDR (anti-TDR gate)
+    int daemon_http_port = 8080;
 };
 
 void printHelp() {
@@ -96,7 +110,8 @@ void printHelp() {
               << "Usage:\n"
               << "  CineRTX --probe [--json]\n"
               << "  CineRTX --input in.mp4 --output out.mp4 [options]\n"
-              << "  CineRTX --viewport-self-test\n\n"
+              << "  CineRTX --daemon-stdio\n"
+              << "  CineRTX --daemon-http <port>\n\n"
               << "Options:\n"
               << "  --input PATH                 Container input (MP4/MKV)\n"
               << "  --output PATH                Container output (MP4/MKV)\n"
@@ -110,6 +125,13 @@ void printHelp() {
               << "  --fps N[/D]                  Input frame rate (default 24)\n"
               << "  --frames N                   Frame limit (0 = whole stream)\n"
               << "  --vsr-quality 1..4           NGX VSR quality (default 2)\n"
+              << "  --peak-nits 400..4000        TrueHDR peak luminance in cd/m^2 (default 1000)\n"
+              << "  --pillarbox                  Pad landscape content instead of auto-rotate\n"
+              << "  --no-audio                   Drop every audio stream from the output\n"
+              << "  --lut PATH                   Apply an Adobe .cube 3D LUT inside the pack kernel\n"
+              << "  --hdr10plus                  Emit SMPTE ST 2094-40 (HDR10+) dynamic metadata\n"
+              << "  --gpu N                      Bind the sessions to GPU device N\n"
+              << "  --test-gop-split N           Split the job into N IDR-GOP segments and merge\n"
               << "  --json                       Machine-readable output\n"
               << "  --quiet, --verbose           Logging verbosity\n"
               << "  --truehdr                    Enable TrueHDR inverse tone mapping (SDR -> HDR10)\n"
@@ -162,8 +184,19 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.mode = Mode::Version;
         } else if (argument == "--probe") {
             options.mode = Mode::Probe;
-        } else if (argument == "--viewport-self-test") {
-            options.mode = Mode::ViewportSelfTest;
+        } else if (argument == "--daemon-stdio") {
+            options.mode = Mode::DaemonStdio;
+        } else if (argument == "--daemon-http") {
+            options.mode = Mode::DaemonHttp;
+            if (!requireValue(argc, argv, i, value)) {
+                return false;
+            }
+            int parsed = 0;
+            if (!parseInteger(value, parsed) || parsed <= 0 || parsed > 65535) {
+                error = "--daemon-http requires a port in 1..65535";
+                return false;
+            }
+            options.daemon_http_port = parsed;
         } else if (argument == "--lang") {
             if (!requireValue(argc, argv, i, options.language)) {
                 return false;
@@ -258,14 +291,56 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             }
             options.input_fps = parsed.value();
             options.fps_set = true;
-        } else if (argument == "--onnx") {
-            if (!requirePath(argc, argv, i, options.onnx)) {
+        } else if (argument == "--peak-nits") {
+            if (!requireValue(argc, argv, i, value)) {
                 return false;
             }
-        } else if (argument == "--engine") {
-            if (!requirePath(argc, argv, i, options.engine)) {
+            int parsed = 0;
+            if (!parseInteger(value, parsed)) {
+                error = "invalid integer for --peak-nits: " + value;
                 return false;
             }
+            options.peak_nits = parsed;
+        } else if (argument == "--pillarbox") {
+            options.geometry_mode = 1;
+        } else if (argument == "--no-audio") {
+            options.copy_audio = false;
+        } else if (argument == "--lut") {
+            if (!requirePath(argc, argv, i, options.lut_path)) {
+                return false;
+            }
+        } else if (argument == "--hdr10plus") {
+            options.hdr10plus = true;
+        } else if (argument == "--gpu") {
+            if (!requireValue(argc, argv, i, value)) {
+                return false;
+            }
+            int parsed = 0;
+            if (!parseInteger(value, parsed)) {
+                error = "invalid integer for --gpu: " + value;
+                return false;
+            }
+            options.gpu = parsed;
+        } else if (argument == "--test-gop-split") {
+            if (!requireValue(argc, argv, i, value)) {
+                return false;
+            }
+            int parsed = 0;
+            if (!parseInteger(value, parsed)) {
+                error = "invalid integer for --test-gop-split: " + value;
+                return false;
+            }
+            options.gop_split = parsed;
+        } else if (argument == "--fault-inject-frame") {
+            if (!requireValue(argc, argv, i, value)) {
+                return false;
+            }
+            int parsed = 0;
+            if (!parseInteger(value, parsed)) {
+                error = "invalid integer for --fault-inject-frame: " + value;
+                return false;
+            }
+            options.fault_inject_frame = parsed;
         } else if (argument == "--json") {
             options.json = true;
         } else if (argument == "--quiet") {
@@ -298,6 +373,18 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
     }
     if (options.vsr_quality < 1 || options.vsr_quality > 4) {
         error = "--vsr-quality must be in 1..4";
+        return false;
+    }
+    if (options.peak_nits < 400 || options.peak_nits > 4000) {
+        error = "--peak-nits must be in 400..4000";
+        return false;
+    }
+    if (options.gpu < -1) {
+        error = "--gpu must be a device index (>= 0)";
+        return false;
+    }
+    if (options.gop_split < 1 || options.gop_split > 64) {
+        error = "--test-gop-split must be in 1..64";
         return false;
     }
     if (options.preset < 1 || options.preset > 7) {
@@ -403,8 +490,17 @@ HwTranscodeOptions makeHwOptions(const Options& options) {
     hardware.target_width = options.target_width;
     hardware.target_height = options.target_height;
     hardware.vsr_quality = options.vsr_quality;
+    hardware.peak_nits = options.peak_nits;
+    hardware.geometry_mode = options.geometry_mode;
+    hardware.copy_audio = options.copy_audio;
+    hardware.lut_path = options.lut_path;
+    hardware.hdr10plus = options.hdr10plus;
+    if (options.gpu >= 0) {
+        hardware.device_index = options.gpu;
+    }
+    hardware.fault_inject_frame = options.fault_inject_frame;
     hardware.verbose = options.verbose;
-    hardware.hdr = options.hdr_set ? options.truehdr : false;
+    hardware.hdr = options.hdr_set ? options.truehdr : true;
     return hardware;
 }
 
@@ -477,49 +573,10 @@ int runHardwareMode(const Options& options) {
     return 0;
 }
 
-// Headless verification of the DirectComposition viewport contract (Gate 6).
-int runViewportSelfTest() {
-    gui::ViewportThrottle throttle;
-    constexpr int kTicks = 1000;
-    constexpr double kTickSeconds = 0.001;
-    int presents = 0;
-    for (int tick = 0; tick < kTicks; ++tick) {
-        if (throttle.shouldPresent(static_cast<double>(tick) * kTickSeconds, false, false)) {
-            ++presents;
-        }
-    }
-    const bool rate_ok = presents >= 59 && presents <= 61;
-
-    gui::ViewportThrottle occluded;
-    int occluded_presents = 0;
-    for (int tick = 0; tick < 120; ++tick) {
-        if (occluded.shouldPresent(static_cast<double>(tick) * 0.016, true, false)) {
-            ++occluded_presents;
-        }
-    }
-    const bool occlusion_ok = occluded_presents == 0 && occluded.occlusionBypasses() == 120;
-
-    gui::ViewportThrottle minimised;
-    int minimised_presents = 0;
-    for (int tick = 0; tick < 60; ++tick) {
-        if (minimised.shouldPresent(static_cast<double>(tick) * 0.016, false, true)) {
-            ++minimised_presents;
-        }
-    }
-    const bool minimised_ok = minimised_presents == 0;
-
-    const bool split_ok = throttle.splitForCursor(-40, 800) == 0.0 &&
-                          throttle.splitForCursor(400, 800) == 0.5 &&
-                          throttle.splitForCursor(9999, 800) == 1.0 &&
-                          throttle.splitForCursor(10, 0) == 0.5;
-
-    const bool pass = rate_ok && occlusion_ok && minimised_ok && split_ok;
-    std::cout << "viewport self-test " << (pass ? "PASS" : "FAIL") << ": " << presents
-              << " presents/s, " << occluded_presents << " presents while occluded, "
-              << minimised_presents << " while minimised, split clamp "
-              << (split_ok ? "OK" : "FAILED") << "\n";
-    return pass ? 0 : 1;
-}
+// The Phase 6 Wave 1 prune removed the DirectComposition viewport; its
+// --viewport-self-test CLI mode and the Gate 6 CTest wrapper were retired with
+// it.  Phase 7 re-introduces real-time monitoring through the RAII
+// PreviewViewport (src/gui/preview_viewport.h) without a self-test CLI.
 
 }  // namespace
 
@@ -585,8 +642,10 @@ int rtxCliMain(int argc, char** argv) {
             return 0;
         case Mode::Probe:
             return runProbe(options);
-        case Mode::ViewportSelfTest:
-            return runViewportSelfTest();
+        case Mode::DaemonStdio:
+            return rtx::daemon::runStdio();
+        case Mode::DaemonHttp:
+            return rtx::daemon::runHttp(static_cast<uint16_t>(options.daemon_http_port));
         case Mode::Container:
             return runHardwareMode(options);
         case Mode::None:

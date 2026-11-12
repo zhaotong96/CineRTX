@@ -82,6 +82,47 @@ int findInt(const std::string& json, const std::string& key, int fallback) {
 
 std::string boolString(bool value) { return value ? "true" : "false"; }
 
+// Phase 7 (Task 7-B2): MSB-first bit writer for the SMPTE ST 2094-40 v1
+// payload.  Layout mirrors the de-facto interop payload (ETSI TS 103 433-1,
+// application identifier 4) that every HDR10+ consumer parses:
+//   T.35 carrier (0xB5 / 0x003C / 0x00) + application identifier 4
+//   + application version 1 + one full-frame window + luminance statistics
+//   + knee-point driven tone mapping.
+class Hdr10PlusBitWriter {
+public:
+    void put(uint32_t bits, uint32_t value) {
+        for (int shift = static_cast<int>(bits) - 1; shift >= 0; --shift) {
+            const uint32_t bit = (value >> shift) & 1u;
+            current_ = (current_ << 1) | bit;
+            ++filled_;
+            if (filled_ == 8) {
+                out_.push_back(static_cast<uint8_t>(current_));
+                current_ = 0;
+                filled_ = 0;
+            }
+        }
+    }
+
+    std::vector<uint8_t> finish() {
+        if (filled_ != 0) {
+            current_ <<= (8 - filled_);
+            out_.push_back(static_cast<uint8_t>(current_));
+            current_ = 0;
+            filled_ = 0;
+        }
+        return out_;
+    }
+
+private:
+    std::vector<uint8_t> out_;
+    uint32_t current_ = 0;
+    int filled_ = 0;
+};
+
+// ST 2094-40 luminance fields carry nits/10000 in 17-bit unsigned words
+// (0.0001 resolution), i.e. encoded = round(nits * 10).
+uint32_t nitsToS2094(uint32_t nits) { return nits > 13107u ? 131071u : nits * 10u; }
+
 }  // namespace
 
 Result<void> TrueHdrParameters::validate() const {
@@ -270,6 +311,82 @@ std::vector<uint8_t> SeiSynthesizer::av1MetadataObu(const Hdr10Metadata& metadat
     mdcv.insert(mdcv.end(), payload.begin(), payload.end());
     appendObu(mdcv);
     return obus;
+}
+
+std::vector<uint8_t> SeiSynthesizer::hdr10PlusItuT35Payload(const Hdr10PlusFrameStats& stats) {
+    Hdr10PlusBitWriter w;
+    // ITU-T T.35 carrier mandated by the expert verdict (§4.4).
+    w.put(8, 0xB5);    // country code (US)
+    w.put(8, 0x00);    // terminal provider code, high byte
+    w.put(8, 0x3C);    // terminal provider code, low byte (0x003C)
+    w.put(8, 0x00);    // terminal provider oriented code
+    w.put(8, 0x04);    // application identifier: SMPTE ST 2094-40
+    w.put(8, 0x01);    // application version 1
+    w.put(2, 0);       // num_windows - 1 (single full-frame window)
+    // Window shape parameters (centre/axes/rotation unset).
+    w.put(16, 0);      // center_of_ellipse_x
+    w.put(16, 0);      // center_of_ellipse_y
+    w.put(8, 0);       // major_axis
+    w.put(8, 0);       // minor_axis
+    w.put(8, 0);       // rotation
+    w.put(8, 0);       // reflectance
+    w.put(1, 0);       // tone_mapping_mode_flag (no polynomial curve)
+    w.put(1, 0);       // sharpening_flag
+    // Luminance statistics from the GPU warp reduction (real per-frame
+    // MaxSCL / average MaxRGB).
+    w.put(17, nitsToS2094(stats.maxscl_r_nits));
+    w.put(17, nitsToS2094(stats.maxscl_g_nits));
+    w.put(17, nitsToS2094(stats.maxscl_b_nits));
+    w.put(17, nitsToS2094(stats.average_maxrgb_nits));
+    w.put(1, 0);       // num_distribution_maxrgb_percentiles = 0
+    w.put(1, 0);       // fraction_bright_pixels = 0
+    // Tone mapping: knee point driven.
+    w.put(1, 1);       // tone_mapping_flag
+    w.put(16, stats.knee_point_x);
+    w.put(16, stats.knee_point_y);
+    w.put(3, 0);       // num_bezier_curve_anchors
+    w.put(10, 0);      // color_saturation_weight
+    return w.finish();
+}
+
+std::vector<uint8_t> SeiSynthesizer::av1Hdr10PlusMetadataObu(const Hdr10PlusFrameStats& stats) {
+    const std::vector<uint8_t> t35 = hdr10PlusItuT35Payload(stats);
+    // metadata_group: metadata_type (leb128) + metadata_payload.
+    // METADATA_TYPE_ITUT_T35 = 3 in the AV1 specification.
+    std::vector<uint8_t> group;
+    appendLeb128(group, 3);
+    group.insert(group.end(), t35.begin(), t35.end());
+
+    // OBU_METADATA: forbidden 0 | type 5 << 3 | extension 0 | has_size 1.
+    std::vector<uint8_t> obu;
+    obu.push_back(0x2A);
+    appendLeb128(obu, group.size());
+    obu.insert(obu.end(), group.begin(), group.end());
+    return obu;
+}
+
+std::vector<uint8_t> SeiSynthesizer::hevcHdr10PlusPrefixSei(const Hdr10PlusFrameStats& stats) {
+    // SEI payload: payload_type 4 (user data registered by ITU-T T.35)
+    // followed by the payload bytes and the rbsp trailing bit.
+    std::vector<uint8_t> rbsp;
+    rbsp.push_back(0x04);              // payload type: user data T.35
+    rbsp.push_back(0xFF);              // payload size, 0xFF continuation form
+    const std::vector<uint8_t> t35 = hdr10PlusItuT35Payload(stats);
+    // The synthesised payload always fits the final continuation byte.
+    rbsp.push_back(static_cast<uint8_t>(t35.size()));
+    rbsp.insert(rbsp.end(), t35.begin(), t35.end());
+    rbsp.push_back(0x80);              // rbsp_trailing_bits
+
+    std::vector<uint8_t> nal;
+    nal.push_back(0x00);
+    nal.push_back(0x00);
+    nal.push_back(0x00);
+    nal.push_back(0x01);               // Annex-B start code
+    nal.push_back(0x04);               // NAL header: PREFIX_SEI_NUT (4)
+    nal.push_back(0x01);               // layer id 0, temporal id plus 1
+    const std::vector<uint8_t> escaped = insertEmulationPrevention(rbsp);
+    nal.insert(nal.end(), escaped.begin(), escaped.end());
+    return nal;
 }
 
 std::vector<uint8_t> SeiSynthesizer::containerSideData(const Hdr10Metadata& metadata) {

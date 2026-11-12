@@ -611,7 +611,7 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
     }
 
     std::string error;
-    if (!self->cuda.open(&error)) {
+    if (!self->cuda.open(&error, config->device_index)) {
         self->last_error = error;
         delete self;
         return RTX_ERR_DLL_MISSING;

@@ -268,3 +268,114 @@ RTX_TEST(hdr_json_round_trip) {
     RTX_CHECK_EQ(SeiSynthesizer::fromJson(zero_luminance).error().code,
                  ErrorCode::InvalidArgument);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7 (Task 7-B2): SMPTE ST 2094-40 (HDR10+) dynamic metadata synthesis.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// MSB-first bit reader mirroring the writer in sei_synthesizer.cpp.
+class Hdr10PlusBitReader {
+public:
+    explicit Hdr10PlusBitReader(const std::vector<uint8_t>& bytes) : bytes_(bytes) {}
+
+    uint32_t get(uint32_t bits) {
+        uint32_t value = 0;
+        for (uint32_t i = 0; i < bits; ++i) {
+            const uint32_t byte = bytes_[position_ >> 3];
+            const uint32_t bit = (byte >> (7 - (position_ & 7))) & 1u;
+            value = (value << 1) | bit;
+            ++position_;
+        }
+        return value;
+    }
+
+private:
+    const std::vector<uint8_t>& bytes_;
+    size_t position_ = 0;
+};
+
+}  // namespace
+
+RTX_TEST(hdr10plus_itut_t35_obu_synthesis) {
+    Hdr10PlusFrameStats stats{};
+    stats.maxscl_r_nits = 950;
+    stats.maxscl_g_nits = 1005;
+    stats.maxscl_b_nits = 780;
+    stats.average_maxrgb_nits = 210;
+    stats.knee_point_x = 500;
+    stats.knee_point_y = 620;
+
+    // 1. T.35 carrier: country 0xB5, provider 0x003C, oriented 0, app id 4,
+    //    application version 1.
+    const std::vector<uint8_t> t35 = SeiSynthesizer::hdr10PlusItuT35Payload(stats);
+    RTX_REQUIRE(t35.size() >= 6);
+    RTX_CHECK_EQ(t35[0], 0xB5);
+    RTX_CHECK_EQ(t35[1], 0x00);
+    RTX_CHECK_EQ(t35[2], 0x3C);
+    RTX_CHECK_EQ(t35[3], 0x00);
+    RTX_CHECK_EQ(t35[4], 0x04);
+    RTX_CHECK_EQ(t35[5], 0x01);
+
+    // 2. Bit-level round trip of the luminance statistics and knee points.
+    Hdr10PlusBitReader reader(t35);
+    RTX_CHECK_EQ(reader.get(8), 0xB5);
+    RTX_CHECK_EQ(reader.get(8), 0x00);
+    RTX_CHECK_EQ(reader.get(8), 0x3C);
+    RTX_CHECK_EQ(reader.get(8), 0x00);
+    RTX_CHECK_EQ(reader.get(8), 0x04);
+    RTX_CHECK_EQ(reader.get(8), 0x01);
+    RTX_CHECK_EQ(reader.get(2), 0);           // num_windows - 1
+    RTX_CHECK_EQ(reader.get(16), 0);          // center_of_ellipse_x
+    RTX_CHECK_EQ(reader.get(16), 0);          // center_of_ellipse_y
+    RTX_CHECK_EQ(reader.get(8), 0);           // major_axis
+    RTX_CHECK_EQ(reader.get(8), 0);           // minor_axis
+    RTX_CHECK_EQ(reader.get(8), 0);           // rotation
+    RTX_CHECK_EQ(reader.get(8), 0);           // reflectance
+    RTX_CHECK_EQ(reader.get(1), 0);           // tone_mapping_mode_flag
+    RTX_CHECK_EQ(reader.get(1), 0);           // sharpening_flag
+    // maxscl encoding: nits * 10 in 17-bit words (0.0001 resolution).
+    RTX_CHECK_EQ(reader.get(17), stats.maxscl_r_nits * 10u);
+    RTX_CHECK_EQ(reader.get(17), stats.maxscl_g_nits * 10u);
+    RTX_CHECK_EQ(reader.get(17), stats.maxscl_b_nits * 10u);
+    RTX_CHECK_EQ(reader.get(17), stats.average_maxrgb_nits * 10u);
+    RTX_CHECK_EQ(reader.get(1), 0);           // distribution percentiles
+    RTX_CHECK_EQ(reader.get(1), 0);           // fraction_bright_pixels
+    RTX_CHECK_EQ(reader.get(1), 1);           // tone_mapping_flag
+    RTX_CHECK_EQ(reader.get(16), stats.knee_point_x);
+    RTX_CHECK_EQ(reader.get(16), stats.knee_point_y);
+    RTX_CHECK_EQ(reader.get(3), 0);           // bezier anchors
+    RTX_CHECK_EQ(reader.get(10), 0);          // color_saturation_weight
+
+    // 3. AV1 OBU_METADATA wrapper: OBU header 0x2A (type 5, has_size_field),
+    //    leb128 group size, metadata_type 3 (METADATA_TYPE_ITUT_T35), payload.
+    const std::vector<uint8_t> obu = SeiSynthesizer::av1Hdr10PlusMetadataObu(stats);
+    RTX_REQUIRE(obu.size() > t35.size() + 2);
+    RTX_CHECK_EQ(obu[0], 0x2A);
+    // The group (1 leb128 metadata_type byte + payload) must fit one leb128
+    // size byte for this payload size.
+    RTX_CHECK_EQ(obu[1], static_cast<uint8_t>(t35.size() + 1));
+    RTX_CHECK_EQ(obu[2], 0x03);  // metadata_type = ITUT_T35
+    RTX_CHECK_EQ(obu[3], 0xB5);  // T.35 country code starts the payload
+
+    // 4. HEVC prefix SEI: Annex-B start code + PREFIX_SEI_NUT header
+    //    (0x04 0x01) + payload type 4 (user data registered by ITU-T T.35).
+    const std::vector<uint8_t> sei = SeiSynthesizer::hevcHdr10PlusPrefixSei(stats);
+    RTX_REQUIRE(sei.size() > 10);
+    RTX_CHECK_EQ(sei[0], 0x00);
+    RTX_CHECK_EQ(sei[1], 0x00);
+    RTX_CHECK_EQ(sei[2], 0x00);
+    RTX_CHECK_EQ(sei[3], 0x01);
+    RTX_CHECK_EQ(sei[4], 0x04);
+    RTX_CHECK_EQ(sei[5], 0x01);
+    // The T.35 carrier bytes must appear after the SEI header.
+    bool carrier_found = false;
+    for (size_t i = 6; i + 3 < sei.size(); ++i) {
+        if (sei[i] == 0xB5 && sei[i + 1] == 0x00 && sei[i + 2] == 0x3C) {
+            carrier_found = true;
+            break;
+        }
+    }
+    RTX_CHECK(carrier_found);
+}

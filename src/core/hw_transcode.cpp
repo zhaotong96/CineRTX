@@ -7,6 +7,7 @@
 
 #include "bitstream.h"
 #include "rtx/hdr.h"
+#include "rtx/lut3d.h"
 #include "rtx/ngx_remaster.h"
 #include "rtx/nvidia_shim.h"
 
@@ -22,6 +23,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -314,7 +316,9 @@ std::string HwTranscodeReport::toJson() const {
         "  \"remaster_frame_ms\": {},\n"
         "  \"remaster_pack_kernel_max_ms\": {},\n"
         "  \"remaster_pack_launches\": {},\n"
-        "  \"vsr_quality\": {}\n"
+        "  \"vsr_quality\": {},\n"
+        "  \"measured_max_cll_nits\": {},\n"
+        "  \"measured_max_fall_nits\": {}\n"
         "}}\n",
         jsonEscape(backend), jsonEscape(device), jsonEscape(path),
         jsonEscape(input_container), jsonEscape(output_container),
@@ -326,7 +330,8 @@ std::string HwTranscodeReport::toJson() const {
         zero_copy_main_loop ? "true" : "false",
         elapsed_ms, main_loop_ms, remaster_preprocess_ms, remaster_ngx_ms,
         remaster_pack_kernel_ms, remaster_frame_ms, remaster_pack_kernel_max_ms,
-        remaster_pack_launches, vsr_quality);
+        remaster_pack_launches, vsr_quality, measured_max_cll_nits,
+        measured_max_fall_nits);
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +383,10 @@ private:
         if (info_.width <= 0 || info_.height <= 0) {
             return err(ErrorCode::InvalidArgument, "demuxer reported an invalid video geometry");
         }
-        if (shimCodec(info_.codec) == RTX_CODEC_UNKNOWN) {
+        // Phase 8 (Task 8-B1): broadcast codecs (ProRes/DNxHR) bypass NVDEC
+        // through the software decoder; everything else must be NVDEC-decodable.
+        soft_decode_ = (info_.codec == VideoCodec::ProRes || info_.codec == VideoCodec::Dnxhd);
+        if (!soft_decode_ && shimCodec(info_.codec) == RTX_CODEC_UNKNOWN) {
             return err(ErrorCode::Unsupported, "unsupported input codec: " + info_.video_codec);
         }
 
@@ -449,8 +457,18 @@ private:
 
         const bool is_portrait_input = (info_.width > 0 && info_.height > 0 && info_.width < info_.height);
         const bool is_default_landscape_4k = (target_width_ == 3840 && target_height_ == 2160);
-        if (is_remaster && (target_width_ <= 0 || target_height_ <= 0 || (is_portrait_input && is_default_landscape_4k))) {
-            auto geom = calculateSmartGeometry(info_.width, info_.height, GeometryTargetMode::AutoDirect, target_width_, target_height_);
+        const GeometryTargetMode geom_mode = (options.geometry_mode == 1)
+            ? GeometryTargetMode::Pillarbox
+            : GeometryTargetMode::AutoDirect;
+        if (is_remaster && (!options.vsr_enabled)) {
+            // Phase 6.1 微瑕 3: an explicitly disabled VSR must never upscale.
+            target_width_ = info_.width;
+            target_height_ = info_.height;
+            report.output_width = target_width_;
+            report.output_height = target_height_;
+        } else if (is_remaster && (target_width_ <= 0 || target_height_ <= 0 ||
+                                   (is_portrait_input && is_default_landscape_4k))) {
+            auto geom = calculateSmartGeometry(info_.width, info_.height, geom_mode, target_width_, target_height_);
             target_width_ = geom.canvas_width;
             target_height_ = geom.canvas_height;
             report.output_width = target_width_;
@@ -458,9 +476,13 @@ private:
         }
 
         const bool enable_truehdr = options.hdr;
+        // Phase 6.1 微瑕 1: bind the GUI/CLI peak-nits option end to end.
+        const int clamped_nits = std::clamp(options.peak_nits > 0 ? options.peak_nits : 1000, 400, 4000);
         if (is_remaster) {
             if (enable_truehdr) {
-                const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(TrueHdrParameters{});
+                TrueHdrParameters hdr_params{};
+                hdr_params.max_luminance = clamped_nits;
+                const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(hdr_params);
                 if (!canonical.has_value()) {
                     return std::unexpected(canonical.error());
                 }
@@ -481,13 +503,16 @@ private:
             bridge_config.input_height = info_.height;
             bridge_config.output_width = target_width_;
             bridge_config.output_height = target_height_;
-            bridge_config.vsr_quality = options.vsr_quality;
+            // Phase 6.1 微瑕 3: vsr_quality 0 tells the bridge VSR is disabled
+            // even when the output geometry would otherwise request an upscale.
+            bridge_config.vsr_quality = options.vsr_enabled ? std::clamp(options.vsr_quality, 1, 4) : 0;
             bridge_config.enable_truehdr = enable_truehdr ? 1 : 0;
             bridge_config.contrast = 100;
             bridge_config.saturation = 100;
             bridge_config.middle_gray = 50;
-            bridge_config.max_luminance = 1000;
+            bridge_config.max_luminance = clamped_nits;
             bridge_config.project_id = 0x52545831u;
+            bridge_config_ = bridge_config;  // Phase 8: kept for the TDR rebuild
 
             RtxNgxBridge* raw_bridge = nullptr;
             const RtxResult b_res = bridge_loader_.create(&bridge_config, &raw_bridge);
@@ -496,6 +521,50 @@ private:
                            bridge_loader_.lastError(nullptr));
             }
             bridge_ = BridgeHandle(raw_bridge, BridgeDeleter{&bridge_loader_});
+
+            // Phase 7 (Task 7-B1): upload the .cube 3D LUT into the bridge's
+            // CUDA texture before the first remaster.
+            if (!options_.lut_path.empty()) {
+                const Result<Lut3D> lut = Lut3D::loadFromCubeFile(options_.lut_path);
+                if (!lut.has_value()) {
+                    return std::unexpected(lut.error());
+                }
+                if (!bridge_loader_.hasPhase7Api()) {
+                    return err(ErrorCode::Unsupported,
+                               "the loaded NGX bridge does not support 3D LUT (ABI < 3); "
+                               "rebuild the bridge");
+                }
+                const RtxResult lut_res = bridge_loader_.setLut3d(
+                    bridge_.get(), lut.value().half4Data().data(), lut.value().gridSize());
+                if (lut_res != RTX_OK) {
+                    return err(mapShimResult(lut_res),
+                               describe("rtx_ngx_bridge_set_lut3d", lut_res, nullptr),
+                               bridge_loader_.lastError(bridge_.get()));
+                }
+            }
+
+            // Phase 7 realtime monitoring: bind the bridge-owned double
+            // 960x540 R10G10B10A2 preview ring when the caller consumes it.
+            if (options_.preview) {
+                if (!bridge_loader_.hasPhase7Api()) {
+                    return err(ErrorCode::Unsupported,
+                               "the loaded NGX bridge does not support the realtime "
+                               "preview path (ABI < 3); rebuild the bridge");
+                }
+                for (uint32_t slot = 0; slot < 2; ++slot) {
+                    uint64_t pointer = 0;
+                    uint32_t pitch = 0;
+                    const RtxResult p_res = bridge_loader_.previewBuffer(bridge_.get(), slot,
+                                                                         &pointer, &pitch);
+                    if (p_res != RTX_OK || pointer == 0 || pitch == 0) {
+                        return err(mapShimResult(p_res),
+                                   describe("rtx_ngx_bridge_preview_buffer", p_res, nullptr),
+                                   bridge_loader_.lastError(bridge_.get()));
+                    }
+                    preview_ring_[slot] = pointer;
+                    preview_pitch_ = pitch;
+                }
+            }
         } else {
             if (options.hdr) {
                 hdr_ = info_.hdr;
@@ -516,16 +585,41 @@ private:
         decoder_config.clock_rate = 90000;
         decoder_config.max_surfaces = 32;
         decoder_config.pool_slots = 16;
+        // Phase 8 (Task 8-A1): explicit multi-GPU binding.
+        decoder_config.device_index = options_.device_index;
+        decoder_config_ = decoder_config;  // Phase 8: kept for the TDR rebuild
 
-        RtxDecoder* raw_decoder = nullptr;
-        const RtxResult d_res = shim_.decoderCreate(&decoder_config, &raw_decoder);
-        if (d_res != RTX_OK) {
-            return err(mapShimResult(d_res), describe("rtx_shim_decoder_create", d_res, nullptr),
-                       shim_.decoderLastError(nullptr));
+        if (!soft_decode_) {
+            RtxDecoder* raw_decoder = nullptr;
+            const RtxResult d_res = shim_.decoderCreate(&decoder_config, &raw_decoder);
+            if (d_res != RTX_OK) {
+                return err(mapShimResult(d_res), describe("rtx_shim_decoder_create", d_res, nullptr),
+                           shim_.decoderLastError(nullptr));
+            }
+            decoder_ = DecoderHandle(raw_decoder, DecoderDeleter{&shim_});
         }
-        decoder_ = DecoderHandle(raw_decoder, DecoderDeleter{&shim_});
 
         output_info_ = info_;
+        // Phase 8 (Task 8-A2): GOP-segmented transcodes land on a key frame
+        // before the first packet is read.
+        if (options_.seek_start_ms >= 0) {
+            const Rational tb = info_.time_base.valid() ? info_.time_base : Rational{1, 90000};
+            const int64_t stream_pts =
+                options_.seek_start_ms * tb.den / (1000 * tb.num);
+            auto sought = demuxer_->seekToKeyframeBefore(stream_pts);
+            if (!sought.has_value()) {
+                return sought;
+            }
+        }
+        // Phase 6.1 微瑕 2: an explicit copy_audio=false must strip every audio
+        // stream from the output description, not just stop forwarding packets.
+        // Phase 7 keeps the subtitle passthrough intact.
+        if (!options_.copy_audio) {
+            output_info_.primary_audio_index = -1;
+            output_info_.audio_tracks.clear();
+            std::erase_if(output_info_.passthrough_streams,
+                          [](const PassthroughStreamInfo& s) { return s.codec_type == 1; });
+        }
         output_info_.time_base = Rational{1, 90000};
         output_info_.codec = options.codec;
         output_info_.video_codec = report.output_codec;
@@ -539,6 +633,17 @@ private:
 
 public:
     Result<void> createEncoder(const RtxFrameDesc& frame, HwTranscodeReport& report) {
+        auto created = createEncoderCore(frame);
+        if (!created.has_value()) {
+            return created;
+        }
+        report.output_bit_depth = is_remaster_ ? 10 : frame.bit_depth;
+        return {};
+    }
+
+    // Phase 8 (Task 8-C1): report-free encoder creation used by the anti-TDR
+    // rebuild inside the encode thread.
+    Result<void> createEncoderCore(const RtxFrameDesc& frame) {
         RtxEncoderConfig config{};
         config.codec = encoderCodec(options_.codec);
         config.width = is_remaster_ ? target_width_ : frame.width;
@@ -555,6 +660,8 @@ public:
             1, frame_rate_.num > 0 ? frame_rate_.den * 2 : 60));
         config.rate_control = std::clamp(options_.rate_control, 0, 2);
         config.qp = options_.qp;
+        // Phase 8 (Task 8-A1): explicit multi-GPU binding.
+        config.device_index = options_.device_index;
 
         RtxEncoder* raw = nullptr;
         const RtxResult created = shim_.encoderCreate(&config, &raw);
@@ -562,16 +669,73 @@ public:
             return err(mapShimResult(created), describe("rtx_shim_encoder_create", created, nullptr));
         }
         encoder_ = EncoderHandle(raw, EncoderDeleter{&shim_});
-        report.output_bit_depth = is_remaster_ ? 10 : frame.bit_depth;
-        output_info_.bit_depth = report.output_bit_depth;
+        output_info_.bit_depth = is_remaster_ ? 10 : frame.bit_depth;
         output_info_.width = config.width;
         output_info_.height = config.height;
-        report.output_width = config.width;
-        report.output_height = config.height;
         return {};
     }
 
+    // Phase 8 (Task 8-C1): anti-TDR rebuild of the whole GPU pipeline while
+    // the muxer and the demuxer stay open (expert directive, verdict §3.3).
+    Result<void> recoverAfterDeviceLost() {
+        encoder_.reset();
+        decoder_.reset();
+        bridge_.reset();
+        // Back off while WDDM resets the adapter (250 ms, verdict §5).
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        RtxNgxBridge* raw_bridge = nullptr;
+        const RtxResult b_res = bridge_loader_.create(&bridge_config_, &raw_bridge);
+        if (b_res != RTX_OK || raw_bridge == nullptr) {
+            return err(mapShimResult(b_res),
+                       describe("rtx_ngx_bridge_create (device recovery)", b_res, nullptr),
+                       bridge_loader_.lastError(nullptr));
+        }
+        bridge_ = BridgeHandle(raw_bridge, BridgeDeleter{&bridge_loader_});
+        if (!options_.lut_path.empty() && bridge_loader_.hasPhase7Api()) {
+            const Result<Lut3D> lut = Lut3D::loadFromCubeFile(options_.lut_path);
+            if (lut.has_value()) {
+                (void)bridge_loader_.setLut3d(bridge_.get(), lut.value().half4Data().data(),
+                                              lut.value().gridSize());
+            }
+        }
+        RtxDecoder* raw_decoder = nullptr;
+        const RtxResult d_res = shim_.decoderCreate(&decoder_config_, &raw_decoder);
+        if (d_res != RTX_OK) {
+            return err(mapShimResult(d_res),
+                       describe("rtx_shim_decoder_create (device recovery)", d_res, nullptr),
+                       shim_.decoderLastError(nullptr));
+        }
+        decoder_ = DecoderHandle(raw_decoder, DecoderDeleter{&shim_});
+        // The encoder is recreated lazily by createEncoderCore on the next
+        // frame, exactly like the first frame of a fresh session.
+        return {};
+    }
+
+    // Phase 8 (Task 8-B1): guard the decode-slot release for the software
+    // decode path, which runs without an NVDEC session.
+    void releaseDecodedFrame(uint64_t slot) {
+        if (decoder_ != nullptr) {
+            shim_.decoderReleaseFrame(decoder_.get(), slot);
+        }
+    }
+    bool isSoftDecode() const noexcept { return soft_decode_; }
+
+    // Phase 8 (Task 8-C1): encoder-only rebuild inside the consumer thread.
+    Result<void> recreateEncoderAfterDeviceLost() {
+        encoder_.reset();
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        RtxFrameDesc probe{};
+        probe.width = is_remaster_ ? target_width_ : info_.width;
+        probe.height = is_remaster_ ? target_height_ : info_.height;
+        probe.format = is_remaster_ ? RTX_PIXEL_P010 : RTX_PIXEL_NV12;
+        probe.bit_depth = is_remaster_ ? 10 : info_.bit_depth;
+        return createEncoderCore(probe);
+    }
+
     Result<void> openMuxer() {
+        // Phase 7 (Task 7-B3): the muxer opens from both the transcode thread
+        // (first frame) and the consumer thread; serialise the open.
+        std::lock_guard<std::mutex> lock(muxer_mutex_);
         if (muxer_ != nullptr) {
             return {};
         }
@@ -608,7 +772,9 @@ public:
         return muxer_->open(options_.output_path, output_info_, hdr_);
     }
 
-    Result<void> writeEncodedPacket(const RtxPacketDesc& packet, int64_t fallback_pts, HwTranscodeReport& report) {
+    Result<void> writeEncodedPacket(const RtxPacketDesc& packet, int64_t fallback_pts,
+                                    HwTranscodeReport& report,
+                                    const std::vector<uint8_t>& side_data_prefix = {}) {
         auto opened = openMuxer();
         if (!opened.has_value()) {
             return opened;
@@ -616,6 +782,12 @@ public:
         Packet out;
         if (packet.size != 0) {
             out.data.assign(packet.data, packet.data + packet.size);
+        }
+        // Phase 7 (Task 7-B2): prepend the per-frame HDR10+ dynamic metadata
+        // (AV1 OBU / HEVC Annex-B prefix SEI) to the encoded packet.
+        if (!side_data_prefix.empty()) {
+            out.data.insert(out.data.begin(), side_data_prefix.begin(),
+                            side_data_prefix.end());
         }
         out.pts = packet.pts != std::numeric_limits<int64_t>::min() ? packet.pts : fallback_pts;
         out.dts = packet.dts != std::numeric_limits<int64_t>::min() ? packet.dts : out.pts;
@@ -697,6 +869,44 @@ public:
     bool isAudioPacket(const Packet& p) const noexcept {
         return info_.primary_audio_index >= 0 && p.stream_index == info_.primary_audio_index;
     }
+    // Phase 6.1 微瑕 2: the demux loops consult this before queueing/writing
+    // audio so copy_audio=false drops audio packets before they reach the muxer.
+    bool copyAudioEnabled() const noexcept { return options_.copy_audio; }
+    // Phase 7 (Task 7-B3): every audio stream plus the eligible subtitle
+    // streams ride the passthrough path.
+    bool isPassthroughPacket(const Packet& p) const noexcept {
+        if (isAudioPacket(p)) {
+            return true;
+        }
+        return std::any_of(info_.passthrough_streams.begin(), info_.passthrough_streams.end(),
+                           [&p](const PassthroughStreamInfo& s) {
+                               return s.stream_index == p.stream_index;
+                           });
+    }
+    // Phase 7 (Task 7-B3): measured CLL lands in the container header only
+    // when applied before the first muxer open; the report carries the final
+    // whole-film values regardless.
+    void setMeasuredCll(uint32_t max_cll_nits, uint32_t max_fall_nits) {
+        if (max_cll_nits > 0) {
+            hdr_.cll.max_cll = static_cast<uint16_t>(std::min<uint32_t>(max_cll_nits, 65535));
+        }
+        if (max_fall_nits > 0) {
+            hdr_.cll.max_fall = static_cast<uint16_t>(std::min<uint32_t>(max_fall_nits, 65535));
+        }
+        measured_max_cll_nits_ = static_cast<int>(max_cll_nits);
+        measured_max_fall_nits_ = static_cast<int>(max_fall_nits);
+    }
+    int measuredMaxCllNits() const noexcept { return measured_max_cll_nits_; }
+    int measuredMaxFallNits() const noexcept { return measured_max_fall_nits_; }
+    // Phase 7 realtime monitoring plumbing.
+    bool previewReady() const noexcept { return preview_ring_[0] != 0 && preview_ring_[1] != 0; }
+    uint64_t previewDevicePointer(uint32_t slot) const noexcept {
+        return slot < 2 ? preview_ring_[slot] : 0;
+    }
+    uint32_t previewPitch() const noexcept { return preview_pitch_; }
+    RtxResult downloadPreviewInto(void* destination, size_t bytes) const {
+        return bridge_loader_.downloadPreview(bridge_.get(), destination, bytes);
+    }
     int audioStreamIndex() const noexcept {
         return info_.primary_audio_index;
     }
@@ -723,6 +933,16 @@ private:
     Rational frame_rate_{30, 1};
     Hdr10Metadata hdr_{};
     RtxDiagnostics diagnostics_{};
+    std::mutex muxer_mutex_;
+    int measured_max_cll_nits_ = 0;
+    int measured_max_fall_nits_ = 0;
+    uint64_t preview_ring_[2] = {0, 0};
+    uint32_t preview_pitch_ = 0;
+    // Phase 8 (Task 8-C1): frozen session configs for the anti-TDR rebuild.
+    RtxNgxBridgeConfig bridge_config_{};
+    RtxDecoderConfig decoder_config_{};
+    // Phase 8 (Task 8-B1): ProRes/DNxHR sources skip NVDEC entirely.
+    bool soft_decode_ = false;
 
     NgxRemasterBridge bridge_loader_;
     BridgeHandle bridge_{nullptr, BridgeDeleter{nullptr}};
@@ -795,6 +1015,13 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
                 (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
                 return created;
             }
+            // Phase 7 (Task 7-B3): open the muxer on the first encoded frame
+            // so audio packets flow instead of piling up in a queue.
+            auto mux = session.openMuxer();
+            if (!mux.has_value()) {
+                (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
+                return mux;
+            }
         }
         RtxPacketDesc packet{};
         const RtxResult encoded = session.shim().encoderEncode(session.encoder(), &frame, &packet);
@@ -866,7 +1093,10 @@ Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& 
         }
         ++report.packets_read;
         Packet& input = packet.value();
-        if (session.isAudioPacket(input)) {
+        if (session.isPassthroughPacket(input)) {
+            if (session.isAudioPacket(input) && !session.copyAudioEnabled()) {
+                continue;  // Phase 6.1 微瑕 2: audio passthrough explicitly disabled.
+            }
             if (session.isMuxerOpen()) {
                 std::deque<Packet> to_flush;
                 {
@@ -1029,11 +1259,35 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
 
     RtxNgxRemasterStats previous_stats{};
     double pack_max_ms = 0.0;
+    // Phase 7: whole-film measured luminance statistics + preview staging.
+    uint32_t accumulated_max_cll_ = 0;
+    uint32_t accumulated_max_fall_ = 0;
+    uint32_t preview_slot_ = 0;
+    std::vector<uint8_t> preview_host_;
+    if (session.previewReady()) {
+        preview_host_.assign(static_cast<size_t>(session.previewPitch()) * 540u, 0);
+    }
+    std::optional<Clock::time_point> last_preview_download_;
 
     struct PendingEncode {
         RtxNgxRemasterOutput remaster_out{};
         int64_t pts = 0;
+        // Phase 7 (Task 7-B2): per-frame HDR10+ dynamic metadata prefix
+        // (empty when disabled).
+        std::vector<uint8_t> hdr10plus_prefix;
+        // Phase 8 (Task 8-C1): pipeline generation this item belongs to.
+        uint64_t generation = 0;
     };
+    // Phase 8 (Task 8-C1): last PTS (90 kHz) that reached the muxer, guarded
+    // by the pipeline mutex; the recovery seek rewinds to its key frame.
+    int64_t last_written_pts_90k = -1;
+    bool fault_injected = false;
+    bool skip_until_after_last_written_ = false;
+    // Recovery generation: bumped after every successful GPU-pipeline
+    // rebuild; queue items captured before it are stale (their NVENC session
+    // no longer exists) and the consumer drops them instead of failing.
+    uint64_t recovery_generation = 0;
+    bool recovery_pending = false;
     std::deque<PendingEncode> encode_queue;
     std::mutex pipeline_mutex;
     std::condition_variable queue_ready;
@@ -1077,9 +1331,26 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
             encode_frame.bit_depth = 10;
             encode_frame.pts = item.pts;
             encode_frame.slot_index = 0;
-            const RtxResult encoded = session.shim().encoderEncode(session.encoder(), &encode_frame, &packet);
+            RtxResult encoded = session.shim().encoderEncode(session.encoder(), &encode_frame, &packet);
+            if (encoded == RTX_ERR_DEVICE_LOST) {
+                // Phase 8 (Task 8-C1): rebuild the encoder in place and retry
+                // this frame once before failing the pipeline.
+                const Result<void> rebuilt = session.recreateEncoderAfterDeviceLost();
+                if (rebuilt.has_value()) {
+                    encoded = session.shim().encoderEncode(session.encoder(), &encode_frame, &packet);
+                }
+            }
             if (encoded != RTX_OK) {
                 std::lock_guard<std::mutex> lock(pipeline_mutex);
+                if (item.generation != recovery_generation || recovery_pending) {
+                    // A GPU-pipeline recovery started while this item was in
+                    // flight (the teardown destroyed the NVENC session); the
+                    // producer re-decodes the content from the checkpoint key
+                    // frame, so drop the stale item silently.
+                    ++encodes_completed;
+                    slot_free.notify_all();
+                    continue;
+                }
                 consumer_failed = true;
                 consumer_error = err(mapShimResult(encoded), describe("NvEncEncodePicture", encoded,
                                                                      session.shim().encoderLastError(session.encoder())));
@@ -1087,13 +1358,18 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
                 return;
             }
 
-            auto written = session.writeEncodedPacket(packet, item.pts, report);
+            auto written = session.writeEncodedPacket(packet, item.pts, report,
+                                                      item.hdr10plus_prefix);
             if (!written.has_value()) {
                 std::lock_guard<std::mutex> lock(pipeline_mutex);
                 consumer_failed = true;
                 consumer_error = written;
                 slot_free.notify_all();
                 return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(pipeline_mutex);
+                last_written_pts_90k = item.pts;
             }
 
             {
@@ -1107,17 +1383,21 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
     });
 
     auto processFrame = [&](const RtxFrameDesc& frame) -> Result<void> {
-        if (session.encoder() == nullptr) {
-            auto created = session.createEncoder(frame, report);
-            if (!created.has_value()) {
-                (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
-                return created;
+        // Phase 8 (Task 8-C1): after a TDR recovery seek, skip the frames that
+        // already reached the muxer so nothing is duplicated.
+        if (skip_until_after_last_written_) {
+            if (last_written_pts_90k >= 0 && frame.pts <= last_written_pts_90k) {
+                (void)session.releaseDecodedFrame(frame.slot_index);
+                return {};
             }
+            skip_until_after_last_written_ = false;
         }
         {
+            // Phase 7 (Task 7-B3): the 3-slot P010 ring lets the GPU pipeline
+            // run one frame further ahead of NVENC than the old 2-slot cap.
             std::unique_lock<std::mutex> lock(pipeline_mutex);
             slot_free.wait(lock, [&] {
-                return remasters_issued - encodes_completed < 2 || consumerStopped();
+                return remasters_issued - encodes_completed < 3 || consumerStopped();
             });
             if (consumerStopped()) {
                 return consumer_failed ? consumer_error : err(ErrorCode::State, "transcode cancelled");
@@ -1131,12 +1411,89 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         remaster_in.format = frame.format;
         remaster_in.full_range = input_full_range;
         remaster_in.matrix = input_matrix;
+        // Phase 7 realtime monitoring: alternate the double preview ring and
+        // publish the GUI's A/B split position for this frame.
+        bool preview_this_frame = false;
+        if (options.preview && session.previewReady()) {
+            remaster_in.preview_rgba10_ptr = session.previewDevicePointer(preview_slot_ & 1u);
+            remaster_in.preview_pitch = session.previewPitch();
+            remaster_in.split_x_norm =
+                options.split_ratio != nullptr
+                    ? std::clamp(options.split_ratio->load(std::memory_order_relaxed), 0.0f, 1.0f)
+                    : 0.5f;
+            preview_slot_ ^= 1u;
+            preview_this_frame = true;
+        }
         RtxNgxRemasterOutput remaster_out{};
         RtxNgxRemasterStats frame_stats{};
-        const RtxResult remastered =
-            session.bridgeLoader().remaster(session.bridge(), &remaster_in, &remaster_out, &frame_stats);
+        RtxResult remastered = RTX_OK;
+        if (options.fault_inject_frame > 0 && !fault_injected &&
+            report.frames_encoded + 1 == options.fault_inject_frame) {
+            // Phase 8 (Task 8-C1, test hook only): simulate a transient TDR so
+            // the anti-TDR self-heal path can be verified on real hardware.
+            fault_injected = true;
+            remastered = RTX_ERR_DEVICE_LOST;
+        } else {
+            remastered = session.bridgeLoader().remaster(session.bridge(), &remaster_in,
+                                                         &remaster_out, &frame_stats);
+        }
+        if (remastered == RTX_ERR_DEVICE_LOST) {
+            // Phase 8 (Task 8-C1): destroy and rebuild the GPU contexts (up to
+            // 3 attempts, 250 ms backoff each), then resume from the key frame
+            // at or before the last muxed PTS.  The generation bumps BEFORE
+            // the teardown so every queue item captured before the fault
+            // becomes stale (the consumer drops them silently instead of
+            // failing on the dead NVENC session).
+            {
+                std::lock_guard<std::mutex> lock(pipeline_mutex);
+                recovery_pending = true;
+                ++recovery_generation;
+                encode_queue.clear();
+                remasters_issued = encodes_completed;
+            }
+            slot_free.notify_all();
+            queue_ready.notify_all();
+            bool recovered = false;
+            std::string recovery_detail;
+            for (int attempt = 0; attempt < 3 && !recovered && !cancelled(); ++attempt) {
+                auto rebuilt = session.recoverAfterDeviceLost();
+                if (!rebuilt.has_value()) {
+                    recovery_detail = rebuilt.error().message + " | " +
+                                      rebuilt.error().detail;
+                    continue;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(pipeline_mutex);
+                    if (last_written_pts_90k >= 0) {
+                        const Rational tb = session.info().time_base.valid()
+                                                ? session.info().time_base
+                                                : Rational{1, 90000};
+                        const int64_t safe_pts =
+                            last_written_pts_90k * tb.den / (tb.num * 90000);
+                        auto sought = session.demuxer()->seekToKeyframeBefore(safe_pts);
+                        recovered = sought.has_value();
+                        skip_until_after_last_written_ = recovered;
+                        if (!recovered) {
+                            recovery_detail = sought.error().message + " | " +
+                                              sought.error().detail;
+                        }
+                    } else {
+                        recovered = true;
+                    }
+                    recovery_pending = !recovered;
+                }
+                slot_free.notify_all();
+            }
+            if (!recovered) {
+                (void)session.releaseDecodedFrame(frame.slot_index);
+                return err(ErrorCode::DeviceLost, "the GPU pipeline could not be recovered "
+                           "after RTX_ERR_DEVICE_LOST: " + recovery_detail);
+            }
+            (void)session.releaseDecodedFrame(frame.slot_index);
+            return {};  // resume decoding from the recovery key frame
+        }
         if (remastered != RTX_OK) {
-            (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
+            (void)session.releaseDecodedFrame(frame.slot_index);
             return err(mapShimResult(remastered), describe("rtx_ngx_bridge_remaster", remastered, nullptr),
                        session.bridgeLoader().lastError(session.bridge()));
         }
@@ -1146,10 +1503,69 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         if (pack_delta > pack_max_ms) {
             pack_max_ms = pack_delta;
         }
-        (void)session.shim().decoderReleaseFrame(session.decoder(), frame.slot_index);
+
+        // Phase 7 (Task 7-B3): accumulate the real GPU-reduced frame luma
+        // statistics; the running maximum feeds the measured MaxCLL/MaxFALL.
+        accumulated_max_cll_ = std::max<uint32_t>(accumulated_max_cll_, remaster_out.frame_max_nits);
+        accumulated_max_fall_ = std::max<uint32_t>(accumulated_max_fall_, remaster_out.frame_avg_nits);
+
+        // Phase 7 realtime monitoring: stage the finished preview slot into
+        // host memory at most 15 times per second (throttled by wall clock).
+        if (preview_this_frame) {
+            const auto now = Clock::now();
+            const bool due = !last_preview_download_.has_value() ||
+                             std::chrono::duration<double>(now - *last_preview_download_).count() >=
+                                 (1.0 / 15.0);
+            if (due && session.downloadPreviewInto(preview_host_.data(), preview_host_.size()) ==
+                           RTX_OK) {
+                last_preview_download_ = now;
+                options.preview(preview_host_.data(), session.previewPitch());
+            }
+        }
+
+        (void)session.releaseDecodedFrame(frame.slot_index);
+
+        // Phase 7 (Task 7-B2): synthesise the SMPTE ST 2094-40 payload for
+        // this frame from its real statistics.
+        std::vector<uint8_t> hdr10plus_prefix;
+        if (options.hdr10plus) {
+            Hdr10PlusFrameStats frame_hdr10plus{};
+            frame_hdr10plus.maxscl_r_nits = std::max<uint32_t>(1u, remaster_out.frame_max_nits);
+            frame_hdr10plus.maxscl_g_nits = std::max<uint32_t>(1u, remaster_out.frame_max_nits);
+            frame_hdr10plus.maxscl_b_nits = std::max<uint32_t>(1u, remaster_out.frame_max_nits);
+            frame_hdr10plus.average_maxrgb_nits = std::max<uint32_t>(1u, remaster_out.frame_avg_nits);
+            const float ratio =
+                remaster_out.frame_max_nits > 0
+                    ? static_cast<float>(remaster_out.frame_avg_nits) /
+                          static_cast<float>(remaster_out.frame_max_nits)
+                    : 0.5f;
+            frame_hdr10plus.knee_point_x = 500;
+            frame_hdr10plus.knee_point_y = static_cast<uint16_t>(
+                std::clamp(static_cast<int>(ratio * 1000.0f), 1, 1000));
+            hdr10plus_prefix = (options.codec == VideoCodec::HEVC)
+                                   ? SeiSynthesizer::hevcHdr10PlusPrefixSei(frame_hdr10plus)
+                                   : SeiSynthesizer::av1Hdr10PlusMetadataObu(frame_hdr10plus);
+        }
+
+        // Phase 7 (Task 7-B3): the encoder and the muxer now open on the very
+        // first remastered frame, which drains audio_packet_queue immediately
+        // (no more pre-first-video-packet buffering).
+        if (session.encoder() == nullptr) {
+            session.setMeasuredCll(accumulated_max_cll_, accumulated_max_fall_);
+            auto created = session.createEncoder(frame, report);
+            if (!created.has_value()) {
+                return created;
+            }
+            auto mux = session.openMuxer();
+            if (!mux.has_value()) {
+                return mux;
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(pipeline_mutex);
-            encode_queue.push_back(PendingEncode{remaster_out, frame.pts});
+            encode_queue.push_back(PendingEncode{remaster_out, frame.pts,
+                                                 std::move(hdr10plus_prefix),
+                                                 recovery_generation});
             ++remasters_issued;
         }
         queue_ready.notify_all();
@@ -1211,6 +1627,50 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
             : 3000;
     const Rational input_time_base = info.time_base.valid() ? info.time_base : clock_time_base;
 
+    // Phase 8 (Task 8-B1): broadcast codecs (ProRes / DNxHR) decode on the
+    // CPU; the P010 planes DMA-upload into the bridge and continue through
+    // the normal VSR + TrueHDR + NVENC device pipeline.
+    const bool soft_decode = session.isSoftDecode();
+    std::unique_ptr<ISoftVideoDecoder> soft_decoder;
+    if (soft_decode) {
+        soft_decoder = makeFfmpegSoftDecoder();
+        auto configured = soft_decoder->configure(info);
+        if (!configured.has_value()) {
+            return std::unexpected(configured.error());
+        }
+    }
+    // Publishes one software-decoded P010 frame into the device pipeline.
+    auto processSoftFrame = [&](const DecodedVideoFrame& decoded) -> Result<void> {
+        RtxFrameDesc frame{};
+        frame.format = RTX_PIXEL_P010;
+        frame.bit_depth = 10;
+        frame.width = decoded.width;
+        frame.height = decoded.height;
+        frame.pitches[0] = decoded.y_pitch;
+        frame.pitches[1] = decoded.uv_pitch;
+        frame.pts = decoded.pts_90k;
+        frame.slot_index = 0;
+        const RtxResult uploaded = session.bridgeLoader().uploadFrame(
+            session.bridge(), decoded.y_plane.data(), decoded.uv_plane.data(), decoded.y_pitch,
+            decoded.uv_pitch, decoded.width, decoded.height, &frame.planes[0], &frame.planes[1]);
+        if (uploaded != RTX_OK) {
+            return err(mapShimResult(uploaded),
+                       describe("rtx_ngx_bridge_upload_frame", uploaded, nullptr),
+                       session.bridgeLoader().lastError(session.bridge()));
+        }
+        // Honest accounting: the software path moves pixels over the bus.
+        report.encoder_host_to_device_bytes +=
+            static_cast<uint64_t>(decoded.y_plane.size()) + decoded.uv_plane.size();
+        report.decoder_host_pixel_copies += 1;
+        auto processed = processFrame(frame);
+        if (!processed.has_value()) {
+            return processed;
+        }
+        ++report.frames_decoded;
+        reportProgress();
+        return {};
+    };
+
     Result<void> pipeline_status;
     for (;;) {
         if (cancelled()) {
@@ -1230,7 +1690,10 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         }
         ++report.packets_read;
         Packet& input = packet.value();
-        if (session.isAudioPacket(input)) {
+        if (session.isPassthroughPacket(input)) {
+            if (session.isAudioPacket(input) && !session.copyAudioEnabled()) {
+                continue;  // Phase 6.1 微瑕 2: audio passthrough explicitly disabled.
+            }
             if (session.isMuxerOpen()) {
                 std::deque<Packet> to_flush;
                 {
@@ -1256,6 +1719,23 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
                 std::lock_guard<std::mutex> lk(audio_queue_mutex);
                 audio_packet_queue.push_back(std::move(input));
             }
+            continue;
+        }
+        if (soft_decode) {
+            // Phase 8 (Task 8-B1): feed the software decoder instead of NVDEC.
+            auto decoded = soft_decoder->feed(input);
+            if (!decoded.has_value()) {
+                pipeline_status = std::unexpected(decoded.error());
+                break;
+            }
+            if (decoded.value().has_value()) {
+                auto handled = processSoftFrame(decoded.value().value());
+                if (!handled.has_value()) {
+                    pipeline_status = handled;
+                    break;
+                }
+            }
+            packet_pts += frame_ticks;
             continue;
         }
         int64_t pts = input.pts;
@@ -1286,7 +1766,26 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         packet_pts += frame_ticks;
     }
 
-    if (pipeline_status.has_value()) {
+    if (pipeline_status.has_value() && soft_decode) {
+        // Phase 8 (Task 8-B1): drain the software decoder at end of stream.
+        for (;;) {
+            auto decoded = soft_decoder->drain();
+            if (!decoded.has_value()) {
+                pipeline_status = std::unexpected(decoded.error());
+                break;
+            }
+            if (!decoded.value().has_value()) {
+                break;  // decoder fully drained
+            }
+            auto handled = processSoftFrame(decoded.value().value());
+            if (!handled.has_value()) {
+                pipeline_status = handled;
+                break;
+            }
+        }
+    }
+
+    if (!soft_decode && pipeline_status.has_value()) {
         const RtxResult flushed_decoder = session.shim().decoderFlush(session.decoder());
         if (flushed_decoder != RTX_OK) {
             pipeline_status = err(mapShimResult(flushed_decoder),
@@ -1294,7 +1793,7 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
                                            session.shim().decoderLastError(session.decoder())));
         }
     }
-    if (pipeline_status.has_value()) {
+    if (!soft_decode && pipeline_status.has_value()) {
         auto drained = drainFrames(true);
         if (!drained.has_value()) {
             pipeline_status = drained;
@@ -1346,8 +1845,130 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
         report.remaster_pack_kernel_max_ms = pack_max_ms;
         report.remaster_pack_launches = previous_stats.pack_launches;
     }
+    // Phase 7 (Task 7-B3): surface the whole-film measured HDR10 statistics.
+    report.measured_max_cll_nits = session.measuredMaxCllNits();
+    report.measured_max_fall_nits = session.measuredMaxFallNits();
 
     return report;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 (Task 7-C2): timeline scrubbing preview.  One full decode ->
+// remaster cycle at an arbitrary seek point, published through the preview
+// callback.  No encoder and no output file are involved.
+// ---------------------------------------------------------------------------
+
+Result<void> runScrubPreview(const HwTranscodeOptions& options, int64_t seek_pts_ms) {
+    if (!options.preview) {
+        return err(ErrorCode::InvalidArgument, "scrub preview requires a preview callback");
+    }
+    if (options.input_path.empty()) {
+        return err(ErrorCode::InvalidArgument, "scrub preview requires an input path");
+    }
+
+    HwTranscodeReport report;
+    auto session_res = NvidiaTranscodeSession::create(options, /*is_remaster=*/true, report,
+                                                      options.target_width, options.target_height);
+    if (!session_res.has_value()) {
+        return std::unexpected(session_res.error());
+    }
+    auto& session = *session_res.value();
+    if (!session.previewReady()) {
+        return err(ErrorCode::Unsupported,
+                   "the loaded NGX bridge does not support the realtime preview path");
+    }
+
+    const MediaInfo& info = session.info();
+    Rational time_base = info.time_base;
+    if (!time_base.valid() || time_base.num <= 0 || time_base.den <= 0) {
+        time_base = Rational{1, 90000};
+    }
+    const int64_t stream_pts =
+        seek_pts_ms <= 0 ? 0
+                         : seek_pts_ms * time_base.den / (1000 * time_base.num);
+    auto sought = session.demuxer()->seekToKeyframeBefore(stream_pts);
+    if (!sought.has_value()) {
+        return sought;
+    }
+
+    const int input_full_range = info.color.range == ColorRange::Full ? 1 : 0;
+    int input_matrix = info.color.matrix == MatrixCoefficients::BT2020NC ? 1 : 0;
+
+    bool frame_ready = false;
+    RtxFrameDesc frame{};
+    int packets_submitted = 0;
+    constexpr int kMaxScrubPackets = 60;
+    while (!frame_ready && packets_submitted < kMaxScrubPackets) {
+        Result<Packet> packet = session.demuxer()->readPacket();
+        if (!packet.has_value()) {
+            break;
+        }
+        if (session.isPassthroughPacket(packet.value())) {
+            continue;
+        }
+        const Packet& input = packet.value();
+        int64_t pts = input.pts;
+        int64_t dts = input.dts;
+        if (pts == std::numeric_limits<int64_t>::min() && dts == std::numeric_limits<int64_t>::min()) {
+            pts = dts = 0;
+        }
+        const RtxResult submitted = session.shim().decoderSubmit(
+            session.decoder(), input.data.data(), input.data.size(),
+            pts == std::numeric_limits<int64_t>::min() ? 0 : pts,
+            dts == std::numeric_limits<int64_t>::min() ? 0 : dts,
+            input.keyframe ? 1 : 0);
+        if (submitted != RTX_OK) {
+            return err(mapShimResult(submitted), describe("cuvidParseVideoData", submitted, nullptr),
+                       session.shim().decoderLastError(session.decoder()));
+        }
+        ++packets_submitted;
+        while (session.shim().decoderReceive(session.decoder(), &frame) == RTX_OK) {
+            frame_ready = true;
+            break;
+        }
+    }
+    if (!frame_ready) {
+        const RtxResult flushed = session.shim().decoderFlush(session.decoder());
+        if (flushed == RTX_OK &&
+            session.shim().decoderReceive(session.decoder(), &frame) == RTX_OK) {
+            frame_ready = true;
+        }
+    }
+    if (!frame_ready) {
+        return err(ErrorCode::NotFound, "no frame was decoded at the requested scrub position");
+    }
+
+    RtxNgxRemasterInput remaster_in{};
+    remaster_in.y_plane = frame.planes[0];
+    remaster_in.uv_plane = frame.planes[1];
+    remaster_in.y_pitch = frame.pitches[0];
+    remaster_in.uv_pitch = frame.pitches[1];
+    remaster_in.format = frame.format;
+    remaster_in.full_range = input_full_range;
+    remaster_in.matrix = input_matrix;
+    remaster_in.preview_rgba10_ptr = session.previewDevicePointer(0);
+    remaster_in.preview_pitch = session.previewPitch();
+    remaster_in.split_x_norm =
+        options.split_ratio != nullptr
+            ? std::clamp(options.split_ratio->load(std::memory_order_relaxed), 0.0f, 1.0f)
+            : 0.5f;
+    RtxNgxRemasterOutput remaster_out{};
+    RtxNgxRemasterStats stats{};
+    const RtxResult remastered =
+        session.bridgeLoader().remaster(session.bridge(), &remaster_in, &remaster_out, &stats);
+    (void)session.releaseDecodedFrame(frame.slot_index);
+    if (remastered != RTX_OK) {
+        return err(mapShimResult(remastered), describe("rtx_ngx_bridge_remaster", remastered, nullptr),
+                   session.bridgeLoader().lastError(session.bridge()));
+    }
+    std::vector<uint8_t> host(static_cast<size_t>(session.previewPitch()) * 540u, 0);
+    const RtxResult downloaded =
+        session.downloadPreviewInto(host.data(), host.size());
+    if (downloaded != RTX_OK) {
+        return err(mapShimResult(downloaded), "preview download failed");
+    }
+    options.preview(host.data(), session.previewPitch());
+    return {};
 }
 
 }  // namespace rtx

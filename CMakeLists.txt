@@ -36,9 +36,10 @@ endif()
 
 option(RTX_BUILD_TESTS "Build the dependency-free unit and integration tests" ON)
 # Windows only.  ON makes CineRTX a /SUBSYSTEM:WINDOWS image whose wWinMain runs
-# the DirectComposition GUI when there are no arguments and the CLI otherwise.
+# the Win32 Native Common Controls Dark Pro GUI when there are no arguments and
+# the CLI otherwise.
 # OFF keeps a plain console CineRTX (used on Linux, which has no GUI backend).
-option(RTX_BUILD_GUI "Build CineRTX with the Win32 DirectComposition GUI front end" ON)
+option(RTX_BUILD_GUI "Build CineRTX with the Win32 Native Common Controls Dark Pro GUI front end" ON)
 # RTX Video is not optional: every Windows build compiles the D3D12/NGX
 # bridge against the RTX Video SDK and stages it under
 # build/external/plugins, then mirrors it to <exe_dir>/plugins/nvidia_rtx.
@@ -136,6 +137,8 @@ set(RTX_CORE_SOURCES
     src/core/geometry.cpp
     src/core/hw_transcode.cpp
     src/core/i18n.cpp
+    src/core/lut3d.cpp
+    src/core/multi_gpu_scheduler.cpp
     src/core/runtime_env.cpp
     src/core/ngx_remaster.cpp
     src/core/nvidia_shim.cpp
@@ -266,11 +269,21 @@ add_custom_command(
     COMMENT "Generating p010_pack_ptx.h in build tree"
     VERBATIM)
 
-set(RTX_NGX_BRIDGE_SOURCES
-    src/shim/ngx_bridge/bridge_exports.cpp
-    src/shim/ngx_bridge/p010_pack_runtime.cpp
-    src/shim/ngx_bridge/d3d12_interop.cpp
-    "${RTX_PTX_HEADER}")
+if(WIN32)
+    # Windows: the bridge speaks D3D12/CUDA interop + NGX (proprietary stub).
+    set(RTX_NGX_BRIDGE_SOURCES
+        src/shim/ngx_bridge/bridge_exports.cpp
+        src/shim/ngx_bridge/p010_pack_runtime.cpp
+        src/shim/ngx_bridge/d3d12_interop.cpp
+        "${RTX_PTX_HEADER}")
+else()
+    # Phase 9 (Task 9-A2): Linux headless pure-CUDA backend - zero Vulkan, zero
+    # D3D12, zero libcudart; the fused remaster kernel ships as embedded PTX.
+    set(RTX_NGX_BRIDGE_SOURCES
+        src/shim/ngx_bridge/ngx_cuda_bridge_linux.cpp
+        src/shim/ngx_bridge/p010_pack_runtime.cpp
+        "${RTX_PTX_HEADER}")
+endif()
 
 if(WIN32)
     add_library(rtx_ngx_bridge SHARED
@@ -466,8 +479,8 @@ endif()
 # CineRTX -- the single self-contained deliverable.
 #
 # One image, two personalities.  With no arguments it is the Win32
-# DirectComposition GUI; with arguments it attaches to the parent console and
-# runs the full CLI, so CTest keeps its captured stdio because
+# Native Common Controls Dark Pro GUI; with arguments it attaches to the parent
+# console and runs the full CLI, so CTest keeps its captured stdio because
 # attachParentConsole() detects a redirected pipe and skips AttachConsole().
 #
 # There is deliberately no rtx_copy_shim_runtime step here: rtx_shim is a
@@ -480,12 +493,15 @@ endif()
 if(WIN32 AND RTX_BUILD_GUI)
     set(RTX_CINERTX_SOURCES
         src/gui/rtx_gui.cpp
+        src/gui/preview_viewport.cpp
         src/cli/main.cpp
+        src/cli/daemon_rpc.cpp
         src/cli/shim_probe.cpp)
 else()
     set(RTX_CINERTX_SOURCES
         src/cli/main.cpp
         src/cli/main_entry.cpp
+        src/cli/daemon_rpc.cpp
         src/cli/shim_probe.cpp)
 endif()
 
@@ -494,7 +510,7 @@ add_executable(rtx::cinertx ALIAS CineRTX)
 target_link_libraries(CineRTX PRIVATE rtx_core)
 if(WIN32)
     # CommandLineToArgvW: wWinMain rebuilds argv as UTF-8 so non-ASCII paths work.
-    target_link_libraries(CineRTX PRIVATE shell32)
+    target_link_libraries(CineRTX PRIVATE shell32 ws2_32)
 endif()
 if(WIN32 AND RTX_BUILD_GUI)
     target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 comdlg32 comctl32 uxtheme d3d12 dxgi)
@@ -578,20 +594,6 @@ if(WIN32)
     # A phony target is always dirty, so every CineRTX build re-runs the stage
     # step even when the executable itself is up to date.
     add_dependencies(CineRTX rtx_stage_ngx_plugin)
-
-    # -----------------------------------------------------------------------
-    # NVIDIA SDK runtimes (Optical Flow + TensorRT)
-    #
-    # These are *not* plugins: the shim opens NvOFFRUC.dll and nvinfer_10.dll by
-    # explicit path in the executable directory and both have system_fallback
-    # disabled, so they belong beside CineRTX.exe.  cudart64_110.dll is a hard
-    # dependency of the FRUC DLL (loading it alone fails with error 126), and
-    # nvonnxparser_10.dll is what trt_dynamic.cpp loads for the ONNX parser, so
-    # all of them ship together.  The destination is resolved from the CineRTX
-    # property instead of TARGET_FILE_DIR:CineRTX for the same reason as above:
-    # a generator expression would add a dependency edge back to CineRTX and
-    # form a cycle with the dependency below.
-    # -----------------------------------------------------------------------
 endif()
 
 # ---------------------------------------------------------------------------
@@ -602,10 +604,13 @@ if(RTX_BUILD_TESTS)
     set(RTX_TEST_SOURCES
         tests/test_color.cpp
         tests/test_concurrency.cpp
+        tests/test_daemon_rpc.cpp
         tests/test_flicks_timebase.cpp
+        tests/test_fuzz_resilience.cpp
         tests/test_hdr.cpp
         tests/test_i18n.cpp
         tests/test_io.cpp
+        tests/test_lut3d.cpp
         tests/unit/test_audio_stream_copy.cpp
         tests/test_main.cpp
         tests/test_rational.cpp
@@ -615,10 +620,11 @@ if(RTX_BUILD_TESTS)
         tests/test_vram.cpp)
 
     add_executable(rtx_tests ${RTX_TEST_SOURCES}
-        src/cli/shim_probe.cpp)
+        src/cli/shim_probe.cpp
+        src/cli/daemon_rpc.cpp)
     target_link_libraries(rtx_tests PRIVATE rtx_core rtx_project_options)
     if(WIN32)
-        target_link_libraries(rtx_tests PRIVATE rtx_ngx_bridge_static)
+        target_link_libraries(rtx_tests PRIVATE rtx_ngx_bridge_static ws2_32)
     endif()
     if(CMAKE_DL_LIBS)
         target_link_libraries(rtx_tests PRIVATE ${CMAKE_DL_LIBS})
@@ -647,12 +653,6 @@ if(RTX_BUILD_TESTS)
     # default is 1500 s per test).
     add_test(NAME rtx_unit_tests COMMAND rtx_tests)
     set_tests_properties(rtx_unit_tests PROPERTIES TIMEOUT 300)
-
-    # Gate 6 (W9): DirectComposition viewport throttle / occlusion / self-heal.
-    add_test(NAME cli_gui_viewport_smoke_test COMMAND CineRTX --viewport-self-test)
-    set_tests_properties(cli_gui_viewport_smoke_test PROPERTIES
-        PASS_REGULAR_EXPRESSION "viewport self-test PASS"
-        TIMEOUT 60)
 endif()
 
 # ---------------------------------------------------------------------------

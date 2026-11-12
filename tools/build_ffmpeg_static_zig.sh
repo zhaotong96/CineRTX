@@ -154,11 +154,11 @@ chmod +x "${WRAPPER_DIR}/znm"
     --enable-avcodec \
     --enable-avformat \
     --enable-protocol=file,pipe,data \
-    --enable-demuxer=mov,matroska,mpegts,flv,avi,aac,mp3,flac,ogg,wav,w64 \
+    --enable-demuxer=mov,matroska,mpegts,flv,avi,mxf,aac,mp3,flac,ogg,wav,w64 \
     --enable-muxer=mp4,mov,matroska,webm,mpegts,flv,adts,flac,opus,wav,w64,null \
     --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,av1_metadata,extract_extradata,aac_adtstoasc,vp9_superframe,vp9_raw_reorder,null \
     --enable-parser=h264,hevc,av1,vp9,mpeg4video,aac,aac_latm,opus,mpegaudio,flac,ac3,vorbis \
-    --enable-decoder=aac,aac_fixed,aac_latm,opus,mp3,mp3float,flac,ac3,eac3,vorbis,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le,pcm_f32be,pcm_f64le,pcm_alaw,pcm_mulaw \
+    --enable-decoder=prores,dnxhd,dvvideo,aac,aac_fixed,aac_latm,opus,mp3,mp3float,flac,ac3,eac3,vorbis,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le,pcm_f32be,pcm_f64le,pcm_alaw,pcm_mulaw \
     --enable-encoder=aac,opus,eac3,ac3,flac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
     --extra-cflags="-O2 -D_WIN32_WINNT=0x0A00"
 

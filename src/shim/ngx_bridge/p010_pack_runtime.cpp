@@ -117,6 +117,8 @@ struct PackState {
     // R10G10B10A2) and the pack v2 kernel (TrueHDR scRGB -> BT.2020 PQ P010).
     CUfunction preprocess_kernel = nullptr;
     CUfunction pack_v2_kernel = nullptr;
+    // Phase 9: the headless fused remaster kernel (optional in older PTX).
+    CUfunction fused_remaster_kernel = nullptr;
     // The primary context retained at load time.  CUcontext follows strict
     // thread-local binding semantics: a worker thread that never ran the load
     // path has no current context, and D3D12 calls can detach the context at
@@ -218,6 +220,11 @@ bool ensureLoaded(PackState& pack) {
         pack.preprocess_kernel = preprocess_found == kSuccess ? pack.preprocess_kernel : nullptr;
         pack.pack_v2_kernel = pack2_found == kSuccess ? pack.pack_v2_kernel : nullptr;
     }
+    // Phase 9: the fused Linux remaster kernel is optional in the same way.
+    CUfunction fused_kernel = nullptr;
+    const CUresult fused_found = pack.api.module_get_function(
+        &fused_kernel, pack.module, "rtx_cuda_remaster_fused_p010");
+    pack.fused_remaster_kernel = fused_found == kSuccess ? fused_kernel : nullptr;
     pack.ready = true;
     return true;
 }
@@ -310,9 +317,22 @@ RtxResult launchPackV2(const PackV2Launch& launch, void* stream) {
     int input_is_pq = launch.input_is_pq != 0 ? 1 : 0;
     int input_is_scrgb = launch.input_is_scrgb != 0 ? 1 : 0;
     float nits = launch.linear_scale_nits > 0.0f ? launch.linear_scale_nits : 80.0f;
+    // Phase 7 fused stages.
+    unsigned long long lut_tex = launch.lut_tex;
+    int lut_dim = launch.lut_dim;
+    unsigned long long stats_devptr = launch.stats_devptr;
+    unsigned long long preview_ptr = launch.preview_ptr;
+    int preview_width = launch.preview_width;
+    int preview_height = launch.preview_height;
+    int preview_pitch_px = launch.preview_pitch_px;
+    float split_x_norm = launch.split_x_norm;
+    unsigned long long src_surface = launch.src_surface;
 
-    void* arguments[] = {&surface, &y_plane, &uv_plane, &width,  &height,
-                         &y_pitch, &uv_pitch, &input_is_pq, &input_is_scrgb, &nits};
+    void* arguments[] = {&surface,   &y_plane,       &uv_plane,       &width,
+                         &height,    &y_pitch,       &uv_pitch,       &input_is_pq,
+                         &input_is_scrgb, &nits,     &lut_tex,        &lut_dim,
+                         &stats_devptr, &preview_ptr, &preview_width, &preview_height,
+                         &preview_pitch_px, &split_x_norm, &src_surface};
     const unsigned block = 16;
     const unsigned grid_x = (static_cast<unsigned>(width) / 2u + block - 1u) / block;
     const unsigned grid_y = (static_cast<unsigned>(height) / 2u + block - 1u) / block;
@@ -325,6 +345,73 @@ RtxResult launchPackV2(const PackV2Launch& launch, void* stream) {
             (void)pack.api.get_error_name(launched, &name);
         }
         pack.error = std::string("cuLaunchKernel failed for rtx_rgba16f_to_p010_bt2020nc_v2: ") +
+                     name;
+        return RTX_ERR_INTERNAL;
+    }
+    return RTX_OK;
+}
+
+RtxResult launchFusedRemaster(const FusedRemasterLaunch& launch, void* stream) {
+    if (launch.src_y == 0 || launch.src_uv == 0 || launch.dst_y == 0 || launch.dst_uv == 0 ||
+        launch.src_width <= 0 || launch.src_height <= 0 || launch.dst_width <= 0 ||
+        launch.dst_height <= 0 || launch.src_y_pitch == 0 || launch.src_uv_pitch == 0 ||
+        launch.dst_y_pitch_samples == 0 || launch.dst_uv_pitch_samples == 0) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    PackState& pack = state();
+    std::lock_guard<std::mutex> lock(pack.mutex);
+    if (!ensureLoaded(pack)) {
+        return RTX_ERR_NGX;
+    }
+    if (pack.fused_remaster_kernel == nullptr) {
+        pack.error = "kernel rtx_cuda_remaster_fused_p010 is missing from the PTX module";
+        return RTX_ERR_UNSUPPORTED;
+    }
+    if (!bindPrimaryContext(pack)) {
+        return RTX_ERR_INTERNAL;
+    }
+
+    unsigned long long src_y = launch.src_y;
+    unsigned long long src_uv = launch.src_uv;
+    int src_y_pitch = static_cast<int>(launch.src_y_pitch);
+    int src_uv_pitch = static_cast<int>(launch.src_uv_pitch);
+    int src_format = launch.src_format;
+    int src_full_range = launch.src_full_range;
+    int src_matrix = launch.src_matrix;
+    unsigned long long dst_y = launch.dst_y;
+    unsigned long long dst_uv = launch.dst_uv;
+    int dst_y_pitch = static_cast<int>(launch.dst_y_pitch_samples);
+    int dst_uv_pitch = static_cast<int>(launch.dst_uv_pitch_samples);
+    int src_width = launch.src_width;
+    int src_height = launch.src_height;
+    int dst_width = launch.dst_width;
+    int dst_height = launch.dst_height;
+    unsigned long long lut_tex = launch.lut_tex;
+    int lut_dim = launch.lut_dim;
+    int vsr_quality = launch.vsr_quality;
+    int enable_itm = launch.enable_itm;
+    float max_luminance = launch.max_luminance;
+    float y_norm_prev = launch.y_norm_prev;
+    unsigned long long stats_devptr = launch.stats_devptr;
+
+    void* arguments[] = {&src_y,      &src_uv,       &src_y_pitch,  &src_uv_pitch,
+                         &src_format, &src_full_range, &src_matrix, &dst_y,
+                         &dst_uv,     &dst_y_pitch,  &dst_uv_pitch, &src_width,
+                         &src_height, &dst_width,    &dst_height,   &lut_tex,
+                         &lut_dim,    &vsr_quality,  &enable_itm,   &max_luminance,
+                         &y_norm_prev, &stats_devptr};
+    const unsigned block = 16;
+    const unsigned grid_x = (static_cast<unsigned>(launch.dst_width) / 2u + block - 1u) / block;
+    const unsigned grid_y = (static_cast<unsigned>(launch.dst_height) / 2u + block - 1u) / block;
+    const CUresult launched =
+        pack.api.launch_kernel(pack.fused_remaster_kernel, grid_x, grid_y, 1, block, block, 1, 0,
+                               reinterpret_cast<CUstream>(stream), arguments, nullptr);
+    if (launched != kSuccess) {
+        const char* name = "CUDA error";
+        if (pack.api.get_error_name != nullptr) {
+            (void)pack.api.get_error_name(launched, &name);
+        }
+        pack.error = std::string("cuLaunchKernel failed for rtx_cuda_remaster_fused_p010: ") +
                      name;
         return RTX_ERR_INTERNAL;
     }

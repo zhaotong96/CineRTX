@@ -74,6 +74,33 @@ const GUID kIidFence = {0x0a753dcf,
 
 constexpr unsigned kExternalMemoryDedicated = 0x1;
 
+// Phase 7: the dynlink_cuda.h header predates the 3D copy entry point, so the
+// stable driver-ABI struct is declared here and cuMemcpy3D_v2 is resolved
+// dynamically (same pattern as every other driver symbol).
+struct CUDA_MEMCPY3D {
+    unsigned int srcXInBytes;
+    unsigned int srcY;
+    unsigned int srcZ;
+    unsigned int srcLOD;
+    CUmemorytype srcMemoryType;
+    const void* srcHost;
+    CUdeviceptr srcDevice;
+    CUarray srcArray;
+    unsigned int srcPitch;
+    unsigned int dstXInBytes;
+    unsigned int dstY;
+    unsigned int dstZ;
+    unsigned int dstLOD;
+    CUmemorytype dstMemoryType;
+    void* dstHost;
+    CUdeviceptr dstDevice;
+    CUarray dstArray;
+    unsigned int dstPitch;
+    unsigned int WidthInBytes;
+    unsigned int Height;
+    unsigned int Depth;
+};
+
 // dynlink_cuda.h covers the decode/encode path; the surface-object entry points
 // are declared here so the bridge stays self-contained.
 using CUsurfObject = unsigned long long;
@@ -180,6 +207,19 @@ struct CudaApi {
     CUresult (*event_destroy)(CUevent) = nullptr;
     CUresult (*memset_d2d16)(CUdeviceptr, size_t, unsigned short, size_t, size_t) = nullptr;
     CUresult (*memset_d16)(CUdeviceptr, unsigned short, size_t) = nullptr;
+    // Phase 7 (Task 7-A2): stream-ordered statistic-slot reset for the fused
+    // pack kernel and the FP16 3D LUT texture upload used by
+    // rtx_ngx_bridge_set_lut3d.  Resolved optionally so an older driver keeps
+    // the non-LUT paths working.
+    CUresult (*memset_d32_async)(CUdeviceptr, unsigned int, size_t, CUstream) = nullptr;
+    CUresult (*array3d_create)(CUarray*, const CUDA_ARRAY3D_DESCRIPTOR*) = nullptr;
+    CUresult (*array_destroy)(CUarray) = nullptr;
+    using CUtexObject = unsigned long long;
+    CUresult (*tex_object_create)(CUtexObject*, const CUDA_RESOURCE_DESC*,
+                                  const CUDA_TEXTURE_DESC*,
+                                  const CUDA_RESOURCE_VIEW_DESC*) = nullptr;
+    CUresult (*tex_object_destroy)(CUtexObject) = nullptr;
+    CUresult (*memcpy3d)(const CUDA_MEMCPY3D*) = nullptr;
 
     bool load(std::string* error) {
         HMODULE module = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -288,6 +328,22 @@ struct CudaApi {
         memset_d16 = reinterpret_cast<decltype(memset_d16)>(sym("cuMemsetD16_v2"));
         if (memset_d16 == nullptr) {
             memset_d16 = reinterpret_cast<decltype(memset_d16)>(sym("cuMemsetD16"));
+        }
+        memset_d32_async =
+            reinterpret_cast<decltype(memset_d32_async)>(sym("cuMemsetD32Async"));
+        array3d_create =
+            reinterpret_cast<decltype(array3d_create)>(sym("cuArray3DCreate_v2"));
+        if (array3d_create == nullptr) {
+            array3d_create = reinterpret_cast<decltype(array3d_create)>(sym("cuArray3DCreate"));
+        }
+        array_destroy = reinterpret_cast<decltype(array_destroy)>(sym("cuArrayDestroy"));
+        tex_object_create =
+            reinterpret_cast<decltype(tex_object_create)>(sym("cuTexObjectCreate"));
+        tex_object_destroy =
+            reinterpret_cast<decltype(tex_object_destroy)>(sym("cuTexObjectDestroy"));
+        memcpy3d = reinterpret_cast<decltype(memcpy3d)>(sym("cuMemcpy3D_v2"));
+        if (memcpy3d == nullptr) {
+            memcpy3d = reinterpret_cast<decltype(memcpy3d)>(sym("cuMemcpy3D"));
         }
         // The external-semaphore family is optional: older drivers keep the
         // CPU-wait fallback alive.  Everything else is mandatory.
@@ -904,6 +960,178 @@ bool D3D12Interop::free_device(uint64_t device_ptr, std::string* error) {
         return false;
     }
     return true;
+}
+
+bool D3D12Interop::memset_d32_async(uint64_t device_ptr, unsigned int value, size_t count,
+                                    void* stream, std::string* error) {
+    if (device_ptr == 0 || count == 0) {
+        *error = "memset_d32_async requires a device pointer and a count";
+        return false;
+    }
+    CudaApi& cuda = cudaApi();
+    if (cuda.memset_d32_async == nullptr) {
+        *error = "the CUDA driver lacks cuMemsetD32Async";
+        return false;
+    }
+    if (!bind_context(error)) {
+        return false;
+    }
+    const CUresult cleared = cuda.memset_d32_async(static_cast<CUdeviceptr>(device_ptr), value,
+                                                   count, static_cast<CUstream>(stream));
+    if (cleared != CUDA_SUCCESS) {
+        *error = std::string("cuMemsetD32Async failed: ") + cudaErrorName(cleared);
+        return false;
+    }
+    return true;
+}
+
+bool D3D12Interop::memcpy_dtoh(void* destination, uint64_t source, size_t bytes,
+                               std::string* error) {
+    if (destination == nullptr || source == 0 || bytes == 0) {
+        *error = "memcpy_dtoh requires a destination, a source and a size";
+        return false;
+    }
+    CudaApi& cuda = cudaApi();
+    if (cuda.memcpy2d == nullptr) {
+        *error = "the CUDA driver lacks cuMemcpy2D";
+        return false;
+    }
+    if (!bind_context(error)) {
+        return false;
+    }
+    CUDA_MEMCPY2D copy{};
+    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcDevice = static_cast<CUdeviceptr>(source);
+    copy.dstMemoryType = CU_MEMORYTYPE_HOST;
+    copy.dstHost = destination;
+    copy.WidthInBytes = bytes;
+    copy.Height = 1;
+    const CUresult copied = cuda.memcpy2d(&copy);
+    if (copied != CUDA_SUCCESS) {
+        *error = std::string("cuMemcpy2D (D2H) failed: ") + cudaErrorName(copied);
+        return false;
+    }
+    return true;
+}
+
+bool D3D12Interop::memcpy_htod(uint64_t destination, const void* source, size_t bytes,
+                               std::string* error) {
+    if (destination == 0 || source == nullptr || bytes == 0) {
+        *error = "memcpy_htod requires a destination, a source and a size";
+        return false;
+    }
+    CudaApi& cuda = cudaApi();
+    if (cuda.memcpy2d == nullptr) {
+        *error = "the CUDA driver lacks cuMemcpy2D";
+        return false;
+    }
+    if (!bind_context(error)) {
+        return false;
+    }
+    CUDA_MEMCPY2D copy{};
+    copy.srcMemoryType = CU_MEMORYTYPE_HOST;
+    copy.srcHost = source;
+    copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.dstDevice = static_cast<CUdeviceptr>(destination);
+    copy.WidthInBytes = bytes;
+    copy.Height = 1;
+    const CUresult copied = cuda.memcpy2d(&copy);
+    if (copied != CUDA_SUCCESS) {
+        *error = std::string("cuMemcpy2D (H2D) failed: ") + cudaErrorName(copied);
+        return false;
+    }
+    return true;
+}
+
+bool D3D12Interop::create_lut_texture(const uint16_t* lut_half4_data, int32_t grid_size,
+                                      void** texture_object, void** array_out,
+                                      std::string* error) {
+    if (texture_object == nullptr || array_out == nullptr) {
+        *error = "create_lut_texture requires output pointers";
+        return false;
+    }
+    *texture_object = nullptr;
+    *array_out = nullptr;
+    CudaApi& cuda = cudaApi();
+    if (cuda.array3d_create == nullptr || cuda.tex_object_create == nullptr ||
+        cuda.array_destroy == nullptr || cuda.tex_object_destroy == nullptr ||
+        cuda.memcpy3d == nullptr) {
+        *error = "the CUDA driver lacks the 3D texture-object API";
+        return false;
+    }
+    if (!bind_context(error)) {
+        return false;
+    }
+    CUDA_ARRAY3D_DESCRIPTOR array_desc{};
+    array_desc.Width = static_cast<size_t>(grid_size);
+    array_desc.Height = static_cast<size_t>(grid_size);
+    array_desc.Depth = static_cast<size_t>(grid_size);
+    array_desc.Format = CU_AD_FORMAT_HALF;
+    array_desc.NumChannels = 4;
+    array_desc.Flags = 0;
+    CUarray array = nullptr;
+    const CUresult created = cuda.array3d_create(&array, &array_desc);
+    if (created != CUDA_SUCCESS || array == nullptr) {
+        *error = std::string("cuArray3DCreate failed: ") + cudaErrorName(created);
+        return false;
+    }
+    // Upload the whole N^3 table with one cuMemcpy3D call (the dynlink header
+    // predates the 3D entry point, so the struct and symbol are declared
+    // locally against the stable driver ABI).
+    CUDA_MEMCPY3D copy{};
+    copy.srcMemoryType = CU_MEMORYTYPE_HOST;
+    copy.srcHost = lut_half4_data;
+    copy.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+    copy.dstArray = array;
+    copy.WidthInBytes = static_cast<unsigned>(grid_size) * 4u * sizeof(uint16_t);
+    copy.Height = static_cast<unsigned>(grid_size);
+    copy.Depth = static_cast<unsigned>(grid_size);
+    const CUresult copied = cuda.memcpy3d(&copy);
+    if (copied != CUDA_SUCCESS) {
+        *error = std::string("cuMemcpy3D (LUT H2D) failed: ") + cudaErrorName(copied);
+        (void)cuda.array_destroy(array);
+        return false;
+    }
+    CUDA_RESOURCE_DESC resource_desc{};
+    resource_desc.resType = CU_RESOURCE_TYPE_ARRAY;
+    resource_desc.res.array.hArray = array;
+    CUDA_TEXTURE_DESC texture_desc{};
+    texture_desc.addressMode[0] = CU_TR_ADDRESS_MODE_CLAMP;
+    texture_desc.addressMode[1] = CU_TR_ADDRESS_MODE_CLAMP;
+    texture_desc.addressMode[2] = CU_TR_ADDRESS_MODE_CLAMP;
+    texture_desc.filterMode = CU_TR_FILTER_MODE_LINEAR;
+    // The dynlink header only declares CU_TRSF_READ_AS_INTEGER (1); the
+    // normalized-coordinate flag is 2 in the stable driver ABI.
+    texture_desc.flags = 2u /* CU_TRSF_NORMALIZED_COORDINATES */;
+    CUtexObject tex_object = 0;
+    const CUresult tex_created =
+        cuda.tex_object_create(&tex_object, &resource_desc, &texture_desc, nullptr);
+    if (tex_created != CUDA_SUCCESS || tex_object == 0) {
+        *error = std::string("cuTexObjectCreate failed: ") + cudaErrorName(tex_created);
+        (void)cuda.array_destroy(array);
+        return false;
+    }
+    *texture_object = reinterpret_cast<void*>(static_cast<uintptr_t>(tex_object));
+    *array_out = array;
+    return true;
+}
+
+void D3D12Interop::destroy_lut_texture(void** texture_object, void** array) noexcept {
+    if (texture_object != nullptr && *texture_object != nullptr) {
+        CudaApi& cuda = cudaApi();
+        if (cuda.tex_object_destroy != nullptr) {
+            (void)cuda.tex_object_destroy(static_cast<CudaApi::CUtexObject>(
+                reinterpret_cast<uintptr_t>(*texture_object)));
+        }
+        *texture_object = nullptr;
+    }
+    if (array != nullptr && *array != nullptr) {
+        CudaApi& cuda = cudaApi();
+        if (cuda.array_destroy != nullptr) {
+            (void)cuda.array_destroy(static_cast<CUarray>(*array));
+        }
+        *array = nullptr;
+    }
 }
 
 bool D3D12Interop::event_create(void** event, std::string* error) {

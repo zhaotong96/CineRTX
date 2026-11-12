@@ -147,6 +147,8 @@ typedef struct RtxEncoderConfig {
     int32_t gop_length;   /* 0 = encoder default */
     int32_t rate_control; /* 0 = CBR, 1 = VBR, 2 = const-QP */
     int32_t qp;           /* used when rate_control == 2 */
+    /* Phase 8 (Task 8-A1): explicit multi-GPU binding.  0 = default GPU. */
+    int32_t device_index;
 } RtxEncoderConfig;
 
 typedef struct RtxDecoderConfig {
@@ -158,6 +160,9 @@ typedef struct RtxDecoderConfig {
     int32_t clock_rate;  /* timestamps per second; 0 = 90 kHz */
     int32_t max_surfaces;/* 0 = auto */
     int32_t pool_slots;  /* 0 = 8 */
+    /* Phase 8 (Task 8-A1): explicit multi-GPU binding.  0 = default GPU; the
+     * session retains the primary context of exactly this device. */
+    int32_t device_index;
 } RtxDecoderConfig;
 
 typedef struct RtxHwStats {
@@ -215,6 +220,21 @@ typedef struct RtxBackendVTable {
 
 /* Probe the local NVIDIA stack without creating a CUDA context. */
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_probe(RtxDiagnostics* diagnostics);
+
+/* -------------------------------------------------------------------------
+ * Phase 8 (Task 8-A1): multi-GPU topology enumeration.
+ * Every sm_75+ NVIDIA device visible to the driver, with the capability bits
+ * the dispatcher needs to shard work (NVENC AV1 / HEVC Main10, NVDEC, VSR).
+ * ---------------------------------------------------------------------- */
+#define RTX_MAX_GPUS 8
+
+typedef struct RtxGpuTopology {
+    uint32_t device_count;
+    RtxDeviceInfo devices[RTX_MAX_GPUS];
+    uint8_t reserved[128];
+} RtxGpuTopology;
+
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_enumerate_devices(RtxGpuTopology* topology);
 
 /* Create an opaque NVIDIA backend.  Returns RTX_ERR_ARCH_UNSUPPORTED when the
  * requested features require Turing (7.5) or newer and the device is older. */

@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <limits>
 #include <numeric>
@@ -251,10 +253,23 @@ Result<Rational> Rational::parse(std::string_view text) {
     }
 
     double dbl_val = 0.0;
+    // Zig's bundled libc++ (LLVM 18/19) has no floating-point std::from_chars
+    // overload.  std::strtod is the byte-identical fallback for this host
+    // path; MSVC keeps the locale-independent from_chars semantics.
+#if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 200000
+    const std::string dbl_text(text.data(), text.size());
+    char* dbl_end = nullptr;
+    errno = 0;
+    dbl_val = std::strtod(dbl_text.c_str(), &dbl_end);
+    if (dbl_end != dbl_text.c_str() + dbl_text.size() || dbl_end == dbl_text.c_str()) {
+        return err(ErrorCode::InvalidArgument, "malformed rational", std::string(text));
+    }
+#else
     const auto res_dbl = std::from_chars(text.data(), text.data() + text.size(), dbl_val);
     if (res_dbl.ec != std::errc{} || res_dbl.ptr != text.data() + text.size()) {
         return err(ErrorCode::InvalidArgument, "malformed rational", std::string(text));
     }
+#endif
     if (dbl_val <= 0.0) {
         return err(ErrorCode::InvalidArgument, "rational must be positive");
     }

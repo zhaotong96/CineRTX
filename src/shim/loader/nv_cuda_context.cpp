@@ -36,7 +36,7 @@ std::string cudaError(const DriverTable& driver, const char* operation, CUresult
 
 Context::~Context() { close(); }
 
-bool Context::open(std::string* error) {
+bool Context::open(std::string* error, int device_index) {
     if (valid()) {
         return true;
     }
@@ -71,7 +71,10 @@ bool Context::open(std::string* error) {
         }
         return false;
     }
-    result = driver_.cuDeviceGet(&device_, 0);
+    // Phase 8 (Task 8-A1): bind the requested GPU explicitly instead of
+    // falling back to the process-global default device 0.
+    const int requested_device = device_index < 0 ? 0 : device_index;
+    result = driver_.cuDeviceGet(&device_, requested_device);
     if (result != CUDA_SUCCESS) {
         if (error != nullptr) {
             *error = cudaError(driver_, "cuDeviceGet", result);

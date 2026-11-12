@@ -153,6 +153,17 @@ public:
     bool clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t width, uint32_t height,
                           std::string* error);
     bool free_device(uint64_t device_ptr, std::string* error);
+    // Phase 7 (Task 7-A2/7-A3): stream-ordered uint32-slot reset, a plain D2H
+    // copy for the realtime preview download, and the FP16 3D LUT texture
+    // upload (texture + backing array are returned together and destroyed
+    // together).  All bind the retained primary context first.
+    bool memset_d32_async(uint64_t device_ptr, unsigned int value, size_t count, void* stream,
+                          std::string* error);
+    bool memcpy_dtoh(void* destination, uint64_t source, size_t bytes, std::string* error);
+    bool memcpy_htod(uint64_t destination, const void* source, size_t bytes, std::string* error);
+    bool create_lut_texture(const uint16_t* lut_half4_data, int32_t grid_size,
+                            void** texture_object, void** array, std::string* error);
+    void destroy_lut_texture(void** texture_object, void** array) noexcept;
     bool event_create(void** event, std::string* error);
     void event_destroy(void* event) noexcept;
     bool event_record(void* event, void* stream, std::string* error);

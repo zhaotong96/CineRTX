@@ -51,6 +51,7 @@ extern "C" {
 #include "bitstream.h"
 #include "memory_avio.h"
 #include "rtx/rational.h"
+#include "rtx/timestamp_guard.h"
 #include "rtx/status.h"
 
 namespace rtx {
@@ -79,6 +80,10 @@ VideoCodec codecFromAv(AVCodecID id) {
             return VideoCodec::HEVC;
         case AV_CODEC_ID_AV1:
             return VideoCodec::AV1;
+        case AV_CODEC_ID_PRORES:
+            return VideoCodec::ProRes;
+        case AV_CODEC_ID_DNXHD:
+            return VideoCodec::Dnxhd;
         default:
             return VideoCodec::Unknown;
     }
@@ -400,6 +405,14 @@ public:
                 av_packet_unref(packet_);
                 return p;
             }
+            // Phase 7 (Task 7-B3): forward every passthrough-eligible
+            // secondary audio / subtitle packet with its own time base.
+            if (isPassthroughIndex(packet_->stream_index)) {
+                Packet p = convertPacket(*packet_);
+                p.stream_index = packet_->stream_index;
+                av_packet_unref(packet_);
+                return p;
+            }
             if (packet_->stream_index != video_stream_) {
                 av_packet_unref(packet_);
                 continue;
@@ -423,7 +436,45 @@ public:
 
     int audioStreamIndex() const noexcept override { return audio_stream_; }
 
+    // Phase 7 scrubbing / Phase 8 checkpoint recovery: avformat_seek_file to
+    // the latest key frame at or before the requested video PTS, then reset
+    // the buffered state so readPacket resumes from that point.
+    Result<void> seekToKeyframeBefore(int64_t video_stream_pts) override {
+        if (format_ == nullptr || video_stream_ < 0) {
+            return err(ErrorCode::State, "demuxer is not open");
+        }
+        const int64_t target =
+            video_stream_pts == std::numeric_limits<int64_t>::min()
+                ? 0
+                : video_stream_pts;
+        // av_seek_frame with BACKWARD: the avformat_seek_file variant forced a
+        // [INT64_MIN, 0] ts range that fails (EPERM/EINVAL) for any mid-stream
+        // target; the single-timestamp form is the canonical key-frame seek.
+        const int status = av_seek_frame(format_, video_stream_, target,
+                                         AVSEEK_FLAG_BACKWARD);
+        if (status < 0) {
+            return err(ErrorCode::Io, "cannot seek to the requested key frame",
+                       avErrorString(status));
+        }
+        pending_.clear();
+        drained_ = false;
+        bitstream_filter_flushed_ = false;
+        video_guard_.reset();
+        audio_guard_.reset();
+        return {};
+    }
+
+
 private:
+    // Phase 7 (Task 7-B3): true when the stream rides the passthrough set.
+    bool isPassthroughIndex(int stream_index) const noexcept {
+        if (stream_index == audio_stream_) {
+            return false;  // handled by the primary-audio branch above
+        }
+        return std::any_of(passthrough_indices_.begin(), passthrough_indices_.end(),
+                           [stream_index](int index) { return index == stream_index; });
+    }
+
     Result<MediaInfo> finishOpen(const std::filesystem::path& path) {
         int status = avformat_find_stream_info(format_, nullptr);
         if (status < 0) {
@@ -499,11 +550,53 @@ private:
                     });
                 }
                 info.audio_tracks.push_back(std::move(track));
+                // Phase 7 (Task 7-B3): every audio stream joins the
+                // passthrough set, not only the primary one.
+                PassthroughStreamInfo passthrough;
+                passthrough.stream_index = static_cast<int>(i);
+                passthrough.codec_type = 1;  // audio
+                passthrough.codec_id = st->codecpar->codec_id;
+                passthrough.codec_name = avcodec_get_name(st->codecpar->codec_id);
+                passthrough.time_base = Rational{st->time_base.num, st->time_base.den};
+                if (cloned_par != nullptr) {
+                    passthrough.opaque_codecpar = info.audio_tracks.back().opaque_codecpar;
+                }
+                info.passthrough_streams.push_back(std::move(passthrough));
             } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
                 ++info.subtitle_streams;
+                // Phase 7 (Task 7-B3): text-based subtitles (subrip / ass /
+                // mov_text / webvtt) ride along bitstream-level; the muxer
+                // filters what the output container can actually carry.
+                const int codec_id = static_cast<int>(st->codecpar->codec_id);
+                if (codec_id == AV_CODEC_ID_SUBRIP || codec_id == AV_CODEC_ID_ASS ||
+                    codec_id == AV_CODEC_ID_SSA || codec_id == AV_CODEC_ID_WEBVTT ||
+                    codec_id == AV_CODEC_ID_MOV_TEXT) {
+                    PassthroughStreamInfo passthrough;
+                    passthrough.stream_index = static_cast<int>(i);
+                    passthrough.codec_type = 2;  // subtitle
+                    passthrough.codec_id = codec_id;
+                    passthrough.codec_name = avcodec_get_name(st->codecpar->codec_id);
+                    passthrough.time_base = Rational{st->time_base.num, st->time_base.den};
+                    AVCodecParameters* cloned_par = avcodec_parameters_alloc();
+                    if (cloned_par != nullptr) {
+                        avcodec_parameters_copy(cloned_par, st->codecpar);
+                        passthrough.opaque_codecpar = std::shared_ptr<void>(cloned_par, [](void* p) {
+                            if (p != nullptr) {
+                                AVCodecParameters* cp = static_cast<AVCodecParameters*>(p);
+                                avcodec_parameters_free(&cp);
+                            }
+                        });
+                    }
+                    info.passthrough_streams.push_back(std::move(passthrough));
+                }
             }
         }
         info.primary_audio_index = audio_stream_;
+        // Phase 7 (Task 7-B3): snapshot the passthrough set for readPacket.
+        passthrough_indices_.clear();
+        for (const PassthroughStreamInfo& entry : info.passthrough_streams) {
+            passthrough_indices_.push_back(entry.stream_index);
+        }
         info.color = colorFromAv(*stream->codecpar);
         info.hdr = hdrFromSideData(*stream->codecpar);
         info.hdr_source = info.hdr.enabled;
@@ -655,10 +748,12 @@ private:
         packet.duration = source.duration;
         packet.keyframe = (source.flags & AV_PKT_FLAG_KEY) != 0;
         packet.stream_index = source.stream_index;
-        if (source.stream_index == audio_stream_ && audio_stream_ >= 0 && format_ != nullptr &&
-            static_cast<unsigned int>(audio_stream_) < format_->nb_streams) {
-            packet.time_base = Rational{format_->streams[audio_stream_]->time_base.num,
-                                        format_->streams[audio_stream_]->time_base.den};
+        if (source.stream_index >= 0 &&
+            static_cast<unsigned int>(source.stream_index) < format_->nb_streams) {
+            // Phase 7 (Task 7-B3): every packet carries its own stream's time
+            // base so the muxer can rescale any passthrough stream correctly.
+            packet.time_base = Rational{format_->streams[source.stream_index]->time_base.num,
+                                        format_->streams[source.stream_index]->time_base.den};
         } else {
             packet.time_base = info_.time_base;
         }
@@ -713,6 +808,9 @@ private:
     bool last_audio_flicks_valid_ = false;
     int video_stream_ = -1;
     int audio_stream_ = -1;
+    // Phase 7 (Task 7-B3): secondary audio + subtitle indices forwarded to
+    // the caller (subset of info_.passthrough_streams).
+    std::vector<int> passthrough_indices_;
     bool drained_ = false;
     bool bitstream_filter_flushed_ = false;
 };
@@ -798,7 +896,68 @@ public:
             }
         }
 
-        if (!info.audio_tracks.empty() && info.primary_audio_index >= 0) {
+        // Phase 7 (Task 7-B3): resolve the output container name before the
+        // passthrough streams are created so subtitle support checks work.
+        container_ = info.format_name.empty()
+                         ? (in_memory ? memory_format_ : pathExtension(path))
+                         : info.format_name;
+
+        // Phase 7 (Task 7-B3): full multi-audio + subtitle passthrough.  Every
+        // audio stream in the passthrough set gets its own output stream with
+        // the cloned codec parameters; subtitle streams ride along when the
+        // output container can carry them natively.
+        const bool matroska_output =
+            container_.find("matroska") != std::string::npos ||
+            container_.find("webm") != std::string::npos;
+        const bool mp4_output = container_.find("mp4") != std::string::npos ||
+                                container_.find("mov") != std::string::npos;
+        for (const PassthroughStreamInfo& entry : info.passthrough_streams) {
+            if (entry.opaque_codecpar == nullptr || entry.stream_index < 0) {
+                continue;
+            }
+            AVCodecParameters* src_par =
+                static_cast<AVCodecParameters*>(entry.opaque_codecpar.get());
+            if (entry.codec_type == 2) {  // subtitle
+                const int codec_id = static_cast<int>(src_par->codec_id);
+                const bool supported =
+                    (matroska_output &&
+                     (codec_id == AV_CODEC_ID_SUBRIP || codec_id == AV_CODEC_ID_ASS ||
+                      codec_id == AV_CODEC_ID_SSA || codec_id == AV_CODEC_ID_WEBVTT)) ||
+                    (mp4_output && codec_id == AV_CODEC_ID_MOV_TEXT);
+                if (!supported) {
+                    warnings_.push_back("subtitle stream " +
+                                        std::to_string(entry.stream_index) + " (" +
+                                        entry.codec_name + ") is not supported by the " +
+                                        container_ + " output container; dropped");
+                    continue;
+                }
+            }
+            AVStream* out_stream = avformat_new_stream(format_, nullptr);
+            if (out_stream == nullptr) {
+                close();
+                return err(ErrorCode::Io, "cannot create passthrough output stream");
+            }
+            avcodec_parameters_copy(out_stream->codecpar, src_par);
+            out_stream->codecpar->codec_tag = 0;
+            out_stream->time_base =
+                AVRational{entry.time_base.num > 0 ? static_cast<int>(entry.time_base.num) : 1,
+                           entry.time_base.den > 0 ? static_cast<int>(entry.time_base.den)
+                                                   : (entry.codec_type == 1 ? 48000 : 1000)};
+            passthrough_streams_.push_back(
+                PassthroughTarget{entry.stream_index, out_stream, StreamTimestampGuard{}});
+            if (entry.stream_index == info.primary_audio_index) {
+                audio_stream_ = out_stream;
+                in_audio_time_base_ = entry.time_base;
+                out_audio_time_base_ =
+                    Rational{out_stream->time_base.num, out_stream->time_base.den};
+                audio_stream_index_ = out_stream->index;
+                src_audio_stream_index_ = entry.stream_index;
+            }
+        }
+        // Legacy behaviour: when the demuxer produced no explicit passthrough
+        // set (old callers) fall back to the primary audio track only.
+        if (passthrough_streams_.empty() && !info.audio_tracks.empty() &&
+            info.primary_audio_index >= 0) {
             const AudioTrackInfo* primary = nullptr;
             for (const auto& t : info.audio_tracks) {
                 if (t.stream_index == info.primary_audio_index) {
@@ -810,36 +969,39 @@ public:
                 primary = &info.audio_tracks.front();
             }
             if (primary != nullptr) {
-                audio_stream_ = avformat_new_stream(format_, nullptr);
-                if (audio_stream_ == nullptr) {
+                AVStream* out_stream = avformat_new_stream(format_, nullptr);
+                if (out_stream == nullptr) {
                     close();
                     return err(ErrorCode::Io, "cannot create audio output stream");
                 }
                 if (primary->opaque_codecpar != nullptr) {
                     AVCodecParameters* src_par =
                         static_cast<AVCodecParameters*>(primary->opaque_codecpar.get());
-                    avcodec_parameters_copy(audio_stream_->codecpar, src_par);
+                    avcodec_parameters_copy(out_stream->codecpar, src_par);
                 } else {
-                    audio_stream_->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-                    audio_stream_->codecpar->codec_id = static_cast<AVCodecID>(primary->codec_id);
-                    audio_stream_->codecpar->sample_rate = primary->sample_rate;
-                    audio_stream_->codecpar->ch_layout.nb_channels = primary->channels;
+                    out_stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+                    out_stream->codecpar->codec_id = static_cast<AVCodecID>(primary->codec_id);
+                    out_stream->codecpar->sample_rate = primary->sample_rate;
+                    out_stream->codecpar->ch_layout.nb_channels = primary->channels;
                     if (primary->channel_layout != 0) {
-                        av_channel_layout_from_mask(&audio_stream_->codecpar->ch_layout, primary->channel_layout);
+                        av_channel_layout_from_mask(&out_stream->codecpar->ch_layout, primary->channel_layout);
                     } else {
-                        av_channel_layout_default(&audio_stream_->codecpar->ch_layout, primary->channels);
+                        av_channel_layout_default(&out_stream->codecpar->ch_layout, primary->channels);
                     }
-                    audio_stream_->codecpar->bit_rate = primary->bitrate;
+                    out_stream->codecpar->bit_rate = primary->bitrate;
                 }
-                audio_stream_->codecpar->codec_tag = 0;
-                audio_stream_->time_base = AVRational{
+                out_stream->codecpar->codec_tag = 0;
+                out_stream->time_base = AVRational{
                     primary->time_base.num > 0 ? static_cast<int>(primary->time_base.num) : 1,
                     primary->time_base.den > 0 ? static_cast<int>(primary->time_base.den) : primary->sample_rate
                 };
                 in_audio_time_base_ = primary->time_base;
-                out_audio_time_base_ = Rational{audio_stream_->time_base.num, audio_stream_->time_base.den};
-                audio_stream_index_ = audio_stream_->index;
+                out_audio_time_base_ = Rational{out_stream->time_base.num, out_stream->time_base.den};
+                audio_stream_ = out_stream;
+                audio_stream_index_ = out_stream->index;
                 src_audio_stream_index_ = primary->stream_index;
+                passthrough_streams_.push_back(
+                    PassthroughTarget{primary->stream_index, out_stream, StreamTimestampGuard{}});
             }
         }
 
@@ -872,9 +1034,6 @@ public:
             return err(ErrorCode::OutOfMemory, "cannot allocate output packet");
         }
         annex_b_ = info.annex_b;
-        container_ = info.format_name.empty()
-                         ? (in_memory ? memory_format_ : pathExtension(path))
-                         : info.format_name;
         hdr_ = hdr;
         opened_ = true;
         return {};
@@ -885,29 +1044,41 @@ public:
         if (!opened_ || format_ == nullptr) {
             return err(ErrorCode::State, "muxer is not open");
         }
-        if (audio_stream_ != nullptr &&
-            (packet.stream_index == src_audio_stream_index_ || packet.stream_index == audio_stream_index_)) {
+        // Phase 7 (Task 7-B3): route any passthrough stream (multi-audio +
+        // subtitles) by source stream index, rescaling from the packet's own
+        // time base to the output stream's.
+        for (PassthroughTarget& target : passthrough_streams_) {
+            if (packet.stream_index != target.source_index) {
+                continue;
+            }
+            AVStream* out_stream = target.stream;
             if (packet.data.size() > static_cast<size_t>(INT_MAX)) {
-                return err(ErrorCode::InvalidArgument, "audio packet is too large");
+                return err(ErrorCode::InvalidArgument, "passthrough packet is too large");
             }
             av_packet_unref(packet_);
             int status = av_new_packet(packet_, static_cast<int>(packet.data.size()));
             if (status < 0) {
-                return err(ErrorCode::OutOfMemory, "cannot allocate output audio packet");
+                return err(ErrorCode::OutOfMemory, "cannot allocate output passthrough packet");
             }
             std::memcpy(packet_->data, packet.data.data(), packet.data.size());
-            packet_->stream_index = audio_stream_->index;
+            packet_->stream_index = out_stream->index;
             const AVRational source_base{
-                in_audio_time_base_.num > 0 ? static_cast<int>(in_audio_time_base_.num) : 1,
-                in_audio_time_base_.den > 0 ? static_cast<int>(in_audio_time_base_.den) : 48000};
-            packet_->pts = av_rescale_q(packet.pts, source_base, audio_stream_->time_base);
-            packet_->dts = av_rescale_q(packet.dts, source_base, audio_stream_->time_base);
-            packet_->duration = av_rescale_q(packet.duration, source_base, audio_stream_->time_base);
+                packet.time_base.num > 0 ? static_cast<int>(packet.time_base.num) : 1,
+                packet.time_base.den > 0 ? static_cast<int>(packet.time_base.den)
+                                         : (out_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
+                                                ? 48000
+                                                : 1000)};
+            packet_->pts = av_rescale_q(packet.pts, source_base, out_stream->time_base);
+            packet_->dts = av_rescale_q(packet.dts, source_base, out_stream->time_base);
+            packet_->duration = av_rescale_q(packet.duration, source_base, out_stream->time_base);
             packet_->flags = packet.keyframe ? AV_PKT_FLAG_KEY : 0;
+            // Phase 8 (Task 8-B2): strictly monotonic DTS per output stream,
+            // so a VFR / damaged source can never trip the interleaver.
+            target.guard.sanitize(packet_->pts, packet_->dts, 1);
             status = av_interleaved_write_frame(format_, packet_);
             av_packet_unref(packet_);
             if (status < 0) {
-                return err(ErrorCode::Io, "cannot write audio packet",
+                return err(ErrorCode::Io, "cannot write passthrough packet",
                            avErrorString(status));
             }
             return {};
@@ -948,6 +1119,8 @@ public:
         packet_->dts = av_rescale_q(packet.dts, source_base, stream_->time_base);
         packet_->duration = av_rescale_q(packet.duration, source_base, stream_->time_base);
         packet_->flags = packet.keyframe ? AV_PKT_FLAG_KEY : 0;
+            // Phase 8 (Task 8-B2): strictly monotonic DTS on the video stream too.
+        video_guard_.sanitize(packet_->pts, packet_->dts, 1);
         status = av_interleaved_write_frame(format_, packet_);
         av_packet_unref(packet_);
         if (status < 0) {
@@ -1045,6 +1218,9 @@ private:
         audio_stream_ = nullptr;
         audio_stream_index_ = -1;
         src_audio_stream_index_ = -1;
+        passthrough_streams_.clear();
+        video_guard_.reset();
+        warnings_.clear();
         hdr_ = Hdr10Metadata{};
     }
 
@@ -1054,6 +1230,17 @@ private:
     int src_audio_stream_index_ = -1;
     Rational in_audio_time_base_{1, 48000};
     Rational out_audio_time_base_{1, 48000};
+    // Phase 7 (Task 7-B3): source stream index -> output AVStream for every
+    // passthrough (audio + subtitle) stream.  Phase 8 attaches a per-stream
+    // monotonic-DTS guard to each of them.
+    struct PassthroughTarget {
+        int source_index = -1;
+        AVStream* stream = nullptr;
+        StreamTimestampGuard guard{};
+    };
+    std::vector<PassthroughTarget> passthrough_streams_;
+    StreamTimestampGuard video_guard_{};
+    std::vector<std::string> warnings_;
     std::vector<uint8_t>* memory_target_ = nullptr;
     std::string memory_format_;
     std::unique_ptr<io::MemoryAvioContext> memory_avio_;
@@ -1067,6 +1254,245 @@ private:
 };
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Phase 8 (Task 8-B1): broadcast-tier software decoder (ProRes / DNxHR).
+// NVDEC has no hardware decoder for these codecs, so the statically linked
+// FFmpeg decoders produce host frames (YUV422P10LE / YUV422P for ProRes,
+// YUV422P10LE / YUV422P / YUV444P10LE for DNxHR) and a hand-rolled 2-tap box
+// chroma downsampler converts them to P010 planes without any swscale
+// dependency (the surgical FFmpeg archive does not ship libswscale).
+// ---------------------------------------------------------------------------
+namespace {
+
+class FfmpegSoftDecoder final : public ISoftVideoDecoder {
+public:
+    ~FfmpegSoftDecoder() override { close(); }
+
+    // Phase 8 (Task 8-B1): configure from the demuxer MediaInfo; the caller
+    // owns the demuxer and keeps feeding the video packets so audio and
+    // subtitle passthrough continue on the normal path.
+    Result<void> configure(const MediaInfo& info) override {
+        close();
+        info_ = info;
+        if (info_.codec != VideoCodec::ProRes && info_.codec != VideoCodec::Dnxhd) {
+            return err(ErrorCode::Unsupported,
+                       "the software decoder only covers ProRes and DNxHR sources");
+        }
+        const AVCodecID codec_id = info_.codec == VideoCodec::ProRes ? AV_CODEC_ID_PRORES
+                                                                     : AV_CODEC_ID_DNXHD;
+        const AVCodec* decoder = avcodec_find_decoder(codec_id);
+        if (decoder == nullptr) {
+            return err(ErrorCode::Unsupported,
+                       "the static FFmpeg archive has no decoder for " + info_.video_codec +
+                           "; rebuild with the Phase 8 whitelist");
+        }
+        codec_ctx_ = avcodec_alloc_context3(decoder);
+        if (codec_ctx_ == nullptr) {
+            return err(ErrorCode::OutOfMemory, "cannot allocate the software decoder");
+        }
+        if (info_.codec == VideoCodec::ProRes) {
+            // ProRes does not signal geometry inside the bitstream; the
+            // container codecpar carries it.
+            codec_ctx_->width = info_.width;
+            codec_ctx_->height = info_.height;
+        }
+        if (!info_.extradata.empty()) {
+            codec_ctx_->extradata = static_cast<uint8_t*>(
+                av_mallocz(info_.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+            if (codec_ctx_->extradata == nullptr) {
+                close();
+                return err(ErrorCode::OutOfMemory, "cannot stage the software extradata");
+            }
+            std::memcpy(codec_ctx_->extradata, info_.extradata.data(), info_.extradata.size());
+            codec_ctx_->extradata_size = static_cast<int>(info_.extradata.size());
+        }
+        codec_ctx_->thread_count = 0;  // automatic frame-level multithreading
+        codec_ctx_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        const int status = avcodec_open2(codec_ctx_, decoder, nullptr);
+        if (status < 0) {
+            close();
+            return err(ErrorCode::Io, "cannot open the software decoder",
+                       avErrorString(status));
+        }
+        frame_ = av_frame_alloc();
+        packet_ = av_packet_alloc();
+        if (frame_ == nullptr || packet_ == nullptr) {
+            close();
+            return err(ErrorCode::OutOfMemory, "cannot allocate the software decoder frames");
+        }
+        configured_ = true;
+        return {};
+    }
+
+    // Feeds one video packet; returns the decoded frame when the decoder
+    // produced one (nullopt when more input is needed).
+    Result<std::optional<DecodedVideoFrame>> feed(const Packet& video_packet) override {
+        if (!configured_) {
+            return err(ErrorCode::State, "software decoder is not configured");
+        }
+        if (flushed_) {
+            return std::optional<DecodedVideoFrame>{};
+        }
+        av_packet_unref(packet_);
+        if (av_new_packet(packet_, static_cast<int>(video_packet.data.size())) < 0) {
+            return err(ErrorCode::OutOfMemory, "cannot stage the software packet");
+        }
+        std::memcpy(packet_->data, video_packet.data.data(), video_packet.data.size());
+        packet_->pts = video_packet.pts;
+        packet_->dts = video_packet.dts;
+        const int sent = avcodec_send_packet(codec_ctx_, packet_);
+        av_packet_unref(packet_);
+        if (sent < 0 && sent != AVERROR(EAGAIN)) {
+            return err(ErrorCode::Io, "software decoder rejected a packet",
+                       avErrorString(sent));
+        }
+        return receiveOne();
+    }
+
+    // End-of-stream flush; returns the tail frames one at a time until
+    // ErrorCode::NotFound.
+    Result<std::optional<DecodedVideoFrame>> drain() override {
+        if (!configured_) {
+            return err(ErrorCode::State, "software decoder is not configured");
+        }
+        if (!flushed_) {
+            flushed_ = true;
+            avcodec_send_packet(codec_ctx_, nullptr);
+        }
+        return receiveOne();
+    }
+
+private:
+    Result<std::optional<DecodedVideoFrame>> receiveOne() {
+        const int receive = avcodec_receive_frame(codec_ctx_, frame_);
+        if (receive == AVERROR(EAGAIN) || receive == AVERROR_EOF) {
+            return std::optional<DecodedVideoFrame>{};
+        }
+        if (receive < 0) {
+            return err(ErrorCode::Io, "software decoder error", avErrorString(receive));
+        }
+        DecodedVideoFrame out = convertFrameToP010(*frame_);
+        out.pts_90k = frame_->best_effort_timestamp != AV_NOPTS_VALUE
+                          ? av_rescale_q(frame_->best_effort_timestamp, codec_ctx_->time_base,
+                                         AVRational{1, 90000})
+                          : 0;
+        out.dts_90k = out.pts_90k;
+        av_frame_unref(frame_);
+        return std::optional<DecodedVideoFrame>{std::move(out)};
+    }
+
+    // 4:2:2 / 4:4:4 (8 or 10-bit) YUV -> P010 (4:2:0, 10-bit << 6).  Luma is a
+    // copy; chroma is a 2-tap box average (4:4:4 sources also average the two
+    // columns).  No swscale dependency: the surgical FFmpeg archive does not
+    // ship libswscale.
+    DecodedVideoFrame convertFrameToP010(const AVFrame& frame) {
+        DecodedVideoFrame out;
+        const int width = frame.width;
+        const int height = frame.height;
+        out.width = width;
+        out.height = height;
+        out.y_pitch = static_cast<uint32_t>(width) * 2u;
+        out.uv_pitch = static_cast<uint32_t>(width) * 2u;
+        out.y_plane.assign(static_cast<size_t>(out.y_pitch) * height, 0);
+        out.uv_plane.assign(static_cast<size_t>(out.uv_pitch) * (height / 2), 0);
+
+        const bool ten_bit = frame.format == AV_PIX_FMT_YUV422P10LE ||
+                             frame.format == AV_PIX_FMT_YUV444P10LE ||
+                             frame.format == AV_PIX_FMT_YUV420P10LE;
+        const bool four444 = frame.format == AV_PIX_FMT_YUV444P10LE ||
+                             frame.format == AV_PIX_FMT_YUV444P;
+        auto* dst_y = reinterpret_cast<uint16_t*>(out.y_plane.data());
+        auto* dst_uv = reinterpret_cast<uint16_t*>(out.uv_plane.data());
+
+        for (int row = 0; row < height; ++row) {
+            if (ten_bit) {
+                const uint16_t* src = reinterpret_cast<const uint16_t*>(
+                    frame.data[0] + static_cast<size_t>(row) * frame.linesize[0]);
+                uint16_t* dst = dst_y + static_cast<size_t>(row) * (out.y_pitch / 2);
+                for (int col = 0; col < width; ++col) {
+                    dst[col] = static_cast<uint16_t>((src[col] & 0x3FF) << 6);
+                }
+            } else {
+                const uint8_t* src = frame.data[0] + static_cast<size_t>(row) * frame.linesize[0];
+                uint16_t* dst = dst_y + static_cast<size_t>(row) * (out.y_pitch / 2);
+                for (int col = 0; col < width; ++col) {
+                    dst[col] = static_cast<uint16_t>(src[col] << 2);  // 8 -> 10 bit
+                }
+            }
+        }
+        const uint8_t* u_base = frame.data[1];
+        const uint8_t* v_base = frame.data[2];
+        for (int out_row = 0; out_row < height / 2; ++out_row) {
+            uint16_t* dst = dst_uv + static_cast<size_t>(out_row) * (out.uv_pitch / 2);
+            for (int col = 0; col < width / 2; ++col) {
+                int u_sum = 0;
+                int v_sum = 0;
+                for (int pair = 0; pair < 2; ++pair) {
+                    const int src_row = out_row * 2 + pair;
+                    if (ten_bit) {
+                        const uint16_t* u = reinterpret_cast<const uint16_t*>(
+                            u_base + static_cast<size_t>(src_row) * frame.linesize[1]);
+                        const uint16_t* v = reinterpret_cast<const uint16_t*>(
+                            v_base + static_cast<size_t>(src_row) * frame.linesize[2]);
+                        if (four444) {
+                            const int c0 = col * 2;
+                            const int c1 = col * 2 + 1;
+                            u_sum += ((u[c0] & 0x3FF) + (u[c1] & 0x3FF)) / 2;
+                            v_sum += ((v[c0] & 0x3FF) + (v[c1] & 0x3FF)) / 2;
+                        } else {
+                            u_sum += u[col] & 0x3FF;
+                            v_sum += v[col] & 0x3FF;
+                        }
+                    } else {
+                        const uint8_t* u = u_base + static_cast<size_t>(src_row) * frame.linesize[1];
+                        const uint8_t* v = v_base + static_cast<size_t>(src_row) * frame.linesize[2];
+                        if (four444) {
+                            const int c0 = col * 2;
+                            const int c1 = col * 2 + 1;
+                            u_sum += ((u[c0] + u[c1]) / 2) << 2;
+                            v_sum += ((v[c0] + v[c1]) / 2) << 2;
+                        } else {
+                            u_sum += u[col] << 2;
+                            v_sum += v[col] << 2;
+                        }
+                    }
+                }
+                dst[col * 2] = static_cast<uint16_t>((u_sum / 2) << 6);
+                dst[col * 2 + 1] = static_cast<uint16_t>((v_sum / 2) << 6);
+            }
+        }
+        return out;
+    }
+
+    void close() {
+        if (packet_ != nullptr) {
+            av_packet_free(&packet_);
+        }
+        if (frame_ != nullptr) {
+            av_frame_free(&frame_);
+        }
+        if (codec_ctx_ != nullptr) {
+            avcodec_free_context(&codec_ctx_);
+        }
+        configured_ = false;
+        flushed_ = false;
+        info_ = MediaInfo{};
+    }
+
+    AVCodecContext* codec_ctx_ = nullptr;
+    AVFrame* frame_ = nullptr;
+    AVPacket* packet_ = nullptr;
+    MediaInfo info_{};
+    bool configured_ = false;
+    bool flushed_ = false;
+};
+
+}  // namespace
+
+std::unique_ptr<ISoftVideoDecoder> makeFfmpegSoftDecoder() {
+    return std::make_unique<FfmpegSoftDecoder>();
+}
 
 std::unique_ptr<IDemuxer> makeFfmpegDemuxer() { return std::make_unique<FfmpegDemuxer>(); }
 

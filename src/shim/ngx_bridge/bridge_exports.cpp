@@ -24,11 +24,13 @@
 #include <windows.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <bit>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -84,21 +86,36 @@ struct BridgeImpl {
     SdkComponents sdk;
 
     // ----- remaster state (P0-1.4) -----
-    // One mutex serialises remaster frames; the P010 ring has two buffers so
-    // the core can overlap NVENC(frame i) with NGX(frame i+1) on the
-    // independent encode engine.  Buffer parity follows the frame counter:
-    // call i writes ring[i & 1], so the core must hold frame i's encode back
-    // until frame i-2 has completed.  The events time the per-frame stages
-    // from the pack stream so the core can report GPU (not CPU wall) numbers
-    // for Gate 2.2.
+    // One mutex serialises remaster frames.  Phase 7 (Task 7-A3) upgrades the
+    // P010 ring from two to three buffers so the core can overlap
+    // NVENC(frame i-1) with NGX(frame i) and even hold a third frame in
+    // flight: the core gates on remasters_issued - encodes_completed < 3.
+    // Slot selection follows the frame counter: call i writes ring[i % 3].
+    // The events time the per-frame stages from the pack stream so the core
+    // can report GPU (not CPU wall) numbers for Gate 2.2.
     std::mutex remaster_mutex;
-    uint64_t p010_ring[2] = {0, 0};  // CUdeviceptr, 0 until the first remaster
-    size_t p010_pitch = 0;           // bytes per row
+    uint64_t p010_ring[3] = {0, 0, 0};  // CUdeviceptr, 0 until the first remaster
+    size_t p010_pitch = 0;              // bytes per row
     uint64_t p010_bytes = 0;
     uint64_t remaster_frames_issued = 0;
     void* remaster_event[4] = {nullptr, nullptr, nullptr, nullptr};
     bool remaster_events_ready = false;
     RtxNgxRemasterStats remaster_stats{};
+    // Phase 7: fused-kernel statistic slots (uint32[4]) and the double
+    // 960x540 R10G10B10A2 preview ring (2 x 2.07 MB = 4.14 MB VRAM).
+    uint64_t stats_devptr = 0;
+    uint64_t preview_ring[2] = {0, 0};
+    uint32_t preview_pitch = 0;
+    bool preview_ready = false;
+    uint64_t last_preview_ptr = 0;
+    // Phase 7: uploaded FP16 3D LUT (texture object + backing CUarray).
+    void* lut_tex = nullptr;
+    void* lut_array = nullptr;
+    int32_t lut_dim = 0;
+    // Phase 8 (Task 8-B1): persistent device staging buffer for software-
+    // decoded P010 frames (grown on demand, freed in the destructor).
+    uint64_t upload_buffer = 0;
+    size_t upload_bytes = 0;
 
     ~BridgeImpl() {
         // The core must destroy its NVENC session before the bridge, but even
@@ -119,6 +136,21 @@ struct BridgeImpl {
                     buffer = 0;
                 }
             }
+            if (stats_devptr != 0) {
+                (void)interop->free_device(stats_devptr, &ignored);
+                stats_devptr = 0;
+            }
+            if (upload_buffer != 0) {
+                (void)interop->free_device(upload_buffer, &ignored);
+                upload_buffer = 0;
+            }
+            for (uint64_t& buffer : preview_ring) {
+                if (buffer != 0) {
+                    (void)interop->free_device(buffer, &ignored);
+                    buffer = 0;
+                }
+            }
+            interop->destroy_lut_texture(&lut_tex, &lut_array);
         }
         if (interop) {
             for (void*& event : remaster_event) {
@@ -197,7 +229,8 @@ bool validConfig(const RtxNgxBridgeConfig* config) {
         config->output_width <= 0 || config->output_height <= 0) {
         return false;
     }
-    if (config->vsr_quality < 1 || config->vsr_quality > 4) {
+    if (config->vsr_quality < 0 || config->vsr_quality > 4) {
+        // Phase 6.1 微瑕 3: 0 is the new "VSR explicitly disabled" sentinel.
         return false;
     }
     if (config->output_width < config->input_width ||
@@ -501,15 +534,17 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_remaster_stats(
 
 namespace {
 
-// Allocates the two P010 ring buffers and the four timing events on the
-// first remaster call.  Returns false with impl->error set on failure.
+// Allocates the three P010 ring buffers, the fused-kernel statistic slots and
+// the four timing events on the first remaster call.  Returns false with
+// impl->error set on failure.
 bool ensureRemasterResources(BridgeImpl* impl) {
-    if (impl->p010_ring[0] != 0 && impl->p010_ring[1] != 0 && impl->remaster_events_ready) {
+    if (impl->p010_ring[0] != 0 && impl->p010_ring[1] != 0 && impl->p010_ring[2] != 0 &&
+        impl->remaster_events_ready) {
         return true;
     }
     rtx_ngx::D3D12Interop& interop = *impl->interop;
     std::string error;
-    if (impl->p010_ring[0] == 0 || impl->p010_ring[1] == 0) {
+    if (impl->p010_ring[0] == 0 || impl->p010_ring[1] == 0 || impl->p010_ring[2] == 0) {
         // cuMemAllocPitch takes the width in BYTES (P010 luma row = 2 * width)
         // and pads rows to a 16-byte granularity; UV starts at pitch * height.
         const size_t width_bytes = static_cast<size_t>(impl->config.output_width) * 2u;
@@ -538,9 +573,20 @@ bool ensureRemasterResources(BridgeImpl* impl) {
             interop.clear_p010_black(buffer, pitch, impl->config.output_width, impl->config.output_height, &clear_err);
         }
         impl->p010_bytes = impl->p010_pitch * static_cast<size_t>(impl->config.output_height) * 3u / 2u;
-        trace("remaster: P010 ring (2x) allocated",
+        trace("remaster: P010 ring (3x) allocated",
               std::to_string(impl->p010_bytes) + " bytes each, pitch " +
                   std::to_string(impl->p010_pitch));
+    }
+    // Phase 7: the fused pack kernel publishes max/sum/highlight statistics
+    // through a 4-slot uint32 device buffer, reset stream-ordered per frame.
+    if (impl->stats_devptr == 0) {
+        uint64_t pointer = 0;
+        size_t pitch = 0;
+        if (!interop.alloc_pitched(&pointer, &pitch, 4u * sizeof(uint32_t), 1, &error)) {
+            impl->error = "rtx_ngx_bridge_remaster: " + error;
+            return false;
+        }
+        impl->stats_devptr = pointer;
     }
     if (!impl->remaster_events_ready) {
         for (void*& event : impl->remaster_event) {
@@ -563,6 +609,41 @@ bool ensureRemasterResources(BridgeImpl* impl) {
     return true;
 }
 
+// Phase 7: lazily allocates the double 960x540 R10G10B10A2 preview ring
+// (2 x 960 x 540 x 4 bytes = 4.14 MB total) on the first preview request.
+bool ensurePreviewResources(BridgeImpl* impl) {
+    if (impl->preview_ready) {
+        return true;
+    }
+    rtx_ngx::D3D12Interop& interop = *impl->interop;
+    std::string error;
+    constexpr uint32_t kPreviewWidth = 960;
+    constexpr uint32_t kPreviewHeight = 540;
+    const size_t width_bytes = static_cast<size_t>(kPreviewWidth) * 4u;
+    const size_t rows = kPreviewHeight;
+    for (uint64_t& buffer : impl->preview_ring) {
+        if (buffer != 0) {
+            continue;
+        }
+        uint64_t pointer = 0;
+        size_t pitch = 0;
+        if (!interop.alloc_pitched(&pointer, &pitch, width_bytes, rows, &error)) {
+            for (uint64_t& allocated : impl->preview_ring) {
+                if (allocated != 0) {
+                    std::string ignored;
+                    (void)interop.free_device(allocated, &ignored);
+                    allocated = 0;
+                }
+            }
+            impl->error = "rtx_ngx_bridge_remaster: " + error;
+            return false;
+        }
+        buffer = pointer;
+        impl->preview_pitch = static_cast<uint32_t>(pitch);
+    }
+    impl->preview_ready = true;
+    return true;
+}
 bool validRemasterInput(const RtxNgxRemasterInput* input) {
     return input != nullptr && input->y_plane != 0 && input->uv_plane != 0 &&
            input->y_pitch != 0 && input->uv_pitch != 0 &&
@@ -607,6 +688,9 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     if (!ensureRemasterResources(impl)) {
         return RTX_ERR_OUT_OF_MEMORY;
     }
+    if (input->preview_rgba10_ptr != 0 && !ensurePreviewResources(impl)) {
+        return RTX_ERR_OUT_OF_MEMORY;
+    }
 
     void* const stream = interop.pack_stream();
     if (stream == nullptr) {
@@ -619,6 +703,15 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     // signals V+1, so V+1 is always the correct pack-side wait value.
     const uint64_t v = interop.advance_timeline();
     trace("remaster: frame begin", "V=" + std::to_string(v));
+
+    // Phase 7: reset the fused-kernel statistic slots stream-ordered so the
+    // atomics of this frame start from zero.
+    if (impl->stats_devptr != 0) {
+        if (!interop.memset_d32_async(impl->stats_devptr, 0, 4, stream, &error)) {
+            impl->error = "rtx_ngx_bridge_remaster: " + error;
+            return RTX_ERR_INTERNAL;
+        }
+    }
 
     // e0 | preprocess -> input surface | e1 | signal V | [NGX evaluates] |
     // wait V+1 | e2 | pack v2 -> P010 | e3 | stream sync
@@ -697,10 +790,10 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
         impl->error = "rtx_ngx_bridge_remaster: " + error;
         return RTX_ERR_INTERNAL;
     }
-    // Ring parity: frame i writes p010_ring[i & 1].  The caller owns the
-    // ordering (frame i may only be issued after frame i-2 finished encoding)
-    // because only it knows when NVENC released the older buffer.
-    const uint64_t p010_buffer = impl->p010_ring[impl->remaster_frames_issued & 1];
+    // Ring parity: frame i writes p010_ring[i % 3].  The caller owns the
+    // ordering (frame i may only be issued after frame i-3+1 finished encoding)
+    // because only it knows when NVENC released the older buffers.
+    const uint64_t p010_buffer = impl->p010_ring[impl->remaster_frames_issued % 3u];
     rtx_ngx::PackV2Launch pack{};
     pack.input_surface = interop.output().surface;
     pack.y_plane = p010_buffer;
@@ -710,6 +803,26 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     pack.uv_pitch_samples = pack.y_pitch_samples;
     pack.width = impl->config.output_width;
     pack.height = impl->config.output_height;
+    // Phase 7 fused stages: LUT, statistic slots and the A/B preview bypass.
+    pack.lut_tex = reinterpret_cast<uint64_t>(impl->lut_tex);
+    pack.lut_dim = impl->lut_dim;
+    pack.stats_devptr = impl->stats_devptr;
+    if (input->preview_rgba10_ptr != 0) {
+        pack.preview_ptr = input->preview_rgba10_ptr;
+        pack.preview_width = 960;
+        pack.preview_height = 540;
+        pack.preview_pitch_px = static_cast<int32_t>(impl->preview_pitch / 4u);
+        pack.split_x_norm = input->split_x_norm;
+        // The src_surface is the preprocessed input texture (input_width x input_height).
+        // If the transcode upscales or geometry changes (e.g. 720p/1080p -> 4K),
+        // sampling it with 4K coordinates in the fused pack kernel causes an out-of-bounds
+        // surf2Dread (CUDA_ERROR_ILLEGAL_ADDRESS). Only pass src_surface if dimensions match;
+        // otherwise fallback to sampling the remastered frame safely.
+        pack.src_surface = (impl->config.input_width == impl->config.output_width &&
+                            impl->config.input_height == impl->config.output_height)
+                               ? interop.input().surface
+                               : 0;
+    }
     // TrueHDR emits linear scRGB (BT.709 primaries, 1.0 = 80 nits); without
     // TrueHDR the shared RGBA16F texture holds the legacy linear BT.2020
     // interpretation, which is what pack v1/v2 default to.
@@ -779,6 +892,40 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     output->width = impl->config.output_width;
     output->height = impl->config.output_height;
     output->format = RTX_PIXEL_P010;
+    output->ring_slot_index = static_cast<uint32_t>(impl->remaster_frames_issued % 3u);
+
+    // Phase 7 (Task 7-A3): read the GPU-reduced frame statistics back and (a)
+    // publish them in the output struct for the caller's MaxCLL/MaxFALL
+    // accumulation, (b) feed the content-adaptive TrueHDR law automatically so
+    // the next frame's contrast/saturation/mid-grey react to this frame.
+    uint32_t stats_host[4] = {0, 0, 0, 0};
+    if (impl->stats_devptr != 0 &&
+        interop.memcpy_dtoh(stats_host, impl->stats_devptr, sizeof(stats_host), &error)) {
+        const float frame_max = std::bit_cast<float>(stats_host[0]);
+        const float frame_sum = std::bit_cast<float>(stats_host[1]);
+        const uint32_t samples =
+            static_cast<uint32_t>(impl->config.output_width) *
+            static_cast<uint32_t>(impl->config.output_height);
+        const float frame_avg = samples > 0 ? frame_sum / static_cast<float>(samples) : 0.0f;
+        output->frame_max_nits = static_cast<uint32_t>(fmaxf(0.0f, frame_max) + 0.5f);
+        output->frame_avg_nits = static_cast<uint32_t>(fmaxf(0.0f, frame_avg) + 0.5f);
+#if defined(RTX_HAVE_NGX_SDK)
+        if (impl->ngx != nullptr && samples > 0) {
+            RtxNgxFrameStats adaptive{};
+            adaptive.y_norm = std::clamp<double>(
+                static_cast<double>(frame_avg) /
+                    static_cast<double>(std::max<uint32_t>(1u, impl->config.max_luminance)),
+                0.0, 1.0);
+            adaptive.p_high = std::clamp<double>(
+                static_cast<double>(stats_host[2]) / static_cast<double>(samples), 0.0, 1.0);
+            impl->ngx->set_frame_stats(adaptive);
+        }
+#endif
+        impl->last_preview_ptr = input->preview_rgba10_ptr;
+    } else if (impl->stats_devptr != 0) {
+        impl->error = "rtx_ngx_bridge_remaster: statistic readback failed: " + error;
+        return RTX_ERR_INTERNAL;
+    }
 
     impl->remaster_stats.preprocess_ms += preprocess_ms;
     impl->remaster_stats.ngx_ms += ngx_ms;
@@ -796,6 +943,157 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
               "ms ngx=" + std::to_string(ngx_ms) + "ms pack=" + std::to_string(pack_ms) + "ms");
     return RTX_OK;
 #endif
+}
+
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_set_lut3d(
+    RtxNgxBridge* bridge, const uint16_t* lut_half4_data, int32_t grid_size) {
+    if (bridge == nullptr) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    BridgeImpl* impl = asBridge(bridge);
+    if (!impl->interop || !impl->interop->valid()) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    if (lut_half4_data == nullptr || grid_size <= 1) {
+        // Unbind: the caller frees the active LUT by passing NULL / 0.
+        std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+        impl->interop->destroy_lut_texture(&impl->lut_tex, &impl->lut_array);
+        impl->lut_dim = 0;
+        return RTX_OK;
+    }
+    if (grid_size < 2 || grid_size > 256) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    const size_t expected = static_cast<size_t>(grid_size) * grid_size * grid_size * 4u;
+    if (expected > (1ull << 30)) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    void* texture_object = nullptr;
+    void* array = nullptr;
+    std::string error;
+    if (!impl->interop->create_lut_texture(lut_half4_data, grid_size, &texture_object,
+                                           &array, &error)) {
+        impl->error = "rtx_ngx_bridge_set_lut3d: " + error;
+        return RTX_ERR_NGX;
+    }
+    // Swap in the new texture and release the previous one.
+    void* old_tex = impl->lut_tex;
+    void* old_array = impl->lut_array;
+    impl->lut_tex = texture_object;
+    impl->lut_array = array;
+    impl->lut_dim = grid_size;
+    if (old_tex != nullptr || old_array != nullptr) {
+        impl->interop->destroy_lut_texture(&old_tex, &old_array);
+    }
+    return RTX_OK;
+}
+
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_preview_buffer(
+    RtxNgxBridge* bridge, uint32_t slot, uint64_t* device_ptr, uint32_t* pitch) {
+    if (bridge == nullptr || device_ptr == nullptr || pitch == nullptr || slot > 1) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    *device_ptr = 0;
+    *pitch = 0;
+    BridgeImpl* impl = asBridge(bridge);
+    if (!impl->interop || !impl->interop->valid()) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    if (!ensurePreviewResources(impl)) {
+        return RTX_ERR_OUT_OF_MEMORY;
+    }
+    *device_ptr = impl->preview_ring[slot];
+    *pitch = impl->preview_pitch;
+    return RTX_OK;
+}
+
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_download_preview(
+    RtxNgxBridge* bridge, void* destination, size_t destination_bytes) {
+    if (bridge == nullptr || destination == nullptr) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    BridgeImpl* impl = asBridge(bridge);
+    if (!impl->interop || !impl->interop->valid()) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    if (impl->last_preview_ptr == 0 || impl->preview_pitch == 0) {
+        impl->error = "rtx_ngx_bridge_download_preview: no preview frame was produced yet";
+        return RTX_ERR_UNSUPPORTED;
+    }
+    const size_t needed =
+        static_cast<size_t>(impl->preview_pitch) * 540u;  // 960x540 rows x pitch
+    if (destination_bytes < needed) {
+        impl->error = "rtx_ngx_bridge_download_preview: destination is too small";
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::string error;
+    if (!impl->interop->memcpy_dtoh(destination, impl->last_preview_ptr, needed, &error)) {
+        impl->error = "rtx_ngx_bridge_download_preview: " + error;
+        return RTX_ERR_INTERNAL;
+    }
+    impl->error.clear();
+    return RTX_OK;
+}
+
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_upload_frame(
+    RtxNgxBridge* bridge, const void* y_plane, const void* uv_plane, uint32_t y_pitch,
+    uint32_t uv_pitch, int32_t width, int32_t height, uint64_t* y_device,
+    uint64_t* uv_device) {
+    if (bridge == nullptr || y_plane == nullptr || uv_plane == nullptr || y_device == nullptr ||
+        uv_device == nullptr || y_pitch == 0 || uv_pitch == 0 || width <= 0 || height <= 0) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    *y_device = 0;
+    *uv_device = 0;
+    BridgeImpl* impl = asBridge(bridge);
+    if (!impl->interop || !impl->interop->valid()) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    rtx_ngx::D3D12Interop& interop = *impl->interop;
+    // Grow the staging buffer lazily: one allocation holds both planes
+    // (luma at the start, chroma after), rows padded to the caller pitch.
+    const size_t needed = static_cast<size_t>(y_pitch) * static_cast<size_t>(height) +
+                          static_cast<size_t>(uv_pitch) * static_cast<size_t>(height) / 2u;
+    if (needed > impl->upload_bytes) {
+        if (impl->upload_buffer != 0) {
+            std::string ignored;
+            (void)interop.free_device(impl->upload_buffer, &ignored);
+            impl->upload_buffer = 0;
+            impl->upload_bytes = 0;
+        }
+        uint64_t pointer = 0;
+        size_t pitch = 0;
+        std::string error;
+        if (!interop.alloc_pitched(&pointer, &pitch, needed, 1, &error)) {
+            impl->error = "rtx_ngx_bridge_upload_frame: " + error;
+            return RTX_ERR_OUT_OF_MEMORY;
+        }
+        impl->upload_buffer = pointer;
+        impl->upload_bytes = needed;
+    }
+    std::string error;
+    if (!interop.memcpy_htod(impl->upload_buffer, y_plane,
+                             static_cast<size_t>(y_pitch) * static_cast<size_t>(height),
+                             &error)) {
+        impl->error = "rtx_ngx_bridge_upload_frame: " + error;
+        return RTX_ERR_INTERNAL;
+    }
+    const uint64_t uv_offset =
+        static_cast<uint64_t>(y_pitch) * static_cast<uint64_t>(height);
+    if (!interop.memcpy_htod(impl->upload_buffer + uv_offset, uv_plane,
+                             static_cast<size_t>(uv_pitch) * static_cast<size_t>(height) / 2u,
+                             &error)) {
+        impl->error = "rtx_ngx_bridge_upload_frame: " + error;
+        return RTX_ERR_INTERNAL;
+    }
+    *y_device = impl->upload_buffer;
+    *uv_device = impl->upload_buffer + uv_offset;
+    impl->error.clear();
+    return RTX_OK;
 }
 
 }  // extern "C"

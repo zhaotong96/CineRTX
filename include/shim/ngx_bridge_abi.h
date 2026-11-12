@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define RTX_NGX_BRIDGE_ABI_VERSION 2u
+#define RTX_NGX_BRIDGE_ABI_VERSION 3u
 
 typedef struct RtxNgxBridge RtxNgxBridge;
 
@@ -166,7 +166,13 @@ typedef struct RtxNgxRemasterInput {
     int32_t format;        /* RTX_PIXEL_NV12 / RTX_PIXEL_P010 */
     int32_t full_range;    /* 0=limited, 1=full */
     int32_t matrix;        /* 0=BT.709, 1=BT.2020 NCL, 2=BT.601 */
-    int32_t reserved[5];
+    /* ABI v3 (Phase 7, Task 7-A1): the former int32_t reserved[5] tail is
+     * remapped onto named fields with the identical total struct size and the
+     * identical field offsets, so the wire layout is byte-compatible. */
+    uint64_t preview_rgba10_ptr; /* CUdeviceptr of a 960x540 R10G10B10A2 buffer
+                                  * (rtx_ngx_bridge_preview_buffer), 0 = skip */
+    uint32_t preview_pitch;      /* bytes per preview row */
+    float split_x_norm;          /* 0.0..1.0 A/B split (<0 disables split) */
 } RtxNgxRemasterInput;
 
 typedef struct RtxNgxRemasterOutput {
@@ -177,7 +183,13 @@ typedef struct RtxNgxRemasterOutput {
     int32_t width;
     int32_t height;
     int32_t format;        /* RTX_PIXEL_P010 */
-    int32_t reserved[5];
+    /* ABI v3 (Phase 7, Task 7-A1): real GPU-reduced frame luma statistics and
+     * the 3-slot ring index, mapped onto the former reserved[5] tail with an
+     * unchanged struct size. */
+    uint32_t frame_max_nits;   /* real GPU-reduced MaxCLL of this frame */
+    uint32_t frame_avg_nits;   /* real GPU-reduced frame-average luminance */
+    uint32_t ring_slot_index;  /* 0..2 in the 3-slot P010 ring */
+    int32_t reserved[2];
 } RtxNgxRemasterOutput;
 
 /* Cumulative since bridge create.  Call after each remaster and diff against
@@ -204,6 +216,40 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_remaster_stats(
 /* Returns RTX_NGX_BRIDGE_ABI_VERSION so callers can reject a bridge older
  * than the remaster contract before resolving rtx_ngx_bridge_remaster. */
 RTX_SHIM_API uint32_t RTX_SHIM_CALL rtx_ngx_bridge_abi_version(void);
+
+/* ------------------------------------------------------------------------- */
+/* ABI v3 append-only extensions (Phase 7, Task 7-A1).                        */
+/* ------------------------------------------------------------------------- */
+
+/* Uploads an N x N x N RGBA16F (half4) 3D LUT table into a CUDA 3D texture
+ * object.  Passing lut_half4_data == NULL or grid_size == 0 unbinds and frees
+ * the active LUT.  The LUT texture lives in the bridge's retained CUDA
+ * context and is consumed by the fused pack kernel on the next remaster. */
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_set_lut3d(
+    RtxNgxBridge* bridge, const uint16_t* lut_half4_data, int32_t grid_size);
+
+/* Returns the bridge-allocated double-buffered 960x540 R10G10B10A2 preview
+ * buffer (2 x 2.07 MB = 4.14 MB of VRAM total).  The GUI passes one slot
+ * pointer per remaster through RtxNgxRemasterInput::preview_rgba10_ptr.
+ * slot is 0 or 1; device_ptr == 0 means the preview path is unavailable. */
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_preview_buffer(
+    RtxNgxBridge* bridge, uint32_t slot, uint64_t* device_ptr, uint32_t* pitch);
+
+/* Copies the latest preview slot contents (960x540 R10G10B10A2, 4 bytes per
+ * pixel, rows padded to `pitch` bytes) from device memory into a caller
+ * buffer with a synchronous cuMemcpyDtoH on the pack stream.  This is the
+ * only pixel traffic the realtime viewport ever generates (<= 15 Hz). */
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_download_preview(
+    RtxNgxBridge* bridge, void* destination, size_t destination_bytes);
+
+/* Phase 8 (Task 8-B1, append-only): uploads one host-resident P010 frame
+ * (software-decoded ProRes/DNxHR) into a bridge-owned device buffer and
+ * returns the CUdeviceptr pair valid until the next upload or bridge
+ * destroy.  The traffic is accounted as host pixel upload by the caller. */
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_upload_frame(
+    RtxNgxBridge* bridge, const void* y_plane, const void* uv_plane, uint32_t y_pitch,
+    uint32_t uv_pitch, int32_t width, int32_t height, uint64_t* y_device,
+    uint64_t* uv_device);
 
 #ifdef __cplusplus
 } /* extern "C" */

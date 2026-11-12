@@ -57,6 +57,18 @@ struct NvencHevcHdrSettings {
     HevcVuiParameters vui{};
 };
 
+// Phase 7 (Task 7-B2): one frame's real GPU-reduced luminance statistics for
+// the SMPTE ST 2094-40 (HDR10+) dynamic metadata synthesis.  Plain aggregate
+// so designated initialisers keep working.
+struct Hdr10PlusFrameStats {
+    std::uint32_t maxscl_r_nits = 1000;
+    std::uint32_t maxscl_g_nits = 1000;
+    std::uint32_t maxscl_b_nits = 1000;
+    std::uint32_t average_maxrgb_nits = 400;
+    std::uint16_t knee_point_x = 500;
+    std::uint16_t knee_point_y = 500;
+};
+
 class SeiSynthesizer {
 public:
     static Result<Hdr10Metadata> makeMetadata(const TrueHdrParameters& params);
@@ -75,6 +87,23 @@ public:
 
     // AV1 metadata OBU payload (mdcv + clli) for container/bitstream use.
     static std::vector<uint8_t> av1MetadataObu(const Hdr10Metadata& metadata);
+
+    // Phase 7 (Task 7-B2): ITU-T T.35 carrier of the SMPTE ST 2094-40
+    // (HDR10+) dynamic metadata payload: country_code 0xB5, terminal provider
+    // code 0x003C, terminal provider oriented code 0x00, application
+    // identifier 0x04, followed by the ST 2094-40 v1 bitstream built from the
+    // frame statistics.
+    static std::vector<uint8_t> hdr10PlusItuT35Payload(const Hdr10PlusFrameStats& stats);
+
+    // Phase 7 (Task 7-B2): the same T.35 payload wrapped as an AV1
+    // OBU_METADATA (OBU type 6, METADATA_TYPE_ITUT_T35 = 3) temporal-unit
+    // fragment ready to prepend to an encoded AV1 packet.
+    static std::vector<uint8_t> av1Hdr10PlusMetadataObu(const Hdr10PlusFrameStats& stats);
+
+    // Phase 7 (Task 7-B2): complete Annex-B prefix SEI NAL (start code
+    // included, payload type 4 = user data registered by ITU-T T.35) for the
+    // HEVC Main10 HDR10+ path.
+    static std::vector<uint8_t> hevcHdr10PlusPrefixSei(const Hdr10PlusFrameStats& stats);
 
     // Canonical, endian-independent serialisation used by the sidecar and by
     // tests.  This is NOT the FFmpeg side-data struct.

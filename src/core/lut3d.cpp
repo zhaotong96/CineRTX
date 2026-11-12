@@ -1,0 +1,153 @@
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
+// Copyright (C) 2026 RTX Transcode Engine contributors
+//
+// Adobe Iridas .cube 3D LUT parser.  See include/rtx/lut3d.h for the contract.
+// The implementation is allocation-frugal and rejects malformed files with a
+// structured Status instead of throwing; the FP16 conversion rounds to
+// nearest-even exactly like the GPU's __float2half so the identity-accuracy
+// test can compare against a CPU reference without drift.
+
+#include "rtx/lut3d.h"
+
+#include "rtx/color.h"
+
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace rtx {
+namespace {
+
+bool parseIntegerToken(const std::string& token, int& value) {
+    const char* begin = token.c_str();
+    const char* end = begin + token.size();
+    const auto result = std::from_chars(begin, end, value);
+    return result.ec == std::errc{} && result.ptr == end;
+}
+
+bool parseFloatToken(const std::string& token, float& value) {
+    try {
+        size_t consumed = 0;
+        value = std::stof(token, &consumed);
+        return consumed == token.size();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+}  // namespace
+
+Result<Lut3D> Lut3D::parse(const std::string& text) {
+    int grid_size = 0;
+    std::vector<float> table;  // RGB rows in .cube order
+    bool header_done = false;
+    std::istringstream stream(text);
+    std::string line;
+    int line_no = 0;
+    while (std::getline(stream, line)) {
+        ++line_no;
+        // Strip a UTF-8 BOM on the first line.
+        if (line_no == 1 && line.size() >= 3 &&
+            static_cast<unsigned char>(line[0]) == 0xEF &&
+            static_cast<unsigned char>(line[1]) == 0xBB &&
+            static_cast<unsigned char>(line[2]) == 0xBF) {
+            line.erase(0, 3);
+        }
+        const size_t comment = line.find('#');
+        if (comment != std::string::npos) {
+            line.erase(comment);
+        }
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
+            continue;
+        }
+        std::istringstream tokens(line);
+        std::string keyword;
+        tokens >> keyword;
+        if (keyword == "TITLE" || keyword == "DOMAIN_MIN" || keyword == "DOMAIN_MAX" ||
+            keyword == "LUT_3D_INPUT_RANGE" || keyword == "LUT_1D_INPUT_RANGE") {
+            continue;  // informational
+        }
+        if (keyword == "LUT_3D_SIZE") {
+            std::string value_token;
+            tokens >> value_token;
+            if (!parseIntegerToken(value_token, grid_size) || grid_size < 2 ||
+                grid_size > 256) {
+                return err(ErrorCode::InvalidArgument,
+                           "LUT_3D_SIZE must be an integer in 2..256 (line " +
+                               std::to_string(line_no) + ")");
+            }
+            table.reserve(static_cast<size_t>(grid_size) * grid_size * grid_size * 3u);
+            header_done = true;
+            continue;
+        }
+        if (keyword == "LUT_1D_SIZE") {
+            return err(ErrorCode::Unsupported, "1D (.cube) LUT files are not supported");
+        }
+        if (!header_done) {
+            return err(ErrorCode::InvalidArgument,
+                       ".cube data rows appeared before LUT_3D_SIZE (line " +
+                           std::to_string(line_no) + ")");
+        }
+        float r = 0.0f;
+        float g = 0.0f;
+        float b = 0.0f;
+        // A data row starts with its red value, which `keyword` already
+        // consumed from the stream; keep it as the first token.
+        const std::string token_r = keyword;
+        std::string token_g;
+        std::string token_b;
+        tokens >> token_g >> token_b;
+        if (!parseFloatToken(token_r, r) || !parseFloatToken(token_g, g) ||
+            !parseFloatToken(token_b, b)) {
+            return err(ErrorCode::InvalidArgument,
+                       "malformed .cube data row (line " + std::to_string(line_no) + ")");
+        }
+        table.push_back(r);
+        table.push_back(g);
+        table.push_back(b);
+    }
+    if (grid_size == 0) {
+        return err(ErrorCode::InvalidArgument, ".cube file has no LUT_3D_SIZE header");
+    }
+    const size_t expected = static_cast<size_t>(grid_size) * grid_size * grid_size;
+    if (table.size() != expected * 3u) {
+        return err(ErrorCode::InvalidArgument,
+                   ".cube data row count mismatch: expected " +
+                       std::to_string(expected) + ", got " +
+                       std::to_string(table.size() / 3u));
+    }
+
+    Lut3D lut;
+    lut.grid_size_ = grid_size;
+    lut.half4_table_.resize(expected * 4u);
+    for (size_t i = 0; i < expected; ++i) {
+        lut.half4_table_[i * 4u + 0u] = floatToHalf(table[i * 3u + 0u]);
+        lut.half4_table_[i * 4u + 1u] = floatToHalf(table[i * 3u + 1u]);
+        lut.half4_table_[i * 4u + 2u] = floatToHalf(table[i * 3u + 2u]);
+        lut.half4_table_[i * 4u + 3u] = floatToHalf(1.0f);
+    }
+    return lut;
+}
+
+Result<Lut3D> Lut3D::loadFromCubeFile(const std::filesystem::path& path) {
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) {
+        return err(ErrorCode::NotFound, "3D LUT file does not exist: " + path.string());
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return err(ErrorCode::Io, "cannot open 3D LUT file: " + path.string());
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return parse(buffer.str());
+}
+
+}  // namespace rtx

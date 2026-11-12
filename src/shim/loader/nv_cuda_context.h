@@ -23,7 +23,9 @@ public:
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
 
-    bool open(std::string* error = nullptr);
+    // Phase 8 (Task 8-A1): `device_index` selects the GPU whose primary
+    // context is retained (0 = default device).
+    bool open(std::string* error = nullptr, int device_index = 0);
     void close();
 
     bool valid() const noexcept { return context_ != nullptr && driver_.readyForProbe(); }

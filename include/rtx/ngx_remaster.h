@@ -48,6 +48,20 @@ public:
     RtxResult remaster(RtxNgxBridge* bridge, const RtxNgxRemasterInput* input,
                        RtxNgxRemasterOutput* output, RtxNgxRemasterStats* stats) const;
     RtxResult getRemasterStats(RtxNgxBridge* bridge, RtxNgxRemasterStats* stats) const;
+    // Phase 7 (ABI v3) extensions.  Resolved optionally so a stale sidecar
+    // still serves the base remaster contract; the callers handle RTX_ERR.
+    RtxResult setLut3d(RtxNgxBridge* bridge, const uint16_t* lut_half4_data,
+                       int32_t grid_size) const;
+    RtxResult previewBuffer(RtxNgxBridge* bridge, uint32_t slot, uint64_t* device_ptr,
+                            uint32_t* pitch) const;
+    RtxResult downloadPreview(RtxNgxBridge* bridge, void* destination,
+                              size_t destination_bytes) const;
+    // Phase 8 (Task 8-B1): upload a host P010 frame for the software-decode
+    // path (optional resolution, append-only ABI).
+    RtxResult uploadFrame(RtxNgxBridge* bridge, const void* y_plane, const void* uv_plane,
+                          uint32_t y_pitch, uint32_t uv_pitch, int32_t width, int32_t height,
+                          uint64_t* y_device, uint64_t* uv_device) const;
+    bool hasPhase7Api() const noexcept { return set_lut3d_ != nullptr; }
     const char* lastError(RtxNgxBridge* bridge) const;
 
 private:
@@ -72,6 +86,13 @@ private:
                                         RtxNgxRemasterOutput*, RtxNgxRemasterStats*) = nullptr;
     RtxResult(RTX_SHIM_CALL* get_remaster_stats_)(RtxNgxBridge*, RtxNgxRemasterStats*) = nullptr;
     const char*(RTX_SHIM_CALL* last_error_)(RtxNgxBridge*) = nullptr;
+    RtxResult(RTX_SHIM_CALL* set_lut3d_)(RtxNgxBridge*, const uint16_t*, int32_t) = nullptr;
+    RtxResult(RTX_SHIM_CALL* preview_buffer_)(RtxNgxBridge*, uint32_t, uint64_t*,
+                                              uint32_t*) = nullptr;
+    RtxResult(RTX_SHIM_CALL* download_preview_)(RtxNgxBridge*, void*, size_t) = nullptr;
+    RtxResult(RTX_SHIM_CALL* upload_frame_)(RtxNgxBridge*, const void*, const void*, uint32_t,
+                                            uint32_t, int32_t, int32_t, uint64_t*,
+                                            uint64_t*) = nullptr;
 };
 
 }  // namespace rtx

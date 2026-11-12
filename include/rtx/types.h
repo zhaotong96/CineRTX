@@ -114,6 +114,10 @@ enum class VideoCodec : int32_t {
     H264 = 1,
     HEVC = 2,
     AV1 = 3,
+    // Phase 8 (Task 8-B1): broadcast codecs NVDEC cannot decode; the engine
+    // routes them through the FFmpeg software decoder (broadcast tier).
+    ProRes = 4,
+    Dnxhd = 5,
 };
 
 [[nodiscard]] constexpr const char* videoCodecName(VideoCodec codec) noexcept {
@@ -124,6 +128,10 @@ enum class VideoCodec : int32_t {
             return "hevc";
         case VideoCodec::AV1:
             return "av1";
+        case VideoCodec::ProRes:
+            return "prores";
+        case VideoCodec::Dnxhd:
+            return "dnxhd";
         case VideoCodec::Unknown:
             break;
     }

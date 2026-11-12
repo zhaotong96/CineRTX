@@ -483,7 +483,7 @@ rtx_shim_decoder_create(const RtxDecoderConfig* config, RtxDecoder** decoder) {
         std::clamp(config->max_surfaces > 0 ? config->max_surfaces : 32, 8, 64));
 
     std::string error;
-    if (!self->cuda.open(&error)) {
+    if (!self->cuda.open(&error, config->device_index)) {
         delete self;
         return RTX_ERR_DLL_MISSING;
     }

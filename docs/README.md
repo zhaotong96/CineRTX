@@ -21,7 +21,7 @@
 | **04** | [`spec/gate1.md`](spec/gate1.md) | 一阶段零拷贝编解码基线（NVDEC $\to$ VRAM Pool $\to$ NVENC）；现作为历史测量记录与 `verify_gate1.ps1` 复验依据 | `gate1`, `nvdec`, `nvenc`, `throughput` |
 | **05** | [`spec/gate2.md`](spec/gate2.md) | 二阶段 4K HDR10 工业级画质重制门禁标准（VSR 超分、TrueHDR 色调映射） | `gate2`, `vsr`, `truehdr`, `hdr10`, `bt2020` |
 | **06** | [`spec/gate3.md`](spec/gate3.md) | 阶段三 (v0.2.0) 验收门禁标准：Gate 3.0 静态自包含与单 EXE（阻断项）、3.1 吞吐、3.2 画质、3.3 视口干扰、3.4 长稳 A/V 同步与 3.5 全栈合规 | `gate3`, `v0.2.0`, `static-self-containment`, `acceptance` |
-| **07** | [`spec/testing.md`](spec/testing.md) | 自动化测试体系指南、CTest 运行指引与 137 项测试用例分布说明 | `tests`, `ctest`, `coverage`, `unit-tests` |
+| **07** | [`spec/testing.md`](spec/testing.md) | 自动化测试体系指南、CTest 运行指引与 79 项精炼测试用例分布说明 | `tests`, `ctest`, `coverage`, `unit-tests` |
 
 ---
 
@@ -152,4 +152,21 @@
 | **56** | [`phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md`](phase6/CineRTX_Phase6_架构全面瘦身与专业级产品化专家裁决与技术方案.md) | 阶段六十三大核心议题专家终审裁决与一体化工程施工方案（DOC-VERDICT-PHASE6-REFACTOR-001，废除手绘教条、Win32原生标准控件、AV1 10-bit默认、100% RAII重塑、MSVC AVX2实证、外科手术式砍削3.4万行代码） | `phase6-verdict`, `native-controls`, `av1-unlocked`, `strict-raii`, `avx2-ymm`, `codebase-slash` |
 | **57** | [`phase6/CineRTX_Phase6_专家取证与交付审查报告.md`](phase6/CineRTX_Phase6_专家取证与交付审查报告.md) | 阶段六全仓源码与55篇历史文档深度取证执行摘要报告（UI停滞根因、AV1五处拦截点、构建文件污染、六大历史文档矛盾及5万行代码膨胀真相） | `phase6-forensics`, `doc-audit`, `slop-diagnosis`, `codebase-truth` |
 | **58** | [`phase6/CineRTX_Phase6_第一阶段构建治理与死代码切除施工方案.md`](phase6/CineRTX_Phase6_第一阶段构建治理与死代码切除施工方案.md) | 阶段六第一波次施工实施方案（PLAN-PHASE6-WAVE1-CLEANSE-20261110，阻断增量链接、符号隔离、删除源码树内嵌PTX、切除RIFE/FRUC/DComp死代码、净砍3万行代码） | `phase6-wave1`, `cmake-hygiene`, `ptx-dynamic-gen`, `dead-code-removal`, `slimming-plan` |
+| **59** | [`phase6/CineRTX_阶段六收官与系统整体验收及未来演进专家委托书.md`](phase6/CineRTX_阶段六收官与系统整体验收及未来演进专家委托书.md) | 阶段六收官与系统整体验收及未来演进专家委托书（Phase 1～6 实测验收、四大关键问卷：主线选型、实时视口、专业色彩、多GPU与跨平台路线） | `phase6-closure`, `acceptance`, `roadmap-commission` |
+
+---
+
+## 十一、 阶段七 参数闭环、实时监看、色彩科学与云原生演进 (`docs/phase7/`)
+
+本目录收录阶段七（Wave 1~4 全波次：参数闭环微瑕清零、D3D12 FLIP 原生监看视口、融合 3D LUT / HDR10+ 色彩科学、多 GPU 拓扑调度与 Linux 纯 CUDA 无头服务）的专家裁决、施工方案与实证报告。
+
+| 序号 | 规范与调研文档 | 核心内容 | 索引关键字 |
+| :---: | :--- | :--- | :--- |
+| **60** | [`phase7/CineRTX_Phase7_专家裁决与战略演进报告.md`](phase7/CineRTX_Phase7_专家裁决与战略演进报告.md) | 阶段六收官终审验收、深层瓶颈剖析与 Phase 7–9 战略演进专家裁决报告（全票批准 Phase 6 收官，确立数据面定型优先法则，拆解 Wave 1～4 演进蓝图） | `phase7-verdict`, `roadmap-blueprint`, `viewport-d3d12`, `lut3d-fused`, `multi-gpu`, `linux-headless` |
+| **61** | [`phase7/CineRTX_Phase7_Wave1_参数闭环与微瑕清零施工方案.md`](phase7/CineRTX_Phase7_Wave1_参数闭环与微瑕清零施工方案.md) | Wave 1 参数闭环与微瑕清零施工方案（GUI 峰值亮度与画幅绑定、音频直通拦截、VSR 启停透传、聚合体安全与死代码清理） | `phase7-wave1`, `param-closure`, `audio-passthrough`, `vsr-passthrough` |
+| **62** | [`phase7/CineRTX_Phase7_Wave2_实时监看与色彩科学施工方案.md`](phase7/CineRTX_Phase7_Wave2_实时监看与色彩科学施工方案.md) | Wave 2 实时监看视口与色彩科学施工方案（独立子 HWND D3D12 FLIP 交换链、零额外带宽融合核函数、3D LUT FP16 纹理采样、HDR10+ 动态元数据） | `phase7-wave2`, `realtime-viewport`, `d3d12-flip`, `fused-pack`, `lut3d`, `hdr10plus` |
+| **63** | [`phase7/CineRTX_Phase7_Wave3_多GPU分片调度与长稳施工方案.md`](phase7/CineRTX_Phase7_Wave3_多GPU分片调度与长稳施工方案.md) | Wave 3 多 GPU 拓扑分片调度与长稳鲁棒性施工方案（拓扑探测与设备绑定、GOP 智能切片、动态软解兜底、TDR 注入与弹性恢复） | `phase7-wave3`, `multi-gpu`, `topology`, `gop-split`, `anti-tdr`, `fuzz-resilience` |
+| **64** | [`phase7/CineRTX_Phase7_Wave4_Linux纯CUDA与云原生施工方案.md`](phase7/CineRTX_Phase7_Wave4_Linux纯CUDA与云原生施工方案.md) | Wave 4 Linux 纯 CUDA 与云原生施工方案（跨平台 ABI 统一、cuLaunchKernel 动态运行时、Lanczos-3 / CAS 算子后端、无头服务化） | `phase7-wave4`, `linux-cuda`, `headless-engine`, `cloud-native`, `dyn-cuda` |
+| **65** | [`phase7/CineRTX_Phase7_验收实证报告.md`](phase7/CineRTX_Phase7_验收实证报告.md) | Phase 7 Wave 1～4 全要素验收实证报告（静态检查、编译门禁、单测全绿、实机 4K HDR10 转码验证与全链路证据） | `phase7-acceptance`, `full-verification`, `evidence` |
+
 

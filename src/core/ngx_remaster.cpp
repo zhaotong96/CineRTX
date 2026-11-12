@@ -129,6 +129,10 @@ bool NgxRemasterBridge::bindEmbedded(std::string* error) {
     remaster_ = &rtx_ngx_bridge_remaster;
     get_remaster_stats_ = &rtx_ngx_bridge_get_remaster_stats;
     last_error_ = &rtx_ngx_bridge_last_error;
+    set_lut3d_ = &rtx_ngx_bridge_set_lut3d;
+    preview_buffer_ = &rtx_ngx_bridge_preview_buffer;
+    download_preview_ = &rtx_ngx_bridge_download_preview;
+    upload_frame_ = &rtx_ngx_bridge_upload_frame;
     embedded_ = true;
     path_ = "embedded:rtx_ngx_bridge";
     error_.clear();
@@ -222,6 +226,14 @@ bool NgxRemasterBridge::open(std::string* error) {
             continue;
         }
 
+        // Phase 7 (ABI v3) extensions resolve optionally: an older sidecar
+        // keeps the base remaster contract working, the callers handle a null
+        // pointer with RTX_ERR_DLL_MISSING.
+        (void)resolve(set_lut3d_, "rtx_ngx_bridge_set_lut3d", nullptr);
+        (void)resolve(preview_buffer_, "rtx_ngx_bridge_preview_buffer", nullptr);
+        (void)resolve(download_preview_, "rtx_ngx_bridge_download_preview", nullptr);
+        (void)resolve(upload_frame_, "rtx_ngx_bridge_upload_frame", nullptr);
+
         error_.clear();
         if (error != nullptr) {
             error->clear();
@@ -263,6 +275,10 @@ void NgxRemasterBridge::close() {
     remaster_ = nullptr;
     get_remaster_stats_ = nullptr;
     last_error_ = nullptr;
+    set_lut3d_ = nullptr;
+    preview_buffer_ = nullptr;
+    download_preview_ = nullptr;
+    upload_frame_ = nullptr;
 }
 
 RtxResult NgxRemasterBridge::queryCaps(RtxNgxBridgeCaps* caps) const {
@@ -290,6 +306,35 @@ RtxResult NgxRemasterBridge::getRemasterStats(RtxNgxBridge* bridge,
                                               RtxNgxRemasterStats* stats) const {
     return get_remaster_stats_ != nullptr ? get_remaster_stats_(bridge, stats)
                                           : RTX_ERR_DLL_MISSING;
+}
+
+RtxResult NgxRemasterBridge::setLut3d(RtxNgxBridge* bridge, const uint16_t* lut_half4_data,
+                                      int32_t grid_size) const {
+    return set_lut3d_ != nullptr ? set_lut3d_(bridge, lut_half4_data, grid_size)
+                                 : RTX_ERR_DLL_MISSING;
+}
+
+RtxResult NgxRemasterBridge::previewBuffer(RtxNgxBridge* bridge, uint32_t slot,
+                                           uint64_t* device_ptr, uint32_t* pitch) const {
+    return preview_buffer_ != nullptr ? preview_buffer_(bridge, slot, device_ptr, pitch)
+                                      : RTX_ERR_DLL_MISSING;
+}
+
+RtxResult NgxRemasterBridge::downloadPreview(RtxNgxBridge* bridge, void* destination,
+                                             size_t destination_bytes) const {
+    return download_preview_ != nullptr
+               ? download_preview_(bridge, destination, destination_bytes)
+               : RTX_ERR_DLL_MISSING;
+}
+
+RtxResult NgxRemasterBridge::uploadFrame(RtxNgxBridge* bridge, const void* y_plane,
+                                         const void* uv_plane, uint32_t y_pitch,
+                                         uint32_t uv_pitch, int32_t width, int32_t height,
+                                         uint64_t* y_device, uint64_t* uv_device) const {
+    return upload_frame_ != nullptr
+               ? upload_frame_(bridge, y_plane, uv_plane, y_pitch, uv_pitch, width, height,
+                               y_device, uv_device)
+               : RTX_ERR_DLL_MISSING;
 }
 
 const char* NgxRemasterBridge::lastError(RtxNgxBridge* bridge) const {

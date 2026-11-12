@@ -142,7 +142,10 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     output_height_ = config.output_height;
     vsr_quality_ = std::clamp(config.vsr_quality, 1, 4);
     node_mask_ = config.luid_node_mask != 0 ? config.luid_node_mask : 1u;
-    needs_vsr_ = output_width_ > input_width_ || output_height_ > input_height_;
+    // Phase 6.1 微瑕 3: vsr_quality == 0 is the explicit "VSR disabled" signal;
+    // a larger output canvas alone no longer silently re-enables VSR.
+    needs_vsr_ = (config.vsr_quality > 0) &&
+                 (output_width_ > input_width_ || output_height_ > input_height_);
     needs_truehdr_ = config.enable_truehdr != 0;
     needs_mid_ = needs_vsr_;
     if (!needs_vsr_ && !needs_truehdr_) {
@@ -165,8 +168,10 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     base_contrast_ = golden ? 125 : std::clamp(config.contrast, 0, 200);
     base_saturation_ = golden ? 75 : std::clamp(config.saturation, 0, 200);
     base_middle_gray_ = golden ? 44 : std::clamp(config.middle_gray, 10, 100);
+    // Phase 6.1 微瑕 1: the peak-luminance option now flows through, so the
+    // bridge honours the full 400..4000 cd/m^2 range the ABI contract allows.
     max_luminance_ = config.max_luminance == 0 ? 1000
-                                               : std::clamp(config.max_luminance, 400, 2000);
+                                               : std::clamp(config.max_luminance, 400, 4000);
     contrast_ = base_contrast_;
     saturation_ = base_saturation_;
     middle_gray_ = base_middle_gray_;

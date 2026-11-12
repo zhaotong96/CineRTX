@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -19,6 +20,19 @@
 #include "rtx/types.h"
 
 namespace rtx {
+
+// Phase 7 (Task 7-B3): one source stream eligible for bitstream-level
+// passthrough into the output container (every audio stream plus the
+// subtitle streams the output container can carry natively).
+struct PassthroughStreamInfo {
+    int stream_index = -1;
+    int codec_type = 0;  // 1 = audio (AVMEDIA_TYPE_AUDIO), 2 = subtitle
+    int codec_id = 0;
+    std::string codec_name;
+    Rational time_base{1, 1000};
+    // FFmpeg AVCodecParameters clone owning the real extradata/layout.
+    std::shared_ptr<void> opaque_codecpar;
+};
 
 struct MediaInfo {
     std::string container;
@@ -35,6 +49,9 @@ struct MediaInfo {
     int subtitle_streams = 0;
     std::vector<AudioTrackInfo> audio_tracks;
     int primary_audio_index = -1;
+    // Phase 7 (Task 7-B3 / verdict §3.2): full multi-audio + subtitle
+    // passthrough set (supersedes the single primary_audio_index).
+    std::vector<PassthroughStreamInfo> passthrough_streams;
     bool hdr_source = false;
     std::string format_name;
 
@@ -57,6 +74,11 @@ public:
     virtual std::vector<std::string> warnings() const { return {}; }
     // Index of the best audio stream, or -1 when the container has none.
     virtual int audioStreamIndex() const noexcept { return -1; }
+    // Phase 7 scrubbing / Phase 8 checkpoint recovery: repositions the video
+    // stream to the latest key frame at or before `video_stream_pts` (PTS in
+    // the video stream's own time base).  Subsequent readPacket() calls
+    // deliver packets from that point.
+    virtual Result<void> seekToKeyframeBefore(int64_t video_stream_pts) { return err(ErrorCode::Unsupported, "this demuxer cannot seek"); }
 };
 
 class IMuxer {
@@ -71,6 +93,43 @@ public:
 
 std::unique_ptr<IDemuxer> makeFfmpegDemuxer();
 std::unique_ptr<IMuxer> makeFfmpegMuxer();
+
+// ---------------------------------------------------------------------------
+// Phase 8 (Task 8-B1): broadcast-tier software decoder (ProRes / DNxHR).
+// NVDEC has no hardware support for these codecs, so the frames are decoded
+// with the statically linked FFmpeg decoders and converted to P010 planes in
+// host memory; the bridge then DMA-uploads them into device memory for the
+// normal VSR + TrueHDR + NVENC remaster path.
+// ---------------------------------------------------------------------------
+struct DecodedVideoFrame {
+    std::vector<uint8_t> y_plane;   // P010 luma (uint16 LE, 10-bit << 6)
+    std::vector<uint8_t> uv_plane;  // interleaved UV (uint16 LE, << 6)
+    uint32_t y_pitch = 0;           // bytes per row
+    uint32_t uv_pitch = 0;          // bytes per row
+    int width = 0;
+    int height = 0;
+    int64_t pts_90k = 0;
+    int64_t dts_90k = 0;
+};
+
+class IDemuxer;
+
+class ISoftVideoDecoder {
+public:
+    virtual ~ISoftVideoDecoder() = default;
+    // Configures the decoder from the demuxer MediaInfo (codec/extradata/
+    // geometry).  The caller owns the demuxer and keeps reading it, so audio
+    // and subtitle passthrough continue on the normal path.
+    virtual Result<void> configure(const MediaInfo& info) = 0;
+    // Feeds one video packet; returns the decoded frame when the decoder has
+    // produced one (std::nullopt when more input is needed).
+    virtual Result<std::optional<DecodedVideoFrame>> feed(const Packet& video_packet) = 0;
+    // End-of-stream flush; returns the tail frames one at a time until
+    // ErrorCode::NotFound.
+    virtual Result<std::optional<DecodedVideoFrame>> drain() = 0;
+};
+
+std::unique_ptr<ISoftVideoDecoder> makeFfmpegSoftDecoder();
 
 // Compile-time invariant: the media container layer is always present.
 constexpr bool ffmpegAvailable() noexcept { return true; }
