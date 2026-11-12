@@ -61,6 +61,9 @@ public:
     RtxResult uploadFrame(RtxNgxBridge* bridge, const void* y_plane, const void* uv_plane,
                           uint32_t y_pitch, uint32_t uv_pitch, int32_t width, int32_t height,
                           uint64_t* y_device, uint64_t* uv_device) const;
+    RtxResult interpolateNv12(RtxNgxBridge* bridge, uint64_t prev_nv12, uint64_t curr_nv12,
+                             uint32_t pitch, float alpha, uint64_t out_nv12) const;
+    uint64_t getInterpBuffer(RtxNgxBridge* bridge, uint32_t width, uint32_t height) const;
     bool hasPhase7Api() const noexcept { return set_lut3d_ != nullptr; }
     const char* lastError(RtxNgxBridge* bridge) const;
 
@@ -93,6 +96,8 @@ private:
     RtxResult(RTX_SHIM_CALL* upload_frame_)(RtxNgxBridge*, const void*, const void*, uint32_t,
                                             uint32_t, int32_t, int32_t, uint64_t*,
                                             uint64_t*) = nullptr;
+    int32_t(RTX_SHIM_CALL* interpolate_nv12_)(RtxNgxBridge*, uint64_t, uint64_t, uint32_t, float, uint64_t) = nullptr;
+    uint64_t(RTX_SHIM_CALL* get_interp_buffer_)(RtxNgxBridge*, uint32_t, uint32_t) = nullptr;
 };
 
 }  // namespace rtx

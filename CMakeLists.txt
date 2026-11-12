@@ -12,6 +12,9 @@ project(CineRTX
     DESCRIPTION "Next-generation pure-GPU video remastering & NLE engine for NVIDIA RTX"
     LANGUAGES CXX)
 
+# Enforce static CRT (/MT) globally across all targets
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 if(CMAKE_HOST_WIN32 AND NOT CMAKE_SYSTEM_PROCESSOR)
     set(CMAKE_SYSTEM_PROCESSOR "AMD64" CACHE STRING "Target processor" FORCE)
 endif()
@@ -133,21 +136,19 @@ endif()
 # ---------------------------------------------------------------------------
 
 set(RTX_CORE_SOURCES
-    src/core/color.cpp
     src/core/geometry.cpp
     src/core/hw_transcode.cpp
     src/core/i18n.cpp
     src/core/lut3d.cpp
-    src/core/multi_gpu_scheduler.cpp
     src/core/runtime_env.cpp
     src/core/ngx_remaster.cpp
     src/core/nvidia_shim.cpp
     src/core/rational.cpp
     src/core/sei_synthesizer.cpp
     src/core/status.cpp
-    src/core/vram_ring_pool.cpp
     src/io/ffmpeg_io.cpp
     src/io/memory_avio.cpp
+    src/io/msvc_compat_mt.cpp
     src/io/bitstream.cpp)
 
 add_library(rtx_core STATIC ${RTX_CORE_SOURCES})
@@ -277,10 +278,8 @@ if(WIN32)
         src/shim/ngx_bridge/d3d12_interop.cpp
         "${RTX_PTX_HEADER}")
 else()
-    # Phase 9 (Task 9-A2): Linux headless pure-CUDA backend - zero Vulkan, zero
-    # D3D12, zero libcudart; the fused remaster kernel ships as embedded PTX.
     set(RTX_NGX_BRIDGE_SOURCES
-        src/shim/ngx_bridge/ngx_cuda_bridge_linux.cpp
+        src/shim/ngx_bridge/bridge_exports.cpp
         src/shim/ngx_bridge/p010_pack_runtime.cpp
         "${RTX_PTX_HEADER}")
 endif()
@@ -340,6 +339,7 @@ else()
     target_link_libraries(rtx_core PUBLIC rtx_ngx_bridge_static)
     target_compile_definitions(rtx_core PUBLIC RTX_EMBEDDED_NGX_BRIDGE=1)
 endif()
+
 
 if(WIN32)
     set(RTX_NGX_ROOT_DIR "")
@@ -495,13 +495,11 @@ if(WIN32 AND RTX_BUILD_GUI)
         src/gui/rtx_gui.cpp
         src/gui/preview_viewport.cpp
         src/cli/main.cpp
-        src/cli/daemon_rpc.cpp
         src/cli/shim_probe.cpp)
 else()
     set(RTX_CINERTX_SOURCES
         src/cli/main.cpp
         src/cli/main_entry.cpp
-        src/cli/daemon_rpc.cpp
         src/cli/shim_probe.cpp)
 endif()
 
@@ -510,7 +508,7 @@ add_executable(rtx::cinertx ALIAS CineRTX)
 target_link_libraries(CineRTX PRIVATE rtx_core)
 if(WIN32)
     # CommandLineToArgvW: wWinMain rebuilds argv as UTF-8 so non-ASCII paths work.
-    target_link_libraries(CineRTX PRIVATE shell32 ws2_32)
+    target_link_libraries(CineRTX PRIVATE shell32)
 endif()
 if(WIN32 AND RTX_BUILD_GUI)
     target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 comdlg32 comctl32 uxtheme d3d12 dxgi)
@@ -602,9 +600,6 @@ endif()
 
 if(RTX_BUILD_TESTS)
     set(RTX_TEST_SOURCES
-        tests/test_color.cpp
-        tests/test_concurrency.cpp
-        tests/test_daemon_rpc.cpp
         tests/test_flicks_timebase.cpp
         tests/test_fuzz_resilience.cpp
         tests/test_hdr.cpp
@@ -616,15 +611,13 @@ if(RTX_BUILD_TESTS)
         tests/test_rational.cpp
         tests/test_shim.cpp
         tests/test_status.cpp
-        tests/test_types.cpp
-        tests/test_vram.cpp)
+        tests/test_types.cpp)
 
     add_executable(rtx_tests ${RTX_TEST_SOURCES}
-        src/cli/shim_probe.cpp
-        src/cli/daemon_rpc.cpp)
+        src/cli/shim_probe.cpp)
     target_link_libraries(rtx_tests PRIVATE rtx_core rtx_project_options)
     if(WIN32)
-        target_link_libraries(rtx_tests PRIVATE rtx_ngx_bridge_static ws2_32)
+        target_link_libraries(rtx_tests PRIVATE rtx_ngx_bridge_static)
     endif()
     if(CMAKE_DL_LIBS)
         target_link_libraries(rtx_tests PRIVATE ${CMAKE_DL_LIBS})

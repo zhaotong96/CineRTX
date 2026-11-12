@@ -48,7 +48,7 @@ typedef enum RtxResult {
     RTX_ERR_DEVICE_LOST = 8,
     RTX_ERR_OUT_OF_MEMORY = 9,
     RTX_ERR_NGX = 10,
-    RTX_ERR_TENSORRT_VERSION = 11,
+    RTX_ERR_RESERVED_11 = 11,
     RTX_ERR_NOT_IMPLEMENTED = 12,
     RTX_ERR_INTERNAL = 13
 } RtxResult;
@@ -77,7 +77,7 @@ typedef enum RtxCapabilityBits {
     RTX_CAP_VSR = 1u << 3,
     RTX_CAP_TRUEHDR = 1u << 4,
     RTX_CAP_NVOFA = 1u << 5,
-    RTX_CAP_TENSORRT = 1u << 6,
+    RTX_CAP_RESERVED_6 = 1u << 6,
     RTX_CAP_D3D12_INTEROP = 1u << 7,
     RTX_CAP_CPU_REFERENCE = 1u << 8
 } RtxCapabilityBits;

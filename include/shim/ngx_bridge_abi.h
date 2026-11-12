@@ -251,6 +251,17 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_upload_frame(
     uint32_t uv_pitch, int32_t width, int32_t height, uint64_t* y_device,
     uint64_t* uv_device);
 
+/* Phase 8 Rework (Track B): NVOFA hardware optical flow and motion-interpolated
+ * NV12 frame synthesis.  Interpolates between prev_nv12 and curr_nv12 at
+ * temporal phase alpha (0..1) directly into out_nv12 using the bridge's
+ * retained CUDA context and Driver API. */
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_nv12(
+    RtxNgxBridge* bridge, uint64_t prev_nv12, uint64_t curr_nv12,
+    uint32_t pitch, float alpha, uint64_t out_nv12);
+
+RTX_SHIM_API uint64_t RTX_SHIM_CALL rtx_ngx_bridge_get_interp_buffer(
+    RtxNgxBridge* bridge, uint32_t width, uint32_t height);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

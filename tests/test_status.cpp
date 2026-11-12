@@ -32,8 +32,8 @@ RTX_TEST(status_error_names_are_stable) {
     RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::InvalidArgument)),
                  std::string("INVALID_ARGUMENT"));
     RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::DllMissing)), std::string("DLL_MISSING"));
-    RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::TensorRtVersion)),
-                 std::string("TENSORRT_VERSION"));
+    RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::Reserved11)),
+                 std::string("RESERVED_11"));
     RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::Internal)), std::string("INTERNAL_ERROR"));
 }
 

@@ -133,6 +133,8 @@ bool NgxRemasterBridge::bindEmbedded(std::string* error) {
     preview_buffer_ = &rtx_ngx_bridge_preview_buffer;
     download_preview_ = &rtx_ngx_bridge_download_preview;
     upload_frame_ = &rtx_ngx_bridge_upload_frame;
+    interpolate_nv12_ = &rtx_ngx_bridge_interpolate_nv12;
+    get_interp_buffer_ = &rtx_ngx_bridge_get_interp_buffer;
     embedded_ = true;
     path_ = "embedded:rtx_ngx_bridge";
     error_.clear();
@@ -233,6 +235,8 @@ bool NgxRemasterBridge::open(std::string* error) {
         (void)resolve(preview_buffer_, "rtx_ngx_bridge_preview_buffer", nullptr);
         (void)resolve(download_preview_, "rtx_ngx_bridge_download_preview", nullptr);
         (void)resolve(upload_frame_, "rtx_ngx_bridge_upload_frame", nullptr);
+        (void)resolve(interpolate_nv12_, "rtx_ngx_bridge_interpolate_nv12", nullptr);
+        (void)resolve(get_interp_buffer_, "rtx_ngx_bridge_get_interp_buffer", nullptr);
 
         error_.clear();
         if (error != nullptr) {
@@ -335,6 +339,18 @@ RtxResult NgxRemasterBridge::uploadFrame(RtxNgxBridge* bridge, const void* y_pla
                ? upload_frame_(bridge, y_plane, uv_plane, y_pitch, uv_pitch, width, height,
                                y_device, uv_device)
                : RTX_ERR_DLL_MISSING;
+}
+
+RtxResult NgxRemasterBridge::interpolateNv12(RtxNgxBridge* bridge, uint64_t prev_nv12,
+                                             uint64_t curr_nv12, uint32_t pitch,
+                                             float alpha, uint64_t out_nv12) const {
+    return interpolate_nv12_ != nullptr
+               ? static_cast<RtxResult>(interpolate_nv12_(bridge, prev_nv12, curr_nv12, pitch, alpha, out_nv12))
+               : RTX_ERR_DLL_MISSING;
+}
+
+uint64_t NgxRemasterBridge::getInterpBuffer(RtxNgxBridge* bridge, uint32_t width, uint32_t height) const {
+    return get_interp_buffer_ != nullptr ? get_interp_buffer_(bridge, width, height) : 0;
 }
 
 const char* NgxRemasterBridge::lastError(RtxNgxBridge* bridge) const {

@@ -105,13 +105,6 @@ public:
     // HEVC Main10 HDR10+ path.
     static std::vector<uint8_t> hevcHdr10PlusPrefixSei(const Hdr10PlusFrameStats& stats);
 
-    // Canonical, endian-independent serialisation used by the sidecar and by
-    // tests.  This is NOT the FFmpeg side-data struct.
-    static std::vector<uint8_t> containerSideData(const Hdr10Metadata& metadata);
-
-    static std::string toJson(const Hdr10Metadata& metadata);
-    static Result<Hdr10Metadata> fromJson(const std::string& json);
-
     static std::vector<uint8_t> insertEmulationPrevention(const std::vector<uint8_t>& rbsp);
 };
 

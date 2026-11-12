@@ -213,62 +213,6 @@ RTX_TEST(hdr_av1_metadata_obus) {
     RTX_CHECK_EQ(obus.size(), static_cast<size_t>(second + 2 + 25));
 }
 
-RTX_TEST(hdr_container_side_data) {
-    Hdr10Metadata hdr = sampleMetadata();
-    const std::vector<uint8_t> side = SeiSynthesizer::containerSideData(hdr);
-    RTX_CHECK_EQ(side.size(), static_cast<size_t>(44));
-    RTX_CHECK_EQ(side[0], static_cast<uint8_t>('R'));
-    RTX_CHECK_EQ(side[1], static_cast<uint8_t>('T'));
-    RTX_CHECK_EQ(side[2], static_cast<uint8_t>('X'));
-    RTX_CHECK_EQ(side[3], static_cast<uint8_t>('H'));
-    RTX_CHECK_EQ(readU16(side, 4), static_cast<uint16_t>(1));
-    RTX_CHECK_EQ(readU16(side, 6), static_cast<uint16_t>(1));
-    RTX_CHECK_EQ(side[8], static_cast<uint8_t>(1000 & 0xFF));
-    RTX_CHECK_EQ(side[9], static_cast<uint8_t>((1000 >> 8) & 0xFF));
-    RTX_CHECK_EQ(readU16(side, 12), static_cast<uint16_t>(hdr.mastering.red_x));
-    RTX_CHECK_EQ(readU16(side, 24), static_cast<uint16_t>(hdr.mastering.white_x));
-    RTX_CHECK_EQ(readU16(side, 26), static_cast<uint16_t>(hdr.mastering.white_y));
-    RTX_CHECK_EQ(readLe32(side, 28), static_cast<uint32_t>(10000000));
-    RTX_CHECK_EQ(readLe32(side, 32), static_cast<uint32_t>(1));
-    RTX_CHECK_EQ(readU16(side, 36), static_cast<uint16_t>(hdr.cll.max_cll));
-    RTX_CHECK_EQ(readU16(side, 38), static_cast<uint16_t>(hdr.cll.max_fall));
-    RTX_CHECK_EQ(readLe32(side, 8), static_cast<uint32_t>(1000));
-    RTX_CHECK_EQ(side[40], static_cast<uint8_t>(9));
-    RTX_CHECK_EQ(side[41], static_cast<uint8_t>(16));
-    RTX_CHECK_EQ(side[42], static_cast<uint8_t>(9));
-    RTX_CHECK_EQ(side[43], static_cast<uint8_t>(0));
-}
-
-RTX_TEST(hdr_json_round_trip) {
-    Hdr10Metadata hdr = sampleMetadata();
-    hdr.target_nits = 1600;
-    hdr.mastering.max_luminance = 16000000;
-    hdr.cll.max_fall = 450;
-    const std::string json = SeiSynthesizer::toJson(hdr);
-    RTX_CHECK(json.find("\"mastering_display\"") != std::string::npos);
-    RTX_CHECK(json.find("\"enabled\": true") != std::string::npos);
-    RTX_CHECK(json.find("\"max_fall\": 450") != std::string::npos);
-
-    const Result<Hdr10Metadata> parsed = SeiSynthesizer::fromJson(json);
-    RTX_REQUIRE(parsed.has_value());
-    const Hdr10Metadata& value = parsed.value();
-    RTX_CHECK(value.enabled);
-    RTX_CHECK_EQ(value.target_nits, static_cast<uint32_t>(1600));
-    RTX_CHECK_EQ(value.mastering.red_x, hdr.mastering.red_x);
-    RTX_CHECK_EQ(value.mastering.max_luminance, hdr.mastering.max_luminance);
-    RTX_CHECK_EQ(value.mastering.min_luminance, hdr.mastering.min_luminance);
-    RTX_CHECK_EQ(value.cll.max_cll, hdr.cll.max_cll);
-    RTX_CHECK_EQ(value.cll.max_fall, hdr.cll.max_fall);
-    RTX_CHECK(value.color.primaries == ColorPrimaries::BT2020);
-    RTX_CHECK(value.color.transfer == TransferFunction::SMPTE2084);
-
-    RTX_CHECK_EQ(SeiSynthesizer::fromJson("{}").error().code, ErrorCode::InvalidArgument);
-    const std::string zero_luminance =
-        R"({"enabled": true, "mastering_display": {"max_luminance": 0}})";
-    RTX_CHECK_EQ(SeiSynthesizer::fromJson(zero_luminance).error().code,
-                 ErrorCode::InvalidArgument);
-}
-
 // ---------------------------------------------------------------------------
 // Phase 7 (Task 7-B2): SMPTE ST 2094-40 (HDR10+) dynamic metadata synthesis.
 // ---------------------------------------------------------------------------

@@ -55,28 +55,23 @@ struct HwTranscodeOptions {
     // kernel (empty = no LUT).
     std::filesystem::path lut_path;
 
-    // Product remaster geometry. The product has no passthrough mode: decoded
-    // NV12/P010 frames always traverse the NGX bridge (preprocess -> VSR ->
-    // TrueHDR -> pack v2) before NVENC.
-    int target_width = 0;   // 0 = 3840 default, resolved by the transcode path
-    int target_height = 0;  // 0 = 2160 default
+    // Product remaster geometry. Decoded NV12/P010 frames always traverse
+    // the NGX bridge (preprocess -> VSR -> TrueHDR -> pack v2) before NVENC.
+    int target_width = 3840;   // 4K UHD default
+    int target_height = 2160;  // 4K UHD default
     bool vsr_enabled = true;
-    int vsr_quality = 2;    // 1..4, NGX VSR quality level
+    int vsr_quality = 4;    // 1..4, NGX VSR quality level (default 4 Ultra)
     int peak_nits = 1000;   // 400..4000, TrueHDR peak luminance in cd/m^2
     int geometry_mode = 0;  // 0 = AutoDirect (9:16 portrait aware), 1 = Pillarbox
 
-    // Phase 8 (Task 8-A1): explicit GPU binding for the NVDEC/NVENC sessions
-    // (0 = default device; must be < the rtx_shim topology device count).
+    // Explicit GPU binding for the NVDEC/NVENC sessions (0 = default device).
     int device_index = 0;
-    // Phase 8 (Task 8-A2 / Task 8-C1): GOP-segmented transcode start point.
-    // The demuxer seeks to the key frame at or before this timestamp before
-    // the first packet is read (milliseconds into the stream; -1 = start).
+    // GOP-segmented transcode start point. Seek to key frame at/before timestamp (ms).
     int64_t seek_start_ms = -1;
-    // Phase 8 (Task 8-C1, test hook only): inject one simulated
-    // RTX_ERR_DEVICE_LOST from the remaster call at this encoded-frame count.
-    // 0 disables injection; the anti-TDR self-heal path is exercised by
-    // rtx_tests --filter tdr_recovery on real hardware.
-    int fault_inject_frame = 0;
+
+    // Frame-rate up-conversion (FRUC) options (defaults to 60fps hardware optical flow).
+    bool fruc_enabled = true;
+    Rational target_fps{60, 1};  // Default 60 FPS target
 
     bool verbose = false;
 
@@ -141,18 +136,18 @@ struct HwTranscodeReport {
     int measured_max_cll_nits = 0;
     int measured_max_fall_nits = 0;
 
+    // Phase 8: dual-path FRUC statistics
+    int64_t frames_interpolated = 0;
+    int64_t fruc_scene_cuts = 0;
+    std::string fruc_backend = "off";
+
     // Emits a machine-readable record for the Gate 1 audit script.
     std::string toJson() const;
 };
 
-// Verification-only container passthrough (NVDEC -> NVENC).  This is not a
-// product path: CineRTX.exe always remasters, and this entry point exists for
-// the codec/zero-copy regression harness.
-Result<HwTranscodeReport> runNvidiaContainerTranscode(const HwTranscodeOptions& options);
-
 // The only product transcode: NVDEC NV12/P010 -> rtx_ngx_bridge remaster
 // (VSR + TrueHDR + pack v2, all device memory) -> NVENC HEVC Main10 with HDR10
-// VUI/SEI.  Both GUI and CLI call this function; it reports path =
+// VUI/SEI. Both GUI and CLI call this function; it reports path =
 // "vsr-remaster" with zero host pixel copies.
 Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& options);
 

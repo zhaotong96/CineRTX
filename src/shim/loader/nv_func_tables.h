@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT OR Apache-2.0
  * Copyright (c) 2026 RTX Transcode Engine contributors
  *
- * Minimal ABI mirrors for the CUDA driver, NVENC, NvOFFRUC and TensorRT entry
+ * Minimal ABI mirrors for the CUDA driver and NVENC entry
  * points.  These are declarations only: every symbol is resolved at runtime, so
  * no proprietary import library is linked into the core or the shim.
  *
@@ -308,22 +308,7 @@ struct Table {
 
 }  // namespace rtx_shim::nvenc
 
-namespace rtx_shim::tensorrt {
 
-using PFN_getInferLibVersion = int32_t (*)();
-using PFN_createInferBuilder = void* (*)(void*);
-using PFN_createInferRuntime = void* (*)(void*);
-
-struct Table {
-    PFN_getInferLibVersion getInferLibVersion = nullptr;
-    PFN_createInferBuilder createInferBuilder = nullptr;
-    PFN_createInferRuntime createInferRuntime = nullptr;
-    bool resolve(const DynLibrary& library, std::string* error = nullptr);
-};
-
-std::string versionToString(int32_t version);
-
-}  // namespace rtx_shim::tensorrt
 
 namespace rtx_shim::ngx {
 

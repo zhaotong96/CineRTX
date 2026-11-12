@@ -180,8 +180,8 @@ const char* resultLabel(int32_t result) {
             return "RTX_ERR_OUT_OF_MEMORY";
         case RTX_ERR_NGX:
             return "RTX_ERR_NGX";
-        case RTX_ERR_TENSORRT_VERSION:
-            return "RTX_ERR_TENSORRT_VERSION";
+        case RTX_ERR_RESERVED_11:
+            return "RTX_ERR_RESERVED_11";
         case RTX_ERR_NOT_IMPLEMENTED:
             return "RTX_ERR_NOT_IMPLEMENTED";
         case RTX_ERR_INTERNAL:
@@ -203,7 +203,7 @@ std::string capabilityList(uint32_t caps) {
         {RTX_CAP_VSR, "vsr"},
         {RTX_CAP_TRUEHDR, "truehdr"},
         {RTX_CAP_NVOFA, "nvofa"},
-        {RTX_CAP_TENSORRT, "tensorrt"},
+        {RTX_CAP_RESERVED_6, "reserved-6"},
         {RTX_CAP_D3D12_INTEROP, "d3d12-interop"},
         {RTX_CAP_CPU_REFERENCE, "cpu-reference"},
     };

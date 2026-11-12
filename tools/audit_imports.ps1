@@ -419,7 +419,7 @@ function Test-OutputClosure {
     if (-not $Directory -or -not (Test-Path -LiteralPath $Directory)) {
         return
     }
-    $allowed = @('cinertx.exe', 'cinertx', 'rtx_tests.exe', 'rtx_tests', 'rtx_ngx_bridge.dll', 'nvngx_vsr.dll', 'nvngx_truehdr.dll', 'cudart64_110.dll', 'nvoffruc.dll', 'nvinfer_10.dll', 'nvinfer_builder_resource_10.dll', 'nvinfer_plugin_10.dll', 'nvonnxparser_10.dll')
+    $allowed = @('cinertx.exe', 'cinertx', 'rtx_tests.exe', 'rtx_tests', 'rtx_ngx_bridge.dll', 'nvngx_vsr.dll', 'nvngx_truehdr.dll')
     $strays = @(Get-ChildItem -LiteralPath $Directory -File -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Extension -in '.dll', '.so', '.dylib', '.exe' -and
@@ -536,6 +536,24 @@ foreach ($path in $Binary) {
         }
     } elseif (-not $Quiet) {
         Write-Host '         result: no external media imports'
+    }
+
+    # Gate 4: CineRTX.exe must not leak MSVCP140, VCRUNTIME140, or WS2_32
+    if ((Split-Path -Leaf $resolved).ToLowerInvariant() -eq 'cinertx.exe') {
+        $crtHits = @()
+        foreach ($name in $allNames) {
+            if ($name -match '(?i)(msvcp140|vcruntime140|ws2_32)') {
+                $crtHits += "dependency $name"
+            }
+        }
+        if ($crtHits.Count -gt 0) {
+            foreach ($hit in $crtHits) {
+                Write-Host "  [FAIL] $hit (Gate 4: static CRT /MT and zero WS2_32 violation)"
+                $violations.Add("$resolved imports $hit")
+            }
+        } elseif (-not $Quiet) {
+            Write-Host '         result: Gate 4 passed (0 MSVCP140, 0 VCRUNTIME140, 0 WS2_32)'
+        }
     }
 }
 

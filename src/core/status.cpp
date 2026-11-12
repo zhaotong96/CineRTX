@@ -31,8 +31,8 @@ const char* errorCodeName(ErrorCode code) noexcept {
             return "OUT_OF_MEMORY";
         case ErrorCode::NgxFailure:
             return "NGX_FAILURE";
-        case ErrorCode::TensorRtVersion:
-            return "TENSORRT_VERSION";
+        case ErrorCode::Reserved11:
+            return "RESERVED_11";
         case ErrorCode::Config:
             return "CONFIG_ERROR";
         case ErrorCode::State:

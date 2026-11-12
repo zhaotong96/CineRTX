@@ -107,3 +107,70 @@ RTX_TEST(flicks_monotonic_guard) {
     RTX_CHECK_EQ(guard.apply(-5), static_cast<int64_t>(-5));
     RTX_CHECK_EQ(guard.repairs(), static_cast<uint64_t>(0));
 }
+
+RTX_TEST(flicks_fruc_sliding_window_math) {
+    constexpr int64_t kFlicks = 705600000LL;
+
+    // 1. 24 fps -> 48 fps (2x)
+    {
+        const int64_t delta_in = kFlicks / 24;   // 29,400,000
+        const int64_t delta_out = kFlicks / 48;  // 14,700,000
+        RTX_CHECK_EQ(delta_in, 29400000LL);
+        RTX_CHECK_EQ(delta_out, 14700000LL);
+
+        int64_t next_out = 0;
+        int frames_emitted = 0;
+        int zero_copy_count = 0;
+        int interp_count = 0;
+
+        for (int i = 1; i <= 24; ++i) {
+            const int64_t prev_pts = (i - 1) * delta_in;
+            const int64_t curr_pts = i * delta_in;
+            while (next_out < curr_pts) {
+                const float alpha = static_cast<float>(next_out - prev_pts) / static_cast<float>(curr_pts - prev_pts);
+                if (alpha <= 0.0001f || alpha >= 0.9999f) {
+                    ++zero_copy_count;
+                } else {
+                    ++interp_count;
+                    RTX_CHECK(std::abs(alpha - 0.5f) < 0.001f);
+                }
+                ++frames_emitted;
+                next_out += delta_out;
+            }
+        }
+        RTX_CHECK_EQ(frames_emitted, 48);
+        RTX_CHECK_EQ(zero_copy_count, 24);
+        RTX_CHECK_EQ(interp_count, 24);
+    }
+
+    // 2. 24 fps -> 60 fps (2.5x)
+    {
+        const int64_t delta_in = kFlicks / 24;   // 29,400,000
+        const int64_t delta_out = kFlicks / 60;  // 11,760,000
+        RTX_CHECK_EQ(delta_in, 29400000LL);
+        RTX_CHECK_EQ(delta_out, 11760000LL);
+
+        int64_t next_out = 0;
+        int frames_emitted = 0;
+        std::vector<float> alphas;
+
+        for (int i = 1; i <= 24; ++i) {
+            const int64_t prev_pts = (i - 1) * delta_in;
+            const int64_t curr_pts = i * delta_in;
+            while (next_out < curr_pts) {
+                const float alpha = static_cast<float>(next_out - prev_pts) / static_cast<float>(curr_pts - prev_pts);
+                alphas.push_back(alpha);
+                ++frames_emitted;
+                next_out += delta_out;
+            }
+        }
+        RTX_CHECK_EQ(frames_emitted, 60);
+        // Verify periodic alpha pattern: 0.0, 0.4, 0.8, 0.2, 0.6
+        RTX_CHECK(std::abs(alphas[0] - 0.0f) < 0.001f);
+        RTX_CHECK(std::abs(alphas[1] - 0.4f) < 0.001f);
+        RTX_CHECK(std::abs(alphas[2] - 0.8f) < 0.001f);
+        RTX_CHECK(std::abs(alphas[3] - 0.2f) < 0.001f);
+        RTX_CHECK(std::abs(alphas[4] - 0.6f) < 0.001f);
+        RTX_CHECK(std::abs(alphas[5] - 0.0f) < 0.001f);
+    }
+}

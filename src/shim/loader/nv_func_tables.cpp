@@ -167,41 +167,7 @@ bool Table::resolve(const DynLibrary& library, std::string* error) {
 
 }  // namespace rtx_shim::nvenc
 
-namespace tensorrt {
 
-bool Table::resolve(const DynLibrary& library, std::string* error) {
-    std::vector<std::string> missing;
-    resolveOne(library, "getInferLibVersion", getInferLibVersion, missing);
-    if (getInferLibVersion == nullptr) {
-        if (error != nullptr) {
-            *error = missingMessage("nvinfer", missing);
-        }
-        return false;
-    }
-
-    std::vector<std::string> optional;
-    resolveOne(library, "createInferBuilder_INTERNAL", createInferBuilder, optional);
-    resolveOne(library, "createInferRuntime_INTERNAL", createInferRuntime, optional);
-    if (error != nullptr) {
-        error->clear();
-    }
-    return true;
-}
-
-std::string versionToString(int32_t version) {
-    if (version <= 0) {
-        return "unknown";
-    }
-    std::ostringstream out;
-    if (version >= 10000) {
-        out << (version / 10000) << '.' << ((version / 100) % 100) << '.' << (version % 100);
-    } else {
-        out << (version / 1000) << '.' << ((version / 100) % 10) << '.' << (version % 100);
-    }
-    return out.str();
-}
-
-}  // namespace rtx_shim::tensorrt
 
 namespace ngx {
 

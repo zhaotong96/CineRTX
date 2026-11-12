@@ -151,11 +151,6 @@ RTX_TEST(tdr_recovery_state_contract) {
     // times with a 250 ms backoff and resumes from the last muxed key frame.
     // The GPU-path integration runs on the acceptance host with
     // --fault-inject-frame; here the flags and bounds are verified.
-    HwTranscodeOptions options{};
-    options.fault_inject_frame = 50;
-    RTX_CHECK_EQ(options.fault_inject_frame, 50);
-    options.fault_inject_frame = 0;
-    RTX_CHECK_EQ(options.fault_inject_frame, 0);
     // The demuxer seek contract used by the recovery path: a demuxer without
     // seek support reports Unsupported instead of corrupting the stream.
     auto demuxer = makeMemoryDemuxer(std::vector<uint8_t>{0x00, 0x00, 0x00, 0x18});

@@ -43,86 +43,41 @@ void trace(const char* step, const std::string& detail = std::string()) {
 
 // COM interface ids.  Declared locally so the bridge never links a Direct3D
 // import library (the audit requires a zero static Direct3D import too).
-const GUID kIidFactory4 = {0x1bc6ea02,
-                           0xef36,
-                           0x464f,
-                           {0xbf, 0x0c, 0x21, 0xca, 0x39, 0xe5, 0x16, 0x8a}};
-const GUID kIidDevice = {0x189819f1,
-                         0x1db6,
-                         0x4b57,
-                         {0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7}};
-const GUID kIidCommandQueue = {0x0ec870a6,
-                               0x5d7e,
-                               0x4c22,
-                               {0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed}};
-const GUID kIidResource = {0x696442be,
-                           0xa72e,
-                           0x4059,
-                           {0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad}};
-const GUID kIidCommandAllocator = {0x6102dee4,
-                                  0xaf59,
-                                  0x4b09,
-                                  {0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24}};
-const GUID kIidGraphicsCommandList = {0x5b160d0f,
-                                      0xac1b,
-                                      0x4185,
-                                      {0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55}};
-const GUID kIidFence = {0x0a753dcf,
-                        0xc4d8,
-                        0x4b91,
-                        {0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76}};
+const GUID kIidFactory4 = {0x1bc6ea02, 0xef36, 0x464f, {0xbf, 0x0c, 0x21, 0xca, 0x39, 0xe5, 0x16, 0x8a}};
+const GUID kIidDevice = {0x189819f1, 0x1db6, 0x4b57, {0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7}};
+const GUID kIidCommandQueue = {0x0ec870a6, 0x5d7e, 0x4c22, {0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed}};
+const GUID kIidResource = {0x696442be, 0xa72e, 0x4059, {0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad}};
+const GUID kIidCommandAllocator = {0x6102dee4, 0xaf59, 0x4b09, {0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24}};
+const GUID kIidGraphicsCommandList = {0x5b160d0f, 0xac1b, 0x4185, {0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55}};
+const GUID kIidFence = {0x0a753dcf, 0xc4d8, 0x4b91, {0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76}};
 
 constexpr unsigned kExternalMemoryDedicated = 0x1;
 
-// Phase 7: the dynlink_cuda.h header predates the 3D copy entry point, so the
-// stable driver-ABI struct is declared here and cuMemcpy3D_v2 is resolved
-// dynamically (same pattern as every other driver symbol).
 struct CUDA_MEMCPY3D {
-    unsigned int srcXInBytes;
-    unsigned int srcY;
-    unsigned int srcZ;
-    unsigned int srcLOD;
+    unsigned int srcXInBytes, srcY, srcZ, srcLOD;
     CUmemorytype srcMemoryType;
     const void* srcHost;
     CUdeviceptr srcDevice;
     CUarray srcArray;
-    unsigned int srcPitch;
-    unsigned int dstXInBytes;
-    unsigned int dstY;
-    unsigned int dstZ;
-    unsigned int dstLOD;
+    unsigned int srcPitch, dstXInBytes, dstY, dstZ, dstLOD;
     CUmemorytype dstMemoryType;
     void* dstHost;
     CUdeviceptr dstDevice;
     CUarray dstArray;
-    unsigned int dstPitch;
-    unsigned int WidthInBytes;
-    unsigned int Height;
-    unsigned int Depth;
+    unsigned int dstPitch, WidthInBytes, Height, Depth;
 };
 
-// dynlink_cuda.h covers the decode/encode path; the surface-object entry points
-// are declared here so the bridge stays self-contained.
 using CUsurfObject = unsigned long long;
 using PFN_cuSurfObjectCreate = CUresult (*)(CUsurfObject*, const CUDA_RESOURCE_DESC*);
 using PFN_cuSurfObjectDestroy = CUresult (*)(CUsurfObject);
 
 template <typename T>
-T* as(void* pointer) {
-    return static_cast<T*>(pointer);
-}
+T* as(void* pointer) { return static_cast<T*>(pointer); }
 
 struct D3D12Api {
     HRESULT(WINAPI* create_device)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**) = nullptr;
     HRESULT(WINAPI* create_factory)(REFIID, void**) = nullptr;
-    // Enables "adapter removal" semantics: a device reset is reported as
-    // DXGI_ERROR_DEVICE_REMOVED and the process can recover instead of being
-    // terminated by the driver watchdog (anti-TDR mechanism 4).
     HRESULT(WINAPI* declare_adapter_removal_support)() = nullptr;
-    // The declaration is process-wide and only valid before the first D3D12
-    // device exists.  cuInit() itself creates DXGI state on current drivers
-    // (observed: a later declaration returns DXGI_ERROR_INVALID_CALL), so it
-    // runs exactly once here, at the earliest bridge entry point.
     bool removal_attempted = false;
     bool removal_declared = false;
     HRESULT removal_result = S_OK;
@@ -130,27 +85,25 @@ struct D3D12Api {
     bool load(std::string* error) {
         HMODULE d3d12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         HMODULE dxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (d3d12 == nullptr || dxgi == nullptr) {
-            *error = "d3d12.dll or dxgi.dll is not available";
+        if (!d3d12 || !dxgi) {
+            if (error) *error = "d3d12.dll or dxgi.dll is not available";
             return false;
         }
-        create_device = reinterpret_cast<decltype(create_device)>(
-            GetProcAddress(d3d12, "D3D12CreateDevice"));
-        create_factory = reinterpret_cast<decltype(create_factory)>(
-            GetProcAddress(dxgi, "CreateDXGIFactory1"));
+        create_device = reinterpret_cast<decltype(create_device)>(GetProcAddress(d3d12, "D3D12CreateDevice"));
+        create_factory = reinterpret_cast<decltype(create_factory)>(GetProcAddress(dxgi, "CreateDXGIFactory1"));
         declare_adapter_removal_support = reinterpret_cast<decltype(declare_adapter_removal_support)>(
             GetProcAddress(dxgi, "DXGIDeclareAdapterRemovalSupport"));
-        if (create_device == nullptr || create_factory == nullptr) {
-            *error = "D3D12CreateDevice/CreateDXGIFactory1 exports are missing";
+        if (!create_device || !create_factory) {
+            if (error) *error = "D3D12CreateDevice/CreateDXGIFactory1 exports are missing";
             return false;
         }
         if (!removal_attempted) {
             removal_attempted = true;
-            if (declare_adapter_removal_support != nullptr) {
+            if (declare_adapter_removal_support) {
                 removal_result = declare_adapter_removal_support();
                 removal_declared = SUCCEEDED(removal_result);
             } else {
-                removal_result = static_cast<HRESULT>(0x80004002L);  // E_NOINTERFACE
+                removal_result = static_cast<HRESULT>(0x80004002L);
             }
         }
         return true;
@@ -164,41 +117,25 @@ struct CudaApi {
     CUresult (*ctx_set_current)(CUcontext) = nullptr;
     CUresult (*primary_ctx_retain)(CUcontext*, CUdevice) = nullptr;
     CUresult (*primary_ctx_set_flags)(CUdevice, unsigned int) = nullptr;
-    CUresult (*import_external_memory)(CUexternalMemory*,
-                                       const CUDA_EXTERNAL_MEMORY_HANDLE_DESC*) = nullptr;
-    CUresult (*get_mapped_mipmapped_array)(CUmipmappedArray*, CUexternalMemory,
-                                           const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC*) = nullptr;
+    CUresult (*import_external_memory)(CUexternalMemory*, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC*) = nullptr;
+    CUresult (*get_mapped_mipmapped_array)(CUmipmappedArray*, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC*) = nullptr;
     CUresult (*mipmapped_array_get_level)(CUarray*, CUmipmappedArray, unsigned int) = nullptr;
     PFN_cuSurfObjectCreate surf_object_create = nullptr;
     PFN_cuSurfObjectDestroy surf_object_destroy = nullptr;
     CUresult (*destroy_external_memory)(CUexternalMemory) = nullptr;
     CUresult (*mipmapped_array_destroy)(CUmipmappedArray) = nullptr;
-    // cuMemcpy2D accepts CUDA_MEMCPY2D with array endpoints, which covers both
-    // directions without the array-specific entry points.
     CUresult (*memcpy2d)(const CUDA_MEMCPY2D*) = nullptr;
     CUresult (*memcpy2d_async)(const CUDA_MEMCPY2D*, CUstream) = nullptr;
     CUresult (*stream_synchronize)(CUstream) = nullptr;
     CUresult (*get_error_name)(CUresult, const char**) = nullptr;
-    // GPU hardware fence interop: the shared ID3D12Fence is imported as a CUDA
-    // external semaphore so the cross-engine hand-off never blocks the CPU.
     using CUexternalSemaphore = void*;
-    CUresult (*import_external_semaphore)(CUexternalSemaphore*,
-                                          const CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC*) = nullptr;
-    CUresult (*signal_external_semaphores_async)(const CUexternalSemaphore*,
-                                                 const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS*,
-                                                 unsigned int, CUstream) = nullptr;
-    CUresult (*wait_external_semaphores_async)(const CUexternalSemaphore*,
-                                               const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS*,
-                                               unsigned int, CUstream) = nullptr;
+    CUresult (*import_external_semaphore)(CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC*) = nullptr;
+    CUresult (*signal_external_semaphores_async)(const CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS*, unsigned int, CUstream) = nullptr;
+    CUresult (*wait_external_semaphores_async)(const CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS*, unsigned int, CUstream) = nullptr;
     CUresult (*destroy_external_semaphore)(CUexternalSemaphore) = nullptr;
-    // Anti-TDR mechanism 3: the pack stage runs on a dedicated highest-priority
-    // stream so it drains ahead of opportunistic copies.
     CUresult (*stream_create_with_priority)(CUstream*, unsigned int, int) = nullptr;
     CUresult (*stream_destroy)(CUstream) = nullptr;
     CUresult (*ctx_get_stream_priority_range)(int*, int*) = nullptr;
-    // Remaster support (P0-1.4): the bridge owns a pitched P010 output buffer
-    // and times the per-frame stages with CUDA events.  Resolved optionally so
-    // an older driver keeps the non-remaster bridge paths working.
     CUresult (*mem_alloc_pitch)(CUdeviceptr*, size_t*, size_t, size_t, unsigned int) = nullptr;
     CUresult (*mem_free)(CUdeviceptr) = nullptr;
     CUresult (*event_create)(CUevent*, unsigned int) = nullptr;
@@ -207,238 +144,118 @@ struct CudaApi {
     CUresult (*event_destroy)(CUevent) = nullptr;
     CUresult (*memset_d2d16)(CUdeviceptr, size_t, unsigned short, size_t, size_t) = nullptr;
     CUresult (*memset_d16)(CUdeviceptr, unsigned short, size_t) = nullptr;
-    // Phase 7 (Task 7-A2): stream-ordered statistic-slot reset for the fused
-    // pack kernel and the FP16 3D LUT texture upload used by
-    // rtx_ngx_bridge_set_lut3d.  Resolved optionally so an older driver keeps
-    // the non-LUT paths working.
     CUresult (*memset_d32_async)(CUdeviceptr, unsigned int, size_t, CUstream) = nullptr;
     CUresult (*array3d_create)(CUarray*, const CUDA_ARRAY3D_DESCRIPTOR*) = nullptr;
     CUresult (*array_destroy)(CUarray) = nullptr;
     using CUtexObject = unsigned long long;
-    CUresult (*tex_object_create)(CUtexObject*, const CUDA_RESOURCE_DESC*,
-                                  const CUDA_TEXTURE_DESC*,
-                                  const CUDA_RESOURCE_VIEW_DESC*) = nullptr;
+    CUresult (*tex_object_create)(CUtexObject*, const CUDA_RESOURCE_DESC*, const CUDA_TEXTURE_DESC*, const CUDA_RESOURCE_VIEW_DESC*) = nullptr;
     CUresult (*tex_object_destroy)(CUtexObject) = nullptr;
     CUresult (*memcpy3d)(const CUDA_MEMCPY3D*) = nullptr;
 
     bool load(std::string* error) {
         HMODULE module = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (module == nullptr) {
-            *error = "nvcuda.dll is not available";
+        if (!module) {
+            if (error) *error = "nvcuda.dll is not available";
             return false;
         }
         auto sym = [module](const char* name) { return GetProcAddress(module, name); };
-        init = reinterpret_cast<decltype(init)>(sym("cuInit"));
-        device_get = reinterpret_cast<decltype(device_get)>(sym("cuDeviceGet"));
-        ctx_get_current = reinterpret_cast<decltype(ctx_get_current)>(sym("cuCtxGetCurrent"));
-        ctx_set_current = reinterpret_cast<decltype(ctx_set_current)>(sym("cuCtxSetCurrent"));
-        primary_ctx_retain =
-            reinterpret_cast<decltype(primary_ctx_retain)>(sym("cuDevicePrimaryCtxRetain"));
-        primary_ctx_set_flags = reinterpret_cast<decltype(primary_ctx_set_flags)>(
-            sym("cuDevicePrimaryCtxSetFlags"));
-        import_external_memory =
-            reinterpret_cast<decltype(import_external_memory)>(sym("cuImportExternalMemory"));
-        get_mapped_mipmapped_array = reinterpret_cast<decltype(get_mapped_mipmapped_array)>(
-            sym("cuExternalMemoryGetMappedMipmappedArray"));
-        mipmapped_array_get_level =
-            reinterpret_cast<decltype(mipmapped_array_get_level)>(sym("cuMipmappedArrayGetLevel"));
-        surf_object_create =
-            reinterpret_cast<decltype(surf_object_create)>(sym("cuSurfObjectCreate"));
-        surf_object_destroy =
-            reinterpret_cast<decltype(surf_object_destroy)>(sym("cuSurfObjectDestroy"));
-        destroy_external_memory =
-            reinterpret_cast<decltype(destroy_external_memory)>(sym("cuDestroyExternalMemory"));
-        mipmapped_array_destroy = reinterpret_cast<decltype(mipmapped_array_destroy)>(
-            sym("cuMipmappedArrayDestroy"));
-        // 64-bit Windows exports the modern struct-compatible entry points with
-        // a _v2 suffix since CUDA 3.2; the bare names keep the legacy 32-bit
-        // ABI.  Loading the bare symbol into a 64-bit CUDA_MEMCPY2D call makes
-        // the driver misparse the struct (observed: CUDA_ERROR_INVALID_CONTEXT).
-        memcpy2d = reinterpret_cast<decltype(memcpy2d)>(sym("cuMemcpy2D_v2"));
-        if (memcpy2d == nullptr) {
-            memcpy2d = reinterpret_cast<decltype(memcpy2d)>(sym("cuMemcpy2D"));
-        }
-        memcpy2d_async = reinterpret_cast<decltype(memcpy2d_async)>(sym("cuMemcpy2DAsync_v2"));
-        if (memcpy2d_async == nullptr) {
-            memcpy2d_async =
-                reinterpret_cast<decltype(memcpy2d_async)>(sym("cuMemcpy2DAsync"));
-        }
-        stream_synchronize =
-            reinterpret_cast<decltype(stream_synchronize)>(sym("cuStreamSynchronize_v2"));
-        if (stream_synchronize == nullptr) {
-            stream_synchronize =
-                reinterpret_cast<decltype(stream_synchronize)>(sym("cuStreamSynchronize"));
-        }
-        import_external_semaphore = reinterpret_cast<decltype(import_external_semaphore)>(
-            sym("cuImportExternalSemaphore"));
-        signal_external_semaphores_async =
-            reinterpret_cast<decltype(signal_external_semaphores_async)>(
-                sym("cuSignalExternalSemaphoresAsync_v2"));
-        if (signal_external_semaphores_async == nullptr) {
-            signal_external_semaphores_async =
-                reinterpret_cast<decltype(signal_external_semaphores_async)>(
-                    sym("cuSignalExternalSemaphoresAsync"));
-        }
-        wait_external_semaphores_async =
-            reinterpret_cast<decltype(wait_external_semaphores_async)>(
-                sym("cuWaitExternalSemaphoresAsync_v2"));
-        if (wait_external_semaphores_async == nullptr) {
-            wait_external_semaphores_async =
-                reinterpret_cast<decltype(wait_external_semaphores_async)>(
-                    sym("cuWaitExternalSemaphoresAsync"));
-        }
-        destroy_external_semaphore = reinterpret_cast<decltype(destroy_external_semaphore)>(
-            sym("cuDestroyExternalSemaphore"));
-        stream_create_with_priority = reinterpret_cast<decltype(stream_create_with_priority)>(
-            sym("cuStreamCreateWithPriority"));
-        stream_destroy = reinterpret_cast<decltype(stream_destroy)>(sym("cuStreamDestroy_v2"));
-        if (stream_destroy == nullptr) {
-            stream_destroy = reinterpret_cast<decltype(stream_destroy)>(sym("cuStreamDestroy"));
-        }
-        ctx_get_stream_priority_range =
-            reinterpret_cast<decltype(ctx_get_stream_priority_range)>(
-                sym("cuCtxGetStreamPriorityRange"));
-        // The buffer/event families carry the legacy 32-bit ABI under their
-        // bare names; on 64-bit Windows the _v2 forms are the struct-compatible
-        // ones (same lesson as cuMemcpy2D above).  Fall back for old drivers.
-        mem_alloc_pitch = reinterpret_cast<decltype(mem_alloc_pitch)>(sym("cuMemAllocPitch_v2"));
-        if (mem_alloc_pitch == nullptr) {
-            mem_alloc_pitch =
-                reinterpret_cast<decltype(mem_alloc_pitch)>(sym("cuMemAllocPitch"));
-        }
-        mem_free = reinterpret_cast<decltype(mem_free)>(sym("cuMemFree_v2"));
-        if (mem_free == nullptr) {
-            mem_free = reinterpret_cast<decltype(mem_free)>(sym("cuMemFree"));
-        }
-        event_create = reinterpret_cast<decltype(event_create)>(sym("cuEventCreate"));
-        event_record = reinterpret_cast<decltype(event_record)>(sym("cuEventRecord_v2"));
-        if (event_record == nullptr) {
-            event_record = reinterpret_cast<decltype(event_record)>(sym("cuEventRecord"));
-        }
-        event_elapsed = reinterpret_cast<decltype(event_elapsed)>(sym("cuEventElapsedTime"));
-        event_destroy = reinterpret_cast<decltype(event_destroy)>(sym("cuEventDestroy_v2"));
-        if (event_destroy == nullptr) {
-            event_destroy = reinterpret_cast<decltype(event_destroy)>(sym("cuEventDestroy"));
-        }
-        get_error_name = reinterpret_cast<decltype(get_error_name)>(sym("cuGetErrorName"));
-        memset_d2d16 = reinterpret_cast<decltype(memset_d2d16)>(sym("cuMemsetD2D16_v2"));
-        if (memset_d2d16 == nullptr) {
-            memset_d2d16 = reinterpret_cast<decltype(memset_d2d16)>(sym("cuMemsetD2D16"));
-        }
-        memset_d16 = reinterpret_cast<decltype(memset_d16)>(sym("cuMemsetD16_v2"));
-        if (memset_d16 == nullptr) {
-            memset_d16 = reinterpret_cast<decltype(memset_d16)>(sym("cuMemsetD16"));
-        }
-        memset_d32_async =
-            reinterpret_cast<decltype(memset_d32_async)>(sym("cuMemsetD32Async"));
-        array3d_create =
-            reinterpret_cast<decltype(array3d_create)>(sym("cuArray3DCreate_v2"));
-        if (array3d_create == nullptr) {
-            array3d_create = reinterpret_cast<decltype(array3d_create)>(sym("cuArray3DCreate"));
-        }
-        array_destroy = reinterpret_cast<decltype(array_destroy)>(sym("cuArrayDestroy"));
-        tex_object_create =
-            reinterpret_cast<decltype(tex_object_create)>(sym("cuTexObjectCreate"));
-        tex_object_destroy =
-            reinterpret_cast<decltype(tex_object_destroy)>(sym("cuTexObjectDestroy"));
-        memcpy3d = reinterpret_cast<decltype(memcpy3d)>(sym("cuMemcpy3D_v2"));
-        if (memcpy3d == nullptr) {
-            memcpy3d = reinterpret_cast<decltype(memcpy3d)>(sym("cuMemcpy3D"));
-        }
-        // The external-semaphore family is optional: older drivers keep the
-        // CPU-wait fallback alive.  Everything else is mandatory.
-        if (init == nullptr || import_external_memory == nullptr ||
-            get_mapped_mipmapped_array == nullptr || surf_object_create == nullptr ||
-            memcpy2d == nullptr || memcpy2d_async == nullptr ||
-            stream_synchronize == nullptr) {
-            *error = std::string("the CUDA driver lacks the external-memory API (init=") +
-                     (init ? "ok" : "null") + ", import=" +
-                     (import_external_memory ? "ok" : "null") + ", mip=" +
-                     (get_mapped_mipmapped_array ? "ok" : "null") + ", surf=" +
-                     (surf_object_create ? "ok" : "null") + ", copy=" +
-                     (memcpy2d ? "ok" : "null") + ", sync=" +
-                     (stream_synchronize ? "ok" : "null") + ")";
+#define LOAD_CUDA_SYM(f, n) f = reinterpret_cast<decltype(f)>(sym(n))
+        LOAD_CUDA_SYM(init, "cuInit");
+        LOAD_CUDA_SYM(device_get, "cuDeviceGet");
+        LOAD_CUDA_SYM(ctx_get_current, "cuCtxGetCurrent");
+        LOAD_CUDA_SYM(ctx_set_current, "cuCtxSetCurrent");
+        LOAD_CUDA_SYM(primary_ctx_retain, "cuDevicePrimaryCtxRetain");
+        LOAD_CUDA_SYM(primary_ctx_set_flags, "cuDevicePrimaryCtxSetFlags");
+        LOAD_CUDA_SYM(import_external_memory, "cuImportExternalMemory");
+        LOAD_CUDA_SYM(get_mapped_mipmapped_array, "cuExternalMemoryGetMappedMipmappedArray");
+        LOAD_CUDA_SYM(mipmapped_array_get_level, "cuMipmappedArrayGetLevel");
+        LOAD_CUDA_SYM(surf_object_create, "cuSurfObjectCreate");
+        LOAD_CUDA_SYM(surf_object_destroy, "cuSurfObjectDestroy");
+        LOAD_CUDA_SYM(destroy_external_memory, "cuDestroyExternalMemory");
+        LOAD_CUDA_SYM(mipmapped_array_destroy, "cuMipmappedArrayDestroy");
+        LOAD_CUDA_SYM(memcpy2d, "cuMemcpy2D_v2");
+        if (!memcpy2d) LOAD_CUDA_SYM(memcpy2d, "cuMemcpy2D");
+        LOAD_CUDA_SYM(memcpy2d_async, "cuMemcpy2DAsync_v2");
+        if (!memcpy2d_async) LOAD_CUDA_SYM(memcpy2d_async, "cuMemcpy2DAsync");
+        LOAD_CUDA_SYM(stream_synchronize, "cuStreamSynchronize");
+        LOAD_CUDA_SYM(get_error_name, "cuGetErrorName");
+        LOAD_CUDA_SYM(import_external_semaphore, "cuImportExternalSemaphore");
+        LOAD_CUDA_SYM(signal_external_semaphores_async, "cuSignalExternalSemaphoresAsync");
+        LOAD_CUDA_SYM(wait_external_semaphores_async, "cuWaitExternalSemaphoresAsync");
+        LOAD_CUDA_SYM(destroy_external_semaphore, "cuDestroyExternalSemaphore");
+        LOAD_CUDA_SYM(stream_create_with_priority, "cuStreamCreateWithPriority");
+        LOAD_CUDA_SYM(stream_destroy, "cuStreamDestroy");
+        LOAD_CUDA_SYM(ctx_get_stream_priority_range, "cuCtxGetStreamPriorityRange");
+        LOAD_CUDA_SYM(mem_alloc_pitch, "cuMemAllocPitch_v2");
+        if (!mem_alloc_pitch) LOAD_CUDA_SYM(mem_alloc_pitch, "cuMemAllocPitch");
+        LOAD_CUDA_SYM(mem_free, "cuMemFree_v2");
+        if (!mem_free) LOAD_CUDA_SYM(mem_free, "cuMemFree");
+        LOAD_CUDA_SYM(event_create, "cuEventCreate");
+        LOAD_CUDA_SYM(event_record, "cuEventRecord");
+        LOAD_CUDA_SYM(event_elapsed, "cuEventElapsedTime");
+        LOAD_CUDA_SYM(event_destroy, "cuEventDestroy");
+        LOAD_CUDA_SYM(memset_d2d16, "cuMemsetD2D16_v2");
+        if (!memset_d2d16) LOAD_CUDA_SYM(memset_d2d16, "cuMemsetD2D16");
+        LOAD_CUDA_SYM(memset_d16, "cuMemsetD16_v2");
+        if (!memset_d16) LOAD_CUDA_SYM(memset_d16, "cuMemsetD16");
+        LOAD_CUDA_SYM(memset_d32_async, "cuMemsetD32Async");
+        LOAD_CUDA_SYM(array3d_create, "cuArray3DCreate_v2");
+        if (!array3d_create) LOAD_CUDA_SYM(array3d_create, "cuArray3DCreate");
+        LOAD_CUDA_SYM(array_destroy, "cuArrayDestroy");
+        LOAD_CUDA_SYM(tex_object_create, "cuTexObjectCreate");
+        LOAD_CUDA_SYM(tex_object_destroy, "cuTexObjectDestroy");
+        LOAD_CUDA_SYM(memcpy3d, "cuMemcpy3D_v2");
+        if (!memcpy3d) LOAD_CUDA_SYM(memcpy3d, "cuMemcpy3D");
+#undef LOAD_CUDA_SYM
+        if (!init || !import_external_memory || !get_mapped_mipmapped_array || !surf_object_create || !memcpy2d) {
+            if (error) *error = "CUDA driver lacks external-memory API";
             return false;
         }
         return true;
     }
 };
 
-D3D12Api& d3d12Api() {
-    static D3D12Api api;
-    return api;
-}
-
-CudaApi& cudaApi() {
-    static CudaApi api;
-    return api;
-}
-
-const char* cudaErrorName(CUresult result);
-
-bool ensureCudaContext(std::string* error) {
-    CudaApi& cuda = cudaApi();
-    if (cuda.init == nullptr && !cuda.load(error)) {
-        return false;
-    }
-    if (cuda.device_get == nullptr || cuda.primary_ctx_retain == nullptr ||
-        cuda.ctx_set_current == nullptr) {
-        *error = "the CUDA driver lacks the context API";
-        return false;
-    }
-    if (cuda.init(0) != CUDA_SUCCESS) {
-        *error = "cuInit failed";
-        return false;
-    }
-    CUcontext current = nullptr;
-    if (cuda.ctx_get_current != nullptr) {
-        (void)cuda.ctx_get_current(&current);
-    }
-    if (current != nullptr) {
-        return true;
-    }
-    CUdevice device = 0;
-    CUcontext primary = nullptr;
-    if (cuda.device_get(&device, 0) != CUDA_SUCCESS) {
-        *error = "cannot open CUDA device 0";
-        return false;
-    }
-    // Expert directive B1: every CUDA stream in this process uses blocking
-    // synchronisation.  The default spin/yield scheduler burns an entire core
-    // while the D3D12 queue evaluates VSR/TrueHDR, which steals CPU time from
-    // the decode and encode stages.  An already-active primary context keeps
-    // its flags, so a rejected update is not fatal.
-    if (cuda.primary_ctx_set_flags != nullptr) {
-        const CUresult flags =
-            cuda.primary_ctx_set_flags(device, CU_CTX_SCHED_BLOCKING_SYNC);
-        if (flags != CUDA_SUCCESS) {
-            trace("create: primary context keeps its existing scheduler flags",
-                  cudaErrorName(flags));
-        }
-    }
-    if (cuda.primary_ctx_retain(&primary, device) != CUDA_SUCCESS) {
-        *error = "cannot retain the CUDA primary context";
-        return false;
-    }
-    (void)cuda.ctx_set_current(primary);
-    return true;
-}
+D3D12Api& d3d12Api() { static D3D12Api api; return api; }
+CudaApi& cudaApi() { static CudaApi api; return api; }
 
 const char* cudaErrorName(CUresult result) {
     const char* name = "CUDA error";
     CudaApi& cuda = cudaApi();
-    if (cuda.get_error_name != nullptr && cuda.get_error_name(result, &name) == CUDA_SUCCESS) {
-        return name;
-    }
+    if (cuda.get_error_name && cuda.get_error_name(result, &name) == CUDA_SUCCESS) return name;
     return name;
 }
 
-// Single source of truth for the CUDA array descriptor of an interop texture.
-// The channel count and the per-channel format must multiply out to exactly
-// the DXGI texel size; cuExternalMemoryGetMappedMipmappedArray rejects any
-// descriptor that overruns the imported D3D12 allocation (CUDA_ERROR_INVALID_
-// VALUE).  A packed 32-bit DXGI format therefore maps to ONE 32-bit channel,
-// not four.
+bool ensureCudaContext(std::string* error) {
+    CudaApi& cuda = cudaApi();
+    if (!cuda.init && !cuda.load(error)) return false;
+    if (!cuda.device_get || !cuda.primary_ctx_retain || !cuda.ctx_set_current) {
+        if (error) *error = "CUDA driver lacks context API";
+        return false;
+    }
+    if (cuda.init(0) != CUDA_SUCCESS) {
+        if (error) *error = "cuInit failed";
+        return false;
+    }
+    CUcontext current = nullptr;
+    if (cuda.ctx_get_current) cuda.ctx_get_current(&current);
+    if (current) return true;
+    CUdevice device = 0;
+    CUcontext primary = nullptr;
+    if (cuda.device_get(&device, 0) != CUDA_SUCCESS) {
+        if (error) *error = "cannot open CUDA device 0";
+        return false;
+    }
+    if (cuda.primary_ctx_set_flags) {
+        cuda.primary_ctx_set_flags(device, CU_CTX_SCHED_BLOCKING_SYNC);
+    }
+    if (cuda.primary_ctx_retain(&primary, device) != CUDA_SUCCESS) {
+        if (error) *error = "cannot retain CUDA primary context";
+        return false;
+    }
+    cuda.ctx_set_current(primary);
+    return true;
+}
+
 struct FormatMapping {
     int32_t format;
     DXGI_FORMAT dxgi;
@@ -454,55 +271,42 @@ constexpr FormatMapping kFormats[] = {
 };
 
 const FormatMapping* formatMapping(int32_t format) {
-    for (const FormatMapping& mapping : kFormats) {
-        if (mapping.format == format) {
-            return &mapping;
-        }
-    }
+    for (const FormatMapping& m : kFormats) if (m.format == format) return &m;
     return nullptr;
 }
 
 DXGI_FORMAT toDxgi(int32_t format) {
-    const FormatMapping* mapping = formatMapping(format);
-    return mapping == nullptr ? DXGI_FORMAT_UNKNOWN : mapping->dxgi;
+    const FormatMapping* m = formatMapping(format);
+    return m ? m->dxgi : DXGI_FORMAT_UNKNOWN;
 }
 
 CUarray_format toCudaFormat(int32_t format) {
-    const FormatMapping* mapping = formatMapping(format);
-    return mapping == nullptr ? CU_AD_FORMAT_UNSIGNED_INT8 : mapping->cuda;
+    const FormatMapping* m = formatMapping(format);
+    return m ? m->cuda : CU_AD_FORMAT_UNSIGNED_INT8;
 }
 
 int channelsOf(int32_t format) {
-    const FormatMapping* mapping = formatMapping(format);
-    return mapping == nullptr ? 0 : static_cast<int>(mapping->channels);
+    const FormatMapping* m = formatMapping(format);
+    return m ? static_cast<int>(m->channels) : 0;
 }
 
-// Bytes per channel for the CUarray formats used above.  A descriptor whose
-// channels * channel_bytes != bytesPerPixel(format) overruns the D3D12
-// allocation and is rejected by the driver.
 uint32_t channelBytes(CUarray_format format) {
     switch (format) {
-        case CU_AD_FORMAT_HALF:
-            return 2;
-        case CU_AD_FORMAT_UNSIGNED_INT32:
-            return 4;
-        case CU_AD_FORMAT_UNSIGNED_INT8:
-            return 1;
-        default:
-            return 0;
+        case CU_AD_FORMAT_HALF: return 2;
+        case CU_AD_FORMAT_UNSIGNED_INT32: return 4;
+        case CU_AD_FORMAT_UNSIGNED_INT8: return 1;
+        default: return 0;
     }
 }
 
 uint32_t bytesPerPixel(int32_t format) {
-    const FormatMapping* mapping = formatMapping(format);
-    return mapping == nullptr ? 0 : mapping->bytes;
+    const FormatMapping* m = formatMapping(format);
+    return m ? m->bytes : 0;
 }
 
 bool waitForFence(ID3D12Fence* fence, uint64_t value) {
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (event == nullptr) {
-        return false;
-    }
+    if (!event) return false;
     const bool ok = SUCCEEDED(fence->SetEventOnCompletion(value, event)) &&
                     WaitForSingleObject(event, 10000) == WAIT_OBJECT_0;
     CloseHandle(event);
@@ -884,162 +688,83 @@ bool D3D12Interop::create_pack_stream(std::string* error) {
 
 bool D3D12Interop::clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t width,
                                     uint32_t height, std::string* error) {
-    if (device_ptr == 0) {
-        return true;
-    }
+    if (device_ptr == 0) return true;
     CudaApi& cuda = cudaApi();
-    if (!bind_context(error)) {
-        return false;
-    }
-    const uint16_t y_black = 0x1000;      // 10-bit limited black: 64 << 6
-    const uint16_t uv_neutral = 0x8000;   // 10-bit neutral chroma: 512 << 6
-    const size_t y_rows = height;
-    const size_t uv_rows = height / 2;
-    const size_t width_samples = width;
-
+    if (!bind_context(error)) return false;
+    const uint16_t y_black = 0x1000, uv_neutral = 0x8000;
     if (cuda.memset_d2d16 != nullptr) {
-        cuda.memset_d2d16(static_cast<CUdeviceptr>(device_ptr), pitch, y_black, width_samples, y_rows);
-        const CUdeviceptr uv_ptr = static_cast<CUdeviceptr>(device_ptr + pitch * height);
-        cuda.memset_d2d16(uv_ptr, pitch, uv_neutral, width_samples, uv_rows);
+        cuda.memset_d2d16(static_cast<CUdeviceptr>(device_ptr), pitch, y_black, width, height);
+        cuda.memset_d2d16(static_cast<CUdeviceptr>(device_ptr + pitch * height), pitch, uv_neutral, width, height / 2);
     } else if (cuda.memset_d16 != nullptr) {
-        for (size_t r = 0; r < y_rows; ++r) {
-            cuda.memset_d16(static_cast<CUdeviceptr>(device_ptr + r * pitch), y_black, width_samples);
-        }
+        for (size_t r = 0; r < height; ++r) cuda.memset_d16(static_cast<CUdeviceptr>(device_ptr + r * pitch), y_black, width);
         const uint64_t uv_base = device_ptr + pitch * height;
-        for (size_t r = 0; r < uv_rows; ++r) {
-            cuda.memset_d16(static_cast<CUdeviceptr>(uv_base + r * pitch), uv_neutral, width_samples);
-        }
+        for (size_t r = 0; r < height / 2; ++r) cuda.memset_d16(static_cast<CUdeviceptr>(uv_base + r * pitch), uv_neutral, width);
     }
     return true;
 }
 
-bool D3D12Interop::alloc_pitched(uint64_t* device_ptr, size_t* pitch, size_t width_bytes,
-                                 size_t rows, std::string* error) {
-    if (device_ptr == nullptr || pitch == nullptr) {
-        *error = "alloc_pitched requires output pointers";
-        return false;
-    }
-    *device_ptr = 0;
-    *pitch = 0;
+bool D3D12Interop::alloc_pitched(uint64_t* device_ptr, size_t* pitch, size_t width_bytes, size_t rows, std::string* error) {
+    if (!device_ptr || !pitch) return false;
     CudaApi& cuda = cudaApi();
-    if (cuda.mem_alloc_pitch == nullptr) {
-        *error = "the CUDA driver lacks cuMemAllocPitch";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
-    CUdeviceptr pointer = 0;
-    size_t row_pitch = 0;
-    const CUresult allocated =
-        cuda.mem_alloc_pitch(&pointer, &row_pitch, width_bytes, rows, 16);
-    if (allocated != CUDA_SUCCESS) {
-        *error = std::string("cuMemAllocPitch failed: ") + cudaErrorName(allocated);
-        return false;
-    }
-    *device_ptr = static_cast<uint64_t>(pointer);
-    *pitch = row_pitch;
+    if (!cuda.mem_alloc_pitch || !bind_context(error)) return false;
+    CUdeviceptr p = 0; size_t r = 0;
+    CUresult res = cuda.mem_alloc_pitch(&p, &r, width_bytes, rows, 16);
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
+    *device_ptr = static_cast<uint64_t>(p); *pitch = r;
     return true;
 }
 
 bool D3D12Interop::free_device(uint64_t device_ptr, std::string* error) {
-    if (device_ptr == 0) {
-        return true;
-    }
+    if (!device_ptr) return true;
     CudaApi& cuda = cudaApi();
-    if (cuda.mem_free == nullptr) {
-        *error = "the CUDA driver lacks cuMemFree";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
-    const CUresult freed = cuda.mem_free(static_cast<CUdeviceptr>(device_ptr));
-    if (freed != CUDA_SUCCESS) {
-        *error = std::string("cuMemFree failed: ") + cudaErrorName(freed);
-        return false;
-    }
+    if (!cuda.mem_free || !bind_context(error)) return false;
+    CUresult res = cuda.mem_free(static_cast<CUdeviceptr>(device_ptr));
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
 
-bool D3D12Interop::memset_d32_async(uint64_t device_ptr, unsigned int value, size_t count,
-                                    void* stream, std::string* error) {
-    if (device_ptr == 0 || count == 0) {
-        *error = "memset_d32_async requires a device pointer and a count";
-        return false;
-    }
+bool D3D12Interop::memset_d32_async(uint64_t device_ptr, unsigned int value, size_t count, void* stream, std::string* error) {
+    if (!device_ptr || count == 0) return false;
     CudaApi& cuda = cudaApi();
-    if (cuda.memset_d32_async == nullptr) {
-        *error = "the CUDA driver lacks cuMemsetD32Async";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
-    const CUresult cleared = cuda.memset_d32_async(static_cast<CUdeviceptr>(device_ptr), value,
-                                                   count, static_cast<CUstream>(stream));
-    if (cleared != CUDA_SUCCESS) {
-        *error = std::string("cuMemsetD32Async failed: ") + cudaErrorName(cleared);
-        return false;
-    }
+    if (!cuda.memset_d32_async || !bind_context(error)) return false;
+    CUresult res = cuda.memset_d32_async(static_cast<CUdeviceptr>(device_ptr), value, count, static_cast<CUstream>(stream));
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
 
-bool D3D12Interop::memcpy_dtoh(void* destination, uint64_t source, size_t bytes,
-                               std::string* error) {
-    if (destination == nullptr || source == 0 || bytes == 0) {
-        *error = "memcpy_dtoh requires a destination, a source and a size";
-        return false;
-    }
+bool D3D12Interop::memcpy_dtoh(void* dst, uint64_t src, size_t bytes, std::string* error) {
+    if (!dst || !src || bytes == 0) return false;
     CudaApi& cuda = cudaApi();
-    if (cuda.memcpy2d == nullptr) {
-        *error = "the CUDA driver lacks cuMemcpy2D";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
+    if (!cuda.memcpy2d || !bind_context(error)) return false;
     CUDA_MEMCPY2D copy{};
     copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-    copy.srcDevice = static_cast<CUdeviceptr>(source);
+    copy.srcDevice = static_cast<CUdeviceptr>(src);
+    copy.srcPitch = bytes;
     copy.dstMemoryType = CU_MEMORYTYPE_HOST;
-    copy.dstHost = destination;
+    copy.dstHost = dst;
+    copy.dstPitch = bytes;
     copy.WidthInBytes = bytes;
     copy.Height = 1;
-    const CUresult copied = cuda.memcpy2d(&copy);
-    if (copied != CUDA_SUCCESS) {
-        *error = std::string("cuMemcpy2D (D2H) failed: ") + cudaErrorName(copied);
-        return false;
-    }
+    CUresult res = cuda.memcpy2d(&copy);
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
 
-bool D3D12Interop::memcpy_htod(uint64_t destination, const void* source, size_t bytes,
-                               std::string* error) {
-    if (destination == 0 || source == nullptr || bytes == 0) {
-        *error = "memcpy_htod requires a destination, a source and a size";
-        return false;
-    }
+bool D3D12Interop::memcpy_htod(uint64_t dst, const void* src, size_t bytes, std::string* error) {
+    if (!dst || !src || bytes == 0) return false;
     CudaApi& cuda = cudaApi();
-    if (cuda.memcpy2d == nullptr) {
-        *error = "the CUDA driver lacks cuMemcpy2D";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
+    if (!cuda.memcpy2d || !bind_context(error)) return false;
     CUDA_MEMCPY2D copy{};
     copy.srcMemoryType = CU_MEMORYTYPE_HOST;
-    copy.srcHost = source;
+    copy.srcHost = src;
+    copy.srcPitch = bytes;
     copy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-    copy.dstDevice = static_cast<CUdeviceptr>(destination);
+    copy.dstDevice = static_cast<CUdeviceptr>(dst);
+    copy.dstPitch = bytes;
     copy.WidthInBytes = bytes;
     copy.Height = 1;
-    const CUresult copied = cuda.memcpy2d(&copy);
-    if (copied != CUDA_SUCCESS) {
-        *error = std::string("cuMemcpy2D (H2D) failed: ") + cudaErrorName(copied);
-        return false;
-    }
+    CUresult res = cuda.memcpy2d(&copy);
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
 
@@ -1117,121 +842,63 @@ bool D3D12Interop::create_lut_texture(const uint16_t* lut_half4_data, int32_t gr
 }
 
 void D3D12Interop::destroy_lut_texture(void** texture_object, void** array) noexcept {
-    if (texture_object != nullptr && *texture_object != nullptr) {
-        CudaApi& cuda = cudaApi();
-        if (cuda.tex_object_destroy != nullptr) {
-            (void)cuda.tex_object_destroy(static_cast<CudaApi::CUtexObject>(
-                reinterpret_cast<uintptr_t>(*texture_object)));
-        }
+    CudaApi& cuda = cudaApi();
+    if (texture_object && *texture_object) {
+        if (cuda.tex_object_destroy) cuda.tex_object_destroy(static_cast<CudaApi::CUtexObject>(reinterpret_cast<uintptr_t>(*texture_object)));
         *texture_object = nullptr;
     }
-    if (array != nullptr && *array != nullptr) {
-        CudaApi& cuda = cudaApi();
-        if (cuda.array_destroy != nullptr) {
-            (void)cuda.array_destroy(static_cast<CUarray>(*array));
-        }
+    if (array && *array) {
+        if (cuda.array_destroy) cuda.array_destroy(static_cast<CUarray>(*array));
         *array = nullptr;
     }
 }
 
 bool D3D12Interop::event_create(void** event, std::string* error) {
-    if (event == nullptr) {
-        *error = "event_create requires an output pointer";
-        return false;
-    }
+    if (!event) return false;
     *event = nullptr;
     CudaApi& cuda = cudaApi();
-    if (cuda.event_create == nullptr || cuda.event_destroy == nullptr) {
-        *error = "the CUDA driver lacks the event API";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
+    if (!cuda.event_create || !bind_context(error)) return false;
     CUevent handle = nullptr;
-    constexpr unsigned int kEventDefault = 0x0;  // CU_EVENT_DEFAULT
-    const CUresult created = cuda.event_create(&handle, kEventDefault);
-    if (created != CUDA_SUCCESS || handle == nullptr) {
-        *error = std::string("cuEventCreate failed: ") + cudaErrorName(created);
-        return false;
-    }
+    CUresult res = cuda.event_create(&handle, 0);
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     *event = handle;
     return true;
 }
 
 void D3D12Interop::event_destroy(void* event) noexcept {
-    if (event == nullptr) {
-        return;
-    }
+    if (!event) return;
     CudaApi& cuda = cudaApi();
-    if (cuda.event_destroy == nullptr) {
-        return;
-    }
-    (void)cuda.event_destroy(static_cast<CUevent>(event));
+    if (cuda.event_destroy) cuda.event_destroy(static_cast<CUevent>(event));
 }
 
 bool D3D12Interop::event_record(void* event, void* stream, std::string* error) {
-    if (event == nullptr) {
-        *error = "event_record requires an event";
-        return false;
-    }
+    if (!event) return false;
     CudaApi& cuda = cudaApi();
-    if (cuda.event_record == nullptr) {
-        *error = "the CUDA driver lacks cuEventRecord";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
-    const CUresult recorded =
-        cuda.event_record(static_cast<CUevent>(event), static_cast<CUstream>(stream));
-    if (recorded != CUDA_SUCCESS) {
-        *error = std::string("cuEventRecord failed: ") + cudaErrorName(recorded);
-        return false;
-    }
+    if (!cuda.event_record || !bind_context(error)) return false;
+    CUresult res = cuda.event_record(static_cast<CUevent>(event), static_cast<CUstream>(stream));
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
 
-bool D3D12Interop::event_elapsed(double* milliseconds, void* start, void* end,
-                                 std::string* error) {
-    if (milliseconds == nullptr || start == nullptr || end == nullptr) {
-        *error = "event_elapsed requires both events and an output pointer";
-        return false;
-    }
-    *milliseconds = 0.0;
+bool D3D12Interop::event_elapsed(double* ms, void* start, void* end, std::string* error) {
+    if (!ms || !start || !end) return false;
+    *ms = 0.0;
     CudaApi& cuda = cudaApi();
-    if (cuda.event_elapsed == nullptr) {
-        *error = "the CUDA driver lacks cuEventElapsedTime";
-        return false;
-    }
-    float value = 0.0f;
-    const CUresult elapsed = cuda.event_elapsed(&value, static_cast<CUevent>(start),
-                                                static_cast<CUevent>(end));
-    if (elapsed != CUDA_SUCCESS) {
-        *error = std::string("cuEventElapsedTime failed: ") + cudaErrorName(elapsed);
-        return false;
-    }
-    *milliseconds = static_cast<double>(value);
+    if (!cuda.event_elapsed) return false;
+    float val = 0.0f;
+    CUresult res = cuda.event_elapsed(&val, static_cast<CUevent>(start), static_cast<CUevent>(end));
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
+    *ms = static_cast<double>(val);
     return true;
 }
 
 bool D3D12Interop::stream_synchronize(void* stream, std::string* error) {
     CudaApi& cuda = cudaApi();
-    if (cuda.stream_synchronize == nullptr) {
-        *error = "the CUDA driver lacks cuStreamSynchronize";
-        return false;
-    }
-    if (!bind_context(error)) {
-        return false;
-    }
-    const CUresult synced = cuda.stream_synchronize(static_cast<CUstream>(stream));
-    if (synced != CUDA_SUCCESS) {
-        *error = std::string("cuStreamSynchronize failed: ") + cudaErrorName(synced);
-        return false;
-    }
+    if (!cuda.stream_synchronize || !bind_context(error)) return false;
+    CUresult res = cuda.stream_synchronize(static_cast<CUstream>(stream));
+    if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
-
 
 uint64_t D3D12Interop::queue_completed_value() const {
     ID3D12Fence* fence = as<ID3D12Fence>(fence_);
@@ -1507,270 +1174,24 @@ bool D3D12Interop::flush_queue(std::string* error) {
     return true;
 }
 
-bool D3D12Interop::upload(InteropTexture& texture, const void* data, size_t size,
-                          std::string* error) {
-    ID3D12Device* device = as<ID3D12Device>(device_);
-    ID3D12CommandQueue* queue = as<ID3D12CommandQueue>(queue_);
-    ID3D12Resource* target = as<ID3D12Resource>(texture.resource);
-
-    D3D12_RESOURCE_DESC desc = target->GetDesc();
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
-    UINT rows = 0;
-    UINT64 row_size = 0;
-    UINT64 total = 0;
-    device->GetCopyableFootprints(&desc, 0, 1, 0, &layout, &rows, &row_size, &total);
-    if (size < static_cast<size_t>(row_size) * texture.height) {
-        *error = "upload buffer is smaller than the texture";
-        return false;
-    }
-
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC buffer_desc{};
-    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer_desc.Width = total;
-    buffer_desc.Height = 1;
-    buffer_desc.DepthOrArraySize = 1;
-    buffer_desc.MipLevels = 1;
-    buffer_desc.SampleDesc.Count = 1;
-    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    ID3D12Resource* staging = nullptr;
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                               kIidResource, reinterpret_cast<void**>(&staging)))) {
-        *error = "cannot create the upload buffer";
-        return false;
-    }
-    void* mapped = nullptr;
-    if (FAILED(staging->Map(0, nullptr, &mapped))) {
-        staging->Release();
-        *error = "cannot map the upload buffer";
-        return false;
-    }
-    const auto* source = static_cast<const uint8_t*>(data);
-    for (UINT row = 0; row < texture.height; ++row) {
-        std::memcpy(static_cast<uint8_t*>(mapped) + layout.Offset + row * layout.Footprint.RowPitch,
-                    source + static_cast<size_t>(row) * row_size, static_cast<size_t>(row_size));
-    }
-    staging->Unmap(0, nullptr);
-
-    ID3D12CommandAllocator* allocator = nullptr;
-    ID3D12GraphicsCommandList* list = nullptr;
-    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                              kIidCommandAllocator,
-                                              reinterpret_cast<void**>(&allocator)))) {
-        staging->Release();
-        *error = "cannot create a command allocator";
-        return false;
-    }
-    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
-                                         kIidGraphicsCommandList,
-                                         reinterpret_cast<void**>(&list)))) {
-        allocator->Release();
-        staging->Release();
-        *error = "cannot create a command list";
-        return false;
-    }
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = target;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    list->ResourceBarrier(1, &barrier);
-
-    D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = target;
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex = 0;
-    D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = staging;
-    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint = layout;
-    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
-    list->ResourceBarrier(1, &barrier);
-    list->Close();
-    ID3D12CommandList* lists[] = {list};
-    queue->ExecuteCommandLists(1, lists);
-    const bool ok = flush_queue(error);
-    list->Release();
-    allocator->Release();
-    staging->Release();
-    return ok;
-}
-
-bool D3D12Interop::download(InteropTexture& texture, void* data, size_t size,
-                            std::string* error, uint64_t queue_wait_value) {
-    ID3D12Device* device = as<ID3D12Device>(device_);
-    ID3D12CommandQueue* queue = as<ID3D12CommandQueue>(queue_);
-    ID3D12Resource* source_resource = as<ID3D12Resource>(texture.resource);
-
-    D3D12_RESOURCE_DESC desc = source_resource->GetDesc();
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
-    UINT rows = 0;
-    UINT64 row_size = 0;
-    UINT64 total = 0;
-    device->GetCopyableFootprints(&desc, 0, 1, 0, &layout, &rows, &row_size, &total);
-    if (size < static_cast<size_t>(row_size) * texture.height) {
-        *error = "download buffer is smaller than the texture";
-        return false;
-    }
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_READBACK;
-    D3D12_RESOURCE_DESC buffer_desc{};
-    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer_desc.Width = total;
-    buffer_desc.Height = 1;
-    buffer_desc.DepthOrArraySize = 1;
-    buffer_desc.MipLevels = 1;
-    buffer_desc.SampleDesc.Count = 1;
-    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    ID3D12Resource* staging = nullptr;
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr, kIidResource,
-                                               reinterpret_cast<void**>(&staging)))) {
-        *error = "cannot create the readback buffer";
-        return false;
-    }
-    ID3D12CommandAllocator* allocator = nullptr;
-    ID3D12GraphicsCommandList* list = nullptr;
-    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                              kIidCommandAllocator,
-                                              reinterpret_cast<void**>(&allocator)))) {
-        staging->Release();
-        *error = "cannot create a command allocator";
-        return false;
-    }
-    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr,
-                                         kIidGraphicsCommandList,
-                                         reinterpret_cast<void**>(&list)))) {
-        allocator->Release();
-        staging->Release();
-        *error = "cannot create a command list";
-        return false;
-    }
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = source_resource;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    list->ResourceBarrier(1, &barrier);
-
-    D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = staging;
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    dst.PlacedFootprint = layout;
-    D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = source_resource;
-    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    src.SubresourceIndex = 0;
-    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
-    list->ResourceBarrier(1, &barrier);
-    list->Close();
-    // Optional GPU-side ordering: wait on the shared fence value that a CUDA
-    // stream signalled, so the readback cannot overtake the CUDA write-back.
-    if (queue_wait_value != 0) {
-        ID3D12Fence* fence = as<ID3D12Fence>(fence_);
-        if (fence == nullptr || FAILED(queue->Wait(fence, queue_wait_value))) {
-            list->Release();
-            allocator->Release();
-            staging->Release();
-            *error = "the D3D12 queue could not wait on the shared fence before readback";
-            return false;
-        }
-    }
-    ID3D12CommandList* lists[] = {list};
-    queue->ExecuteCommandLists(1, lists);
-    bool ok = flush_queue(error);
-    if (ok) {
-        void* mapped = nullptr;
-        if (FAILED(staging->Map(0, nullptr, &mapped))) {
-            *error = "cannot map the readback buffer";
-            ok = false;
-        } else {
-            auto* destination = static_cast<uint8_t*>(data);
-            for (UINT row = 0; row < texture.height; ++row) {
-                std::memcpy(destination + static_cast<size_t>(row) * row_size,
-                            static_cast<const uint8_t*>(mapped) + layout.Offset +
-                                row * layout.Footprint.RowPitch,
-                            static_cast<size_t>(row_size));
-            }
-            staging->Unmap(0, nullptr);
-        }
-    }
-    list->Release();
-    allocator->Release();
-    staging->Release();
-    return ok;
-}
-
 void D3D12Interop::release() {
     CudaApi& cuda = cudaApi();
     std::string ignored_error;
-    if (cuda_context_ != nullptr) {
-        (void)bind_context(&ignored_error);
-    }
-    if (mid_4k_.resource != nullptr) {
-        as<ID3D12Resource>(mid_4k_.resource)->Release();
-        mid_4k_.resource = nullptr;
-    }
+    if (cuda_context_ != nullptr) (void)bind_context(&ignored_error);
+    if (mid_4k_.resource != nullptr) { as<ID3D12Resource>(mid_4k_.resource)->Release(); mid_4k_.resource = nullptr; }
     for (InteropTexture* texture : {&input_, &output_}) {
-        if (texture->surface != 0 && cuda.surf_object_destroy != nullptr) {
-            cuda.surf_object_destroy(texture->surface);
-            texture->surface = 0;
-        }
-        if (texture->mip_array != nullptr && cuda.mipmapped_array_destroy != nullptr) {
-            cuda.mipmapped_array_destroy(static_cast<CUmipmappedArray>(texture->mip_array));
-            texture->mip_array = nullptr;
-        }
-        if (texture->external_memory != nullptr && cuda.destroy_external_memory != nullptr) {
-            cuda.destroy_external_memory(static_cast<CUexternalMemory>(texture->external_memory));
-            texture->external_memory = nullptr;
-        }
-        if (texture->resource != nullptr) {
-            as<ID3D12Resource>(texture->resource)->Release();
-            texture->resource = nullptr;
-        }
-        if (texture->shared_handle != nullptr) {
-            CloseHandle(static_cast<HANDLE>(texture->shared_handle));
-            texture->shared_handle = nullptr;
-        }
+        if (texture->surface != 0 && cuda.surf_object_destroy) { cuda.surf_object_destroy(texture->surface); texture->surface = 0; }
+        if (texture->mip_array && cuda.mipmapped_array_destroy) { cuda.mipmapped_array_destroy(static_cast<CUmipmappedArray>(texture->mip_array)); texture->mip_array = nullptr; }
+        if (texture->external_memory && cuda.destroy_external_memory) { cuda.destroy_external_memory(static_cast<CUexternalMemory>(texture->external_memory)); texture->external_memory = nullptr; }
+        if (texture->resource) { as<ID3D12Resource>(texture->resource)->Release(); texture->resource = nullptr; }
+        if (texture->shared_handle) { CloseHandle(static_cast<HANDLE>(texture->shared_handle)); texture->shared_handle = nullptr; }
     }
-    if (external_semaphore_ != nullptr) {
-        if (cuda.destroy_external_semaphore != nullptr) {
-            (void)cuda.destroy_external_semaphore(external_semaphore_);
-        }
-        external_semaphore_ = nullptr;
-    }
-    if (pack_stream_ != nullptr) {
-        if (cuda.stream_destroy != nullptr) {
-            (void)cuda.stream_destroy(static_cast<CUstream>(pack_stream_));
-        }
-        pack_stream_ = nullptr;
-    }
-    if (fence_shared_handle_ != nullptr) {
-        CloseHandle(static_cast<HANDLE>(fence_shared_handle_));
-        fence_shared_handle_ = nullptr;
-    }
-    if (fence_ != nullptr) {
-        as<ID3D12Fence>(fence_)->Release();
-        fence_ = nullptr;
-    }
-    if (queue_ != nullptr) {
-        as<ID3D12CommandQueue>(queue_)->Release();
-        queue_ = nullptr;
-    }
-    if (device_ != nullptr) {
-        as<ID3D12Device>(device_)->Release();
-        device_ = nullptr;
-    }
+    if (external_semaphore_ && cuda.destroy_external_semaphore) { (void)cuda.destroy_external_semaphore(external_semaphore_); external_semaphore_ = nullptr; }
+    if (pack_stream_ && cuda.stream_destroy) { (void)cuda.stream_destroy(static_cast<CUstream>(pack_stream_)); pack_stream_ = nullptr; }
+    if (fence_shared_handle_) { CloseHandle(static_cast<HANDLE>(fence_shared_handle_)); fence_shared_handle_ = nullptr; }
+    if (fence_) { as<ID3D12Fence>(fence_)->Release(); fence_ = nullptr; }
+    if (queue_) { as<ID3D12CommandQueue>(queue_)->Release(); queue_ = nullptr; }
+    if (device_) { as<ID3D12Device>(device_)->Release(); device_ = nullptr; }
     cuda_context_ = nullptr;
 }
 
@@ -1848,266 +1269,6 @@ void* load_plugin_library(const wchar_t* name) {
     (void)name;
     return nullptr;
 #endif
-}
-
-RtxResult run_interop_selftest(uint32_t width, uint32_t height, char* detail,
-                               size_t detail_capacity) {
-    if (detail == nullptr || detail_capacity == 0) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    detail[0] = '\0';
-    trace("selftest: enter");
-    RtxNgxBridgeConfig config{};
-    config.input_width = static_cast<int32_t>(width);
-    config.input_height = static_cast<int32_t>(height);
-    config.output_width = static_cast<int32_t>(width);
-    config.output_height = static_cast<int32_t>(height);
-    config.vsr_quality = 1;
-
-    D3D12Interop interop;
-    std::string error;
-    // Load DXGI before touching CUDA: DXGIDeclareAdapterRemovalSupport is only
-    // valid until cuInit() sets up DXGI state in the process (observed on
-    // driver 617.14: a later call returns DXGI_ERROR_INVALID_CALL).
-    if (!d3d12Api().load(&error)) {
-        std::snprintf(detail, detail_capacity, "%s", error.c_str());
-        return RTX_ERR_DLL_MISSING;
-    }
-    // The selftest does not need the NGX config; reuse the same code path with
-    // the CUDA device's LUID so the adapter match is exercised.
-    trace("selftest: cuda context");
-    if (!ensureCudaContext(&error)) {
-        std::snprintf(detail, detail_capacity, "%s", error.c_str());
-        return RTX_ERR_DLL_MISSING;
-    }
-    trace("selftest: cuda context ready");
-    CUdevice device = 0;
-    char luid[8] = {};
-    unsigned int node_mask = 0;
-    HMODULE cuda_module = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (cuda_module == nullptr) {
-        std::snprintf(detail, detail_capacity, "nvcuda.dll missing");
-        return RTX_ERR_DLL_MISSING;
-    }
-    auto get_luid = reinterpret_cast<CUresult (*)(char*, unsigned int*, CUdevice)>(
-        GetProcAddress(cuda_module, "cuDeviceGetLuid"));
-    auto get_device = reinterpret_cast<CUresult (*)(CUdevice*, int)>(
-        GetProcAddress(cuda_module, "cuDeviceGet"));
-    trace("selftest: luid query");
-    if (get_luid == nullptr || get_device == nullptr || get_device(&device, 0) != CUDA_SUCCESS) {
-        FreeLibrary(cuda_module);
-        std::snprintf(detail, detail_capacity, "cannot query the CUDA LUID");
-        return RTX_ERR_INTERNAL;
-    }
-    if (get_luid(luid, &node_mask, device) != CUDA_SUCCESS) {
-        FreeLibrary(cuda_module);
-        std::snprintf(detail, detail_capacity, "cuDeviceGetLuid failed");
-        return RTX_ERR_INTERNAL;
-    }
-    FreeLibrary(cuda_module);
-    std::memcpy(config.luid, luid, 8);
-    config.luid_node_mask = node_mask;
-
-    if (!interop.create(config, &error)) {
-        std::snprintf(detail, detail_capacity, "%s", error.c_str());
-        return RTX_ERR_NGX;
-    }
-
-    // W6 anti-TDR mechanisms on the live device.
-    if (interop.pack_stream() == nullptr) {
-        std::snprintf(detail, detail_capacity,
-                      "the high-priority pack stream was not created");
-        return RTX_ERR_INTERNAL;
-    }
-    {
-        // Two unanswered queue signals must never report a depth above the
-        // anti-TDR ceiling, and the queue must drain within the frame budget.
-        const uint64_t first = interop.advance_timeline();
-        const uint64_t second = interop.advance_timeline();
-        if (!interop.queue_signal_fence(first, &error) ||
-            !interop.queue_signal_fence(second, &error)) {
-            std::snprintf(detail, detail_capacity, "queue signal: %s", error.c_str());
-            return RTX_ERR_INTERNAL;
-        }
-        if (interop.queue_depth() > 2) {
-            std::snprintf(detail, detail_capacity,
-                          "D3D12 queue depth exceeded 2 after two submissions");
-            return RTX_ERR_INTERNAL;
-        }
-        if (!interop.wait_for_queue_depth(2, std::chrono::milliseconds(2000), &error)) {
-            std::snprintf(detail, detail_capacity, "queue depth wait: %s", error.c_str());
-            return RTX_ERR_INTERNAL;
-        }
-    }
-
-    // 1. D3D12 writes a known gradient into the shared RGBA16F texture.
-    const size_t pixels = static_cast<size_t>(width) * height;
-    std::vector<uint16_t> gradient(pixels * 4);
-    for (uint32_t y = 0; y < height; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
-            const size_t index = (static_cast<size_t>(y) * width + x) * 4;
-            gradient[index + 0] = static_cast<uint16_t>(x * 256u);
-            gradient[index + 1] = static_cast<uint16_t>(y * 256u);
-            gradient[index + 2] = static_cast<uint16_t>((x + y) * 128u);
-            gradient[index + 3] = 0x3C00;  // 1.0h
-        }
-    }
-    trace("selftest: upload");
-    if (!interop.upload(interop.output(), gradient.data(), gradient.size() * sizeof(uint16_t),
-                        &error)) {
-        std::snprintf(detail, detail_capacity, "upload: %s", error.c_str());
-        return RTX_ERR_INTERNAL;
-    }
-    // flush_queue() signalled this timeline value and the CPU confirmed it;
-    // the semaphore wait below is the GPU-side form of the same ordering.
-    const uint64_t upload_value = interop.timeline_value();
-
-    // 2. CUDA reads the same texture through the imported surface.
-    std::vector<uint16_t> cuda_view(pixels * 4);
-    CudaApi& cuda = cudaApi();
-    const size_t row_bytes = static_cast<size_t>(width) * 8;
-    CUDA_MEMCPY2D copy{};
-    copy.srcMemoryType = CU_MEMORYTYPE_ARRAY;
-    copy.srcArray = static_cast<CUarray>(interop.output().array);
-    copy.dstMemoryType = CU_MEMORYTYPE_HOST;
-    copy.dstHost = cuda_view.data();
-    copy.dstPitch = row_bytes;
-    copy.WidthInBytes = row_bytes;
-    copy.Height = height;
-    trace("selftest: d3d12->cuda copy");
-    std::string bind_error;
-    if (!interop.bind_context(&bind_error)) {
-        std::snprintf(detail, detail_capacity, "%s", bind_error.c_str());
-        return RTX_ERR_INTERNAL;
-    }
-    // GPU-side wait on the value the D3D12 queue signalled after the upload:
-    // this is the "cuWaitExternalSemaphoresAsync" leg of the 5-step hand-off.
-    if (interop.semaphore_ready() &&
-        !interop.fence_wait_cuda(nullptr, upload_value, &bind_error)) {
-        std::snprintf(detail, detail_capacity, "%s", bind_error.c_str());
-        return RTX_ERR_INTERNAL;
-    }
-    // Synchronous read: the host compare below must observe the completed
-    // copy, so the read itself never leaves the stream asynchronous.
-    CUresult result = cuda.memcpy2d(&copy);
-    if (result != CUDA_SUCCESS) {
-        std::snprintf(detail, detail_capacity, "D3D12->CUDA copy failed: %s", cudaErrorName(result));
-        return RTX_ERR_INTERNAL;
-    }
-    if (std::memcmp(cuda_view.data(), gradient.data(), gradient.size() * sizeof(uint16_t)) != 0) {
-        std::snprintf(detail, detail_capacity,
-                      "D3D12 -> CUDA mismatch (tiled layout not resolved)");
-        return RTX_ERR_INTERNAL;
-    }
-
-    // 3. CUDA writes the texture back, D3D12 reads it.
-    for (size_t i = 0; i < cuda_view.size(); ++i) {
-        cuda_view[i] = static_cast<uint16_t>(cuda_view[i] ^ 0x0001u);
-    }
-    CUDA_MEMCPY2D write_back{};
-    write_back.srcMemoryType = CU_MEMORYTYPE_HOST;
-    write_back.srcHost = cuda_view.data();
-    write_back.srcPitch = row_bytes;
-    write_back.dstMemoryType = CU_MEMORYTYPE_ARRAY;
-    write_back.dstArray = static_cast<CUarray>(interop.output().array);
-    write_back.WidthInBytes = row_bytes;
-    write_back.Height = height;
-    trace("selftest: cuda->d3d12 copy");
-    // The write-back must run in the very context that imported the array;
-    // re-bind and fail loudly if the driver detached it again.
-    if (!interop.bind_context(&bind_error)) {
-        std::snprintf(detail, detail_capacity, "%s", bind_error.c_str());
-        return RTX_ERR_INTERNAL;
-    }
-    result = cuda.memcpy2d_async(&write_back, nullptr);
-    if (result != CUDA_SUCCESS) {
-        std::snprintf(detail, detail_capacity, "CUDA->D3D12 copy failed: %s", cudaErrorName(result));
-        return RTX_ERR_INTERNAL;
-    }
-    // Cross-API ordering (expert hardening item 2): the write is asynchronous
-    // on the CUDA stream while the readback below runs on the D3D12 queue.
-    // When the driver provides the external-semaphore API the hand-off is
-    // GPU-only: the CUDA stream signals the shared fence and the D3D12 queue
-    // waits on that value before the readback, so no CPU thread ever blocks
-    // on a cross-engine boundary.  Without the API the CPU wait remains as
-    // the honest fallback.
-    uint64_t signal_value = 0;
-    if (interop.semaphore_ready()) {
-        // Draw the signal value from the shared timeline so it can never
-        // collide with a later queue signal: a collision would satisfy the
-        // queue's own CPU wait early and race the readback.
-        signal_value = interop.advance_timeline();
-        if (!interop.fence_signal_cuda(nullptr, signal_value, &bind_error)) {
-            std::snprintf(detail, detail_capacity, "%s", bind_error.c_str());
-            return RTX_ERR_INTERNAL;
-        }
-        trace("selftest: cuda signalled the shared fence");
-    } else if (cuda.stream_synchronize != nullptr) {
-        result = cuda.stream_synchronize(nullptr);
-        if (result != CUDA_SUCCESS) {
-            std::snprintf(detail, detail_capacity, "CUDA->D3D12 stream sync failed: %s",
-                          cudaErrorName(result));
-            return RTX_ERR_INTERNAL;
-        }
-    }
-    std::vector<uint16_t> round_trip(pixels * 4);
-    trace("selftest: download");
-    if (!interop.download(interop.output(), round_trip.data(),
-                          round_trip.size() * sizeof(uint16_t), &error, signal_value)) {
-        std::snprintf(detail, detail_capacity, "download: %s", error.c_str());
-        return RTX_ERR_INTERNAL;
-    }
-    if (std::memcmp(round_trip.data(), cuda_view.data(), cuda_view.size() * sizeof(uint16_t)) !=
-        0) {
-        // Report the first differing sample so a cross-engine ordering bug is
-        // distinguishable from a tiled-layout problem in the log.
-        size_t first = 0;
-        while (first < cuda_view.size() && round_trip[first] == cuda_view[first]) {
-            ++first;
-        }
-        std::snprintf(detail, detail_capacity,
-                      "CUDA -> D3D12 mismatch (tiled layout not resolved): sample %zu of %zu, "
-                      "expected 0x%04X, read back 0x%04X",
-                      first, cuda_view.size(),
-                      first < cuda_view.size() ? cuda_view[first] : 0,
-                      first < round_trip.size() ? round_trip[first] : 0);
-        return RTX_ERR_INTERNAL;
-    }
-
-    // Expert directive B-2.1: verify the upscale configuration on real
-    // hardware.  A second short-lived instance must allocate (and cleanly
-    // release) the internal 4K SDR mid texture that the VSR -> TrueHDR chain
-    // needs; the round trip above runs at equal geometry and does not.
-    {
-        RtxNgxBridgeConfig upscale{};
-        upscale.input_width = static_cast<int32_t>(width);
-        upscale.input_height = static_cast<int32_t>(height);
-        upscale.output_width = static_cast<int32_t>(width) * 2;
-        upscale.output_height = static_cast<int32_t>(height) * 2;
-        upscale.vsr_quality = 1;
-        std::memcpy(upscale.luid, config.luid, sizeof(upscale.luid));
-        upscale.luid_node_mask = config.luid_node_mask;
-        D3D12Interop upscaled;
-        std::string upscale_error;
-        if (!upscaled.create(upscale, &upscale_error)) {
-            std::snprintf(detail, detail_capacity, "upscale interop create failed: %s",
-                          upscale_error.c_str());
-            return RTX_ERR_INTERNAL;
-        }
-        if (upscaled.mid().resource == nullptr || upscaled.mid().allocation_size == 0) {
-            std::snprintf(detail, detail_capacity,
-                          "upscale interop did not allocate the 4K SDR mid texture");
-            return RTX_ERR_INTERNAL;
-        }
-        trace("selftest: upscale mid texture verified");
-    }
-
-    std::snprintf(detail, detail_capacity,
-                  "round trip OK: %ux%u RGBA16F, D3D12 -> CUDA -> D3D12; queue depth cap 2, "
-                  "pack stream priority %s, adapter removal %s",
-                  width, height, interop.packStreamHighPriority() ? "high" : "default",
-                  interop.adapterRemovalDeclared() ? "declared" : "not declared");
-    return RTX_OK;
 }
 
 }  // namespace rtx_ngx

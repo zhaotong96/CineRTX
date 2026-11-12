@@ -66,10 +66,6 @@ public:
     bool loadNvenc(std::string* error = nullptr);
     // Loads nvcuvid.dll (decode) without creating a parser.
     bool loadNvcuvid(std::string* error = nullptr);
-    // Loads NvOFFRUC.dll (optical flow FRUC).
-    bool loadNvOfruc(std::string* error = nullptr);
-    // Loads nvinfer_10.dll and queries getInferLibVersion.
-    bool loadTensorRt(std::string* error = nullptr);
     // Loads nvsdk_ngx_d.dll plus the VSR/TrueHDR feature DLLs.
     bool loadNgx(std::string* error = nullptr);
 
@@ -77,14 +73,9 @@ public:
     const DynLibrary& cuda() const noexcept { return cuda_; }
     const DynLibrary& nvenc() const noexcept { return nvenc_; }
     const DynLibrary& nvcuvid() const noexcept { return nvcuvid_; }
-    const DynLibrary& nvofruc() const noexcept { return nvofruc_; }
-    const DynLibrary& tensorrt() const noexcept { return tensorrt_; }
     const DynLibrary& ngx() const noexcept { return ngx_; }
 
-    uint32_t tensorRtVersion() const noexcept { return tensorrt_version_; }
     uint32_t nvencVersion() const noexcept { return nvenc_version_; }
-    bool hasTensorRt() const noexcept { return tensorrt_.isOpen(); }
-    bool hasNvOfruc() const noexcept { return nvofruc_.isOpen(); }
     bool hasNgx() const noexcept { return ngx_.isOpen(); }
 
 private:
@@ -93,11 +84,8 @@ private:
     DynLibrary cuda_;
     DynLibrary nvenc_;
     DynLibrary nvcuvid_;
-    DynLibrary nvofruc_;
-    DynLibrary tensorrt_;
     DynLibrary ngx_;
     std::vector<ComponentStatus> components_;
-    uint32_t tensorrt_version_ = 0;
     uint32_t nvenc_version_ = 0;
 };
 

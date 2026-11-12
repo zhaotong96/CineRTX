@@ -14,10 +14,13 @@
 #include <span>
 #include <vector>
 
-#include "rtx/color.h"
 #include "rtx/status.h"
 
 namespace rtx {
+
+// IEEE-754 binary16 (half-precision float) conversion utilities.
+uint16_t floatToHalf(float value) noexcept;
+float halfToFloat(uint16_t value) noexcept;
 
 class Lut3D {
 public:

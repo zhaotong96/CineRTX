@@ -36,7 +36,7 @@ enum class ErrorCode : int {
     DeviceLost = 8,
     OutOfMemory = 9,
     NgxFailure = 10,
-    TensorRtVersion = 11,
+    Reserved11 = 11,
     Config = 13,
     State = 14,
     Timeout = 15,

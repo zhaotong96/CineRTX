@@ -76,15 +76,6 @@ public:
     InteropTexture& mid() noexcept { return mid_4k_; }
     const std::string& diagnostics() const noexcept { return diagnostics_; }
 
-    // Fills a texture from host memory through an upload buffer.  Used by the
-    // interop self-test and by the CPU reference path.
-    bool upload(InteropTexture& texture, const void* data, size_t size, std::string* error);
-    // Copies a texture back into host memory through a readback buffer.
-    // `queue_wait_value` optionally records a queue-side wait on the shared
-    // fence before the copy, so the GPU (not the CPU) orders a preceding CUDA
-    // signal against this readback.
-    bool download(InteropTexture& texture, void* data, size_t size, std::string* error,
-                  uint64_t queue_wait_value = 0);
     bool flush_queue(std::string* error);
 
     // Re-binds the CUDA context that owns the imported arrays.  D3D12 device
@@ -220,12 +211,6 @@ private:
     InteropTexture mid_4k_{};
     std::string diagnostics_;
 };
-
-// End-to-end check on the live GPU: D3D12 writes a known gradient into a shared
-// RGBA16F texture, CUDA reads it through the imported surface, writes it back,
-// and D3D12 reads the result.  Returns RTX_OK only when every sample matches.
-RtxResult run_interop_selftest(uint32_t width, uint32_t height, char* detail,
-                               size_t detail_capacity);
 
 // ---------------------------------------------------------------------------
 // Proprietary SDK plugin isolation (expert directive B-1, RTX verdict 5.1)

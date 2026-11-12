@@ -76,7 +76,7 @@ enum ControlId : int {
     IDC_CHK_VSR,
     IDC_LBL_VSR_QUAL,
     IDC_CMB_VSR_QUAL,
-    IDC_CHK_TRUEHDR,
+    IDC_CMB_FPS,
     IDC_LBL_PEAK_NITS,
     IDC_EDT_PEAK_NITS,
     IDC_CHK_AUDIO,
@@ -234,13 +234,23 @@ void populateComboBoxes(HWND hwnd) {
     // VSR Quality
     HWND hVsr = GetDlgItem(hwnd, IDC_CMB_VSR_QUAL);
     int selVsr = ComboBox_GetCurSel(hVsr);
-    if (selVsr < 0) selVsr = 1; // Level 2
+    if (selVsr < 0) selVsr = 3; // Level 4 Ultra Default
     ComboBox_ResetContent(hVsr);
     ComboBox_AddString(hVsr, L"Level 1 (Basic)");
-    ComboBox_AddString(hVsr, isZh ? L"Level 2 (推荐默认)" : L"Level 2 (Default)");
+    ComboBox_AddString(hVsr, L"Level 2 (Standard)");
     ComboBox_AddString(hVsr, L"Level 3 (High)");
-    ComboBox_AddString(hVsr, L"Level 4 (Ultra Quality)");
+    ComboBox_AddString(hVsr, isZh ? L"Level 4 (极致超分 - 默认)" : L"Level 4 (Ultra Quality - Default)");
     ComboBox_SetCurSel(hVsr, selVsr);
+
+    // Target FPS (FRUC)
+    HWND hFps = GetDlgItem(hwnd, IDC_CMB_FPS);
+    int selFps = ComboBox_GetCurSel(hFps);
+    if (selFps < 0) selFps = 1; // 60 FPS Default
+    ComboBox_ResetContent(hFps);
+    ComboBox_AddString(hFps, isZh ? L"保持原帧率 (不补帧)" : L"Original FPS (No FRUC)");
+    ComboBox_AddString(hFps, isZh ? L"60 FPS (NVOFA 硬件光流 - 默认)" : L"60 FPS (NVOFA Optical Flow - Default)");
+    ComboBox_AddString(hFps, isZh ? L"120 FPS (NVOFA 硬件光流)" : L"120 FPS (NVOFA Optical Flow)");
+    ComboBox_SetCurSel(hFps, selFps);
 }
 
 void updateUiLanguage(HWND hwnd) {
@@ -258,7 +268,6 @@ void updateUiLanguage(HWND hwnd) {
     SetDlgItemTextW(hwnd, IDC_LBL_GEOM, rtx::trW(rtx::StrId::ParamAspect));
     SetDlgItemTextW(hwnd, IDC_CHK_VSR, rtx::trW(rtx::StrId::ParamVsr));
     SetDlgItemTextW(hwnd, IDC_LBL_VSR_QUAL, rtx::trW(rtx::StrId::ParamVsrQuality));
-    SetDlgItemTextW(hwnd, IDC_CHK_TRUEHDR, rtx::trW(rtx::StrId::ParamTrueHdr));
     SetDlgItemTextW(hwnd, IDC_LBL_PEAK_NITS, rtx::trW(rtx::StrId::ParamPeakNits));
     SetDlgItemTextW(hwnd, IDC_CHK_AUDIO, rtx::trW(rtx::StrId::ParamAudioCopy));
     SetDlgItemTextW(hwnd, IDC_BTN_START, rtx::trW(rtx::StrId::ButtonStart));
@@ -273,19 +282,16 @@ void syncControlStates(HWND hwnd) {
     const int codecIdx = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_CODEC));
     const bool isH264 = (codecIdx == 2);
     if (isH264) {
-        Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), BST_UNCHECKED);
-        EnableWindow(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_CHK_HDR10PLUS), FALSE);
         EnableWindow(GetDlgItem(hwnd, IDC_EDT_LUT_PATH), FALSE);
     } else {
-        EnableWindow(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), !g_isTranscoding);
-        const bool hdrChecked = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR)) == BST_CHECKED);
-        EnableWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), hdrChecked && !g_isTranscoding);
-        EnableWindow(GetDlgItem(hwnd, IDC_CHK_HDR10PLUS), hdrChecked && !g_isTranscoding);
+        EnableWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), !g_isTranscoding);
+        EnableWindow(GetDlgItem(hwnd, IDC_CHK_HDR10PLUS), !g_isTranscoding);
         EnableWindow(GetDlgItem(hwnd, IDC_EDT_LUT_PATH), !g_isTranscoding);
     }
 
+    EnableWindow(GetDlgItem(hwnd, IDC_CMB_FPS), !g_isTranscoding);
     const bool vsrChecked = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_VSR)) == BST_CHECKED);
     EnableWindow(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL), vsrChecked && !g_isTranscoding);
 }
@@ -357,11 +363,10 @@ void layoutControls(HWND hwnd) {
     MoveWindow(GetDlgItem(hwnd, IDC_CHK_AUDIO), col2X, y + 4, colW, rowH, TRUE);
     y += gridH;
 
-    // Grid Row 5: VSR Check & Quality (Left) vs TrueHDR & Peak Nits (Right)
+    // Grid Row 5: VSR Check & Quality (Left) vs Target FPS (Right)
     MoveWindow(GetDlgItem(hwnd, IDC_CHK_VSR), pad, y + 4, lblW + 20, rowH, TRUE);
     MoveWindow(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL), pad + lblW + 25, y, colW - lblW - 25, rowH, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), col2X, y + 4, lblW + 20, rowH, TRUE);
-    MoveWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), col2X + lblW + 25, y, colW - lblW - 25, rowH, TRUE);
+    MoveWindow(GetDlgItem(hwnd, IDC_CMB_FPS), col2X, y, colW, rowH, TRUE);
     y += gridH;
 
     // Grid Row 6: HDR10+ (Left) vs 3D LUT path + browse (Right)
@@ -440,13 +445,21 @@ rtx::HwTranscodeOptions collectOptions(HWND hwnd) {
     opt.vsr_enabled = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_VSR)) == BST_CHECKED);
     opt.vsr_quality = std::clamp(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL)) + 1, 1, 4);
 
-    // HDR & Peak Nits (Phase 6.1 微瑕 1: the two controls were created but the
-    // collected options never carried them into HwTranscodeOptions).
-    opt.hdr = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR)) == BST_CHECKED);
-    wchar_t nitsBuf[32] = {};
-    GetDlgItemTextW(hwnd, IDC_EDT_PEAK_NITS, nitsBuf, 32);
-    const int parsedNits = _wtoi(nitsBuf);
-    opt.peak_nits = std::clamp(parsedNits > 0 ? parsedNits : 1000, 400, 4000);
+    // Target FPS & FRUC
+    const int fpsSel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_FPS));
+    if (fpsSel == 0) {
+        opt.fruc_enabled = false;
+        opt.target_fps = rtx::Rational{0, 1};
+    } else if (fpsSel == 2) {
+        opt.fruc_enabled = true;
+        opt.target_fps = rtx::Rational{120, 1};
+    } else {
+        opt.fruc_enabled = true;
+        opt.target_fps = rtx::Rational{60, 1};
+    }
+
+    opt.hdr = true; // Auto-sensed based on source
+    opt.peak_nits = 1000;
 
     // Orientation / Geometry & Audio Passthrough
     opt.geometry_mode = std::clamp(ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_GEOM)), 0, 1);
@@ -725,8 +738,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             createCtrl(L"STATIC", L"VSR Quality:", 0, IDC_LBL_VSR_QUAL);
             createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_VSR_QUAL);
 
-            createCtrl(L"BUTTON", L"Enable TrueHDR", BS_AUTOCHECKBOX, IDC_CHK_TRUEHDR);
-            Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_TRUEHDR), BST_CHECKED);
+            createCtrl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_CMB_FPS);
 
             createCtrl(L"STATIC", L"Peak Nits:", 0, IDC_LBL_PEAK_NITS);
             createCtrl(L"EDIT", L"1000", WS_BORDER | ES_NUMBER, IDC_EDT_PEAK_NITS);
@@ -865,7 +877,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     onBrowseOutput(hwnd);
                 } else if (id == IDC_BTN_BROWSE_LUT) {
                     onBrowseLut(hwnd);
-                } else if (id == IDC_CHK_VSR || id == IDC_CHK_TRUEHDR) {
+                } else if (id == IDC_CHK_VSR) {
                     syncControlStates(hwnd);
                 }
             } else if (code == CBN_SELCHANGE) {

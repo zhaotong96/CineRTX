@@ -114,23 +114,6 @@ struct DecodedVideoFrame {
 
 class IDemuxer;
 
-class ISoftVideoDecoder {
-public:
-    virtual ~ISoftVideoDecoder() = default;
-    // Configures the decoder from the demuxer MediaInfo (codec/extradata/
-    // geometry).  The caller owns the demuxer and keeps reading it, so audio
-    // and subtitle passthrough continue on the normal path.
-    virtual Result<void> configure(const MediaInfo& info) = 0;
-    // Feeds one video packet; returns the decoded frame when the decoder has
-    // produced one (std::nullopt when more input is needed).
-    virtual Result<std::optional<DecodedVideoFrame>> feed(const Packet& video_packet) = 0;
-    // End-of-stream flush; returns the tail frames one at a time until
-    // ErrorCode::NotFound.
-    virtual Result<std::optional<DecodedVideoFrame>> drain() = 0;
-};
-
-std::unique_ptr<ISoftVideoDecoder> makeFfmpegSoftDecoder();
-
 // Compile-time invariant: the media container layer is always present.
 constexpr bool ffmpegAvailable() noexcept { return true; }
 

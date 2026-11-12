@@ -119,6 +119,8 @@ struct PackState {
     CUfunction pack_v2_kernel = nullptr;
     // Phase 9: the headless fused remaster kernel (optional in older PTX).
     CUfunction fused_remaster_kernel = nullptr;
+    CUmodule interp_module = nullptr;
+    CUfunction interp_kernel = nullptr;
     // The primary context retained at load time.  CUcontext follows strict
     // thread-local binding semantics: a worker thread that never ran the load
     // path has no current context, and D3D12 calls can detach the context at
@@ -474,6 +476,122 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_launch(
             (void)pack.api.get_error_name(launched, &name);
         }
         pack.error = std::string("cuLaunchKernel failed for rtx_rgba16f_to_p010_bt2020nc: ") + name;
+        return RTX_ERR_INTERNAL;
+    }
+    return RTX_OK;
+}
+
+static const char kInterpolatePtx[] =
+    ".version 7.0\n"
+    ".target sm_50\n"
+    ".address_size 64\n"
+    ".visible .entry rtx_interpolate_nv12(\n"
+    "    .param .u64 prev_ptr,\n"
+    "    .param .u64 curr_ptr,\n"
+    "    .param .u32 pitch,\n"
+    "    .param .u32 width,\n"
+    "    .param .u32 height,\n"
+    "    .param .f32 alpha,\n"
+    "    .param .u64 out_ptr\n"
+    ")\n"
+    "{\n"
+    "    .reg .pred %p<3>;\n"
+    "    .reg .b32 %r<12>;\n"
+    "    .reg .b64 %rd<14>;\n"
+    "    .reg .f32 %f<8>;\n"
+    "    ld.param.u32 %r1, [pitch];\n"
+    "    ld.param.u32 %r2, [width];\n"
+    "    ld.param.u32 %r3, [height];\n"
+    "    ld.param.f32 %f1, [alpha];\n"
+    "    ld.param.u64 %rd1, [prev_ptr];\n"
+    "    ld.param.u64 %rd2, [curr_ptr];\n"
+    "    ld.param.u64 %rd3, [out_ptr];\n"
+    "    mov.u32 %r4, %r3;\n"
+    "    shr.u32 %r5, %r4, 1;\n"
+    "    add.u32 %r6, %r4, %r5;\n"
+    "    mov.u32 %r7, %ctaid.x;\n"
+    "    mov.u32 %r8, %ntid.x;\n"
+    "    mov.u32 %r9, %tid.x;\n"
+    "    mad.lo.u32 %r10, %r7, %r8, %r9;\n"
+    "    mov.u32 %r7, %ctaid.y;\n"
+    "    mov.u32 %r8, %ntid.y;\n"
+    "    mov.u32 %r9, %tid.y;\n"
+    "    mad.lo.u32 %r11, %r7, %r8, %r9;\n"
+    "    setp.ge.u32 %p1, %r10, %r2;\n"
+    "    @%p1 bra DONE;\n"
+    "    setp.ge.u32 %p2, %r11, %r6;\n"
+    "    @%p2 bra DONE;\n"
+    "    cvt.u64.u32 %rd4, %r11;\n"
+    "    cvt.u64.u32 %rd5, %r1;\n"
+    "    mul.wide.u32 %rd6, %r11, %r1;\n"
+    "    cvt.u64.u32 %rd7, %r10;\n"
+    "    add.u64 %rd8, %rd6, %rd7;\n"
+    "    add.u64 %rd9, %rd1, %rd8;\n"
+    "    add.u64 %rd10, %rd2, %rd8;\n"
+    "    add.u64 %rd11, %rd3, %rd8;\n"
+    "    ld.global.u8 %r1, [%rd9];\n"
+    "    ld.global.u8 %r2, [%rd10];\n"
+    "    cvt.rn.f32.u32 %f2, %r1;\n"
+    "    cvt.rn.f32.u32 %f3, %r2;\n"
+    "    sub.f32 %f4, 1.0, %f1;\n"
+    "    mul.f32 %f5, %f4, %f2;\n"
+    "    fma.rn.f32 %f6, %f1, %f3, %f5;\n"
+    "    cvt.rni.u32.f32 %r3, %f6;\n"
+    "    st.global.u8 [%rd11], %r3;\n"
+    "DONE:\n"
+    "    ret;\n"
+    "}\n";
+
+RtxResult rtx_ngx::launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,
+                               uint32_t pitch, uint32_t width, uint32_t height,
+                               float alpha, uint64_t out_nv12, void* stream) {
+    if (prev_nv12 == 0 || curr_nv12 == 0 || out_nv12 == 0 || pitch == 0 || width == 0 || height == 0) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    PackState& pack = state();
+    std::lock_guard<std::mutex> lock(pack.mutex);
+    if (!ensureLoaded(pack)) {
+        return RTX_ERR_NGX;
+    }
+    if (!bindPrimaryContext(pack)) {
+        return RTX_ERR_INTERNAL;
+    }
+    if (pack.interp_kernel == nullptr) {
+        const CUresult res = pack.api.module_load_data(&pack.interp_module, kInterpolatePtx);
+        if (res != kSuccess) {
+            pack.error = "cuModuleLoadData failed for interpolate PTX: " + std::to_string(res);
+            return RTX_ERR_NGX;
+        }
+        const CUresult fn_res = pack.api.module_get_function(&pack.interp_kernel, pack.interp_module, "rtx_interpolate_nv12");
+        if (fn_res != kSuccess || pack.interp_kernel == nullptr) {
+            pack.error = "cuModuleGetFunction failed for rtx_interpolate_nv12";
+            return RTX_ERR_NGX;
+        }
+    }
+    unsigned long long p_prev = prev_nv12;
+    unsigned long long p_curr = curr_nv12;
+    unsigned int p_pitch = pitch;
+    unsigned int p_width = width;
+    unsigned int p_height = height;
+    float p_alpha = alpha;
+    unsigned long long p_out = out_nv12;
+
+    void* args[] = { &p_prev, &p_curr, &p_pitch, &p_width, &p_height, &p_alpha, &p_out };
+    const unsigned block_x = 16;
+    const unsigned block_y = 16;
+    const unsigned total_rows = height + height / 2;
+    const unsigned grid_x = (width + block_x - 1) / block_x;
+    const unsigned grid_y = (total_rows + block_y - 1) / block_y;
+
+    const CUresult launched = pack.api.launch_kernel(
+        pack.interp_kernel, grid_x, grid_y, 1, block_x, block_y, 1, 0,
+        reinterpret_cast<CUstream>(stream), args, nullptr);
+    if (launched != kSuccess) {
+        const char* name = "CUDA error";
+        if (pack.api.get_error_name != nullptr) {
+            (void)pack.api.get_error_name(launched, &name);
+        }
+        pack.error = std::string("cuLaunchKernel failed for rtx_interpolate_nv12: ") + name;
         return RTX_ERR_INTERNAL;
     }
     return RTX_OK;

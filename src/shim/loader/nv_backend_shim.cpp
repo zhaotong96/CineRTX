@@ -99,8 +99,6 @@ ProbeState probeNvidia() {
     state.cuda_loaded = state.runtime.loadCuda(&ignored);
     state.runtime.loadNvenc(&ignored);
     state.runtime.loadNvcuvid(&ignored);
-    state.runtime.loadNvOfruc(&ignored);
-    state.runtime.loadTensorRt(&ignored);
     state.runtime.loadNgx(&ignored);
 
     int cuda_version = 0;
@@ -160,9 +158,6 @@ ProbeState probeNvidia() {
                 const bool vsr_present = componentPresent(state, "libnvngx_vsr.so");
                 const bool truehdr_present = componentPresent(state, "libnvngx_truehdr.so");
 #endif
-                const bool nvofruc_present = componentPresent(state, "NvOFFRUC");
-                const bool tensorrt_present = componentPresent(state, "TensorRT") &&
-                                              state.runtime.hasTensorRt();
                 uint32_t nvenc_version = state.runtime.nvencVersion();
 
                 if (nvdec_present) {
@@ -180,11 +175,8 @@ ProbeState probeNvidia() {
                 if (turing_or_newer && truehdr_present) {
                     state.capabilities |= RTX_CAP_TRUEHDR;
                 }
-                if (turing_or_newer && nvofruc_present) {
+                if (turing_or_newer) {
                     state.capabilities |= RTX_CAP_NVOFA;
-                }
-                if (tensorrt_present) {
-                    state.capabilities |= RTX_CAP_TENSORRT;
                 }
 #if defined(_WIN32)
                 if (state.interop_ready) {
@@ -259,8 +251,8 @@ RTX_SHIM_API const char* RTX_SHIM_CALL rtx_shim_result_name(RtxResult result) {
             return "RTX_ERR_OUT_OF_MEMORY";
         case RTX_ERR_NGX:
             return "RTX_ERR_NGX";
-        case RTX_ERR_TENSORRT_VERSION:
-            return "RTX_ERR_TENSORRT_VERSION";
+        case RTX_ERR_RESERVED_11:
+            return "RTX_ERR_RESERVED_11";
         case RTX_ERR_NOT_IMPLEMENTED:
             return "RTX_ERR_NOT_IMPLEMENTED";
         case RTX_ERR_INTERNAL:
@@ -399,12 +391,7 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendCon
         }
     }
     if (config->enable_rife != 0) {
-        if ((state.capabilities & RTX_CAP_TENSORRT) == 0) {
-            return RTX_ERR_TENSORRT_VERSION;
-        }
-        // RIFE is a stage-3 feature; the stage-1 skeleton intentionally does
-        // not pretend to execute TensorRT inference.
-        return RTX_ERR_NOT_IMPLEMENTED;
+        return RTX_ERR_UNSUPPORTED;
     }
 
     auto* created = new (std::nothrow) RtxBackend();

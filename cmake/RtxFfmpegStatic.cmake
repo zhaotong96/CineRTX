@@ -297,14 +297,13 @@ if(WIN32)
 
     target_include_directories(rtx_ffmpeg_static SYSTEM INTERFACE "${_ffmpeg_inc_dir}")
 
-    # 挂载四大静态库及 Win32 系统依赖库
+    # 挂载四大静态库及 Win32 系统依赖库 (0 ws2_32.dll for Gate 4)
     target_link_libraries(rtx_ffmpeg_static INTERFACE
         rtx::ffmpeg_avformat
         rtx::ffmpeg_avcodec
         rtx::ffmpeg_swresample
         rtx::ffmpeg_avutil
         bcrypt
-        ws2_32
         secur32
         shlwapi
         strmiids
@@ -316,7 +315,7 @@ if(WIN32)
     if(MSVC)
         target_link_options(rtx_ffmpeg_static INTERFACE
             $<$<NOT:$<CONFIG:Debug>>:/OPT:REF /OPT:ICF>
-            $<$<CONFIG:Debug>:/NODEFAULTLIB:msvcrt.lib>
+            /NODEFAULTLIB:msvcrt.lib
         )
     endif()
 else()

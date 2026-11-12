@@ -9,12 +9,11 @@
 
 #include "rtx/lut3d.h"
 
-#include "rtx/color.h"
-
 #include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -23,6 +22,64 @@
 #include <vector>
 
 namespace rtx {
+
+float halfToFloat(uint16_t value) noexcept {
+    const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
+    uint32_t exponent = (value >> 10) & 0x1Fu;
+    uint32_t mantissa = value & 0x3FFu;
+    uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            exponent = 127 - 15 + 1;
+            while ((mantissa & 0x400u) == 0) {
+                mantissa <<= 1;
+                --exponent;
+            }
+            mantissa &= 0x3FFu;
+            bits = sign | (exponent << 23) | (mantissa << 13);
+        }
+    } else if (exponent == 0x1F) {
+        bits = sign | 0x7F800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+    }
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+uint16_t floatToHalf(float value) noexcept {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    const int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127;
+    uint32_t mantissa = bits & 0x7FFFFFu;
+
+    if (exponent > 15) {
+        if (exponent == 128 && mantissa != 0) {
+            return static_cast<uint16_t>(sign | 0x7E00u | (mantissa >> 13));
+        }
+        return static_cast<uint16_t>(sign | 0x7C00u);
+    }
+    if (exponent < -24) {
+        return static_cast<uint16_t>(sign);
+    }
+    if (exponent < -14) {
+        mantissa |= 0x800000u;
+        const int shift = -exponent - 14;
+        const uint32_t half_mantissa = mantissa >> (13 + shift);
+        return static_cast<uint16_t>(sign | half_mantissa);
+    }
+    const uint32_t half_exponent = static_cast<uint32_t>(exponent + 15) << 10;
+    const uint32_t half_mantissa = mantissa >> 13;
+    const uint32_t round_bit = (mantissa >> 12) & 1u;
+    const uint32_t sticky_bits = mantissa & 0xFFFu;
+    const uint32_t round_add = (round_bit != 0 && (sticky_bits != 0 || (half_mantissa & 1u) != 0)) ? 1u : 0u;
+    return static_cast<uint16_t>(sign | ((half_exponent | half_mantissa) + round_add));
+}
+
 namespace {
 
 bool parseIntegerToken(const std::string& token, int& value) {

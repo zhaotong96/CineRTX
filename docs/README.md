@@ -169,4 +169,22 @@
 | **64** | [`phase7/CineRTX_Phase7_Wave4_Linux纯CUDA与云原生施工方案.md`](phase7/CineRTX_Phase7_Wave4_Linux纯CUDA与云原生施工方案.md) | Wave 4 Linux 纯 CUDA 与云原生施工方案（跨平台 ABI 统一、cuLaunchKernel 动态运行时、Lanczos-3 / CAS 算子后端、无头服务化） | `phase7-wave4`, `linux-cuda`, `headless-engine`, `cloud-native`, `dyn-cuda` |
 | **65** | [`phase7/CineRTX_Phase7_验收实证报告.md`](phase7/CineRTX_Phase7_验收实证报告.md) | Phase 7 Wave 1～4 全要素验收实证报告（静态检查、编译门禁、单测全绿、实机 4K HDR10 转码验证与全链路证据） | `phase7-acceptance`, `full-verification`, `evidence` |
 
+---
+
+## 十二、 阶段八 架构深度取证、开箱即用 60 帧与极致瘦身 (`docs/phase8/`)
+
+本目录收录阶段八（全仓架构代码级取证、开箱即用 60 帧重构、零开关极致纯化、双路补帧演进与全栈大刀阔斧瘦身）的深度调研、实施方案与验收实证报告。
+
+| 序号 | 规范与调研文档 | 核心内容 | 索引关键字 |
+| :---: | :--- | :--- | :--- |
+| **66** | [`phase8/CineRTX_Phase8_关于7个核心问题全仓代码级取证与架构推演.md`](phase8/CineRTX_Phase8_关于7个核心问题全仓代码级取证与架构推演.md) | 关于 7 个核心问题全仓代码级取证与架构推演（控制台日志、--sdr暗坑扫描、补帧现状、双轨UI流水线、ONNX残留、纯GPU播放器/NLE推演、16个DLL极致削减） | `phase8-forensics`, `zero-switch`, `debugview`, `fruc`, `nle-architecture`, `dll-slimming` |
+| **67** | [`phase8/CineRTX_Phase8_双路补帧架构工程线索与实机环境证据报告.md`](phase8/CineRTX_Phase8_双路补帧架构工程线索与实机环境证据报告.md) | 双路补帧（NVOFA / RIFE-TensorRT）工程线索与实机环境证据报告（专供大模型高效实操：驱动级光流证据、离线SDK路径、commit:46dbaac历史纯C ABI与核函数秒级复用索引、主流水线1:N改造蓝图） | `phase8-clues`, `nvofa`, `rife-tensorrt`, `fruc-abi`, `hook-points`, `llm-guide` |
+| **68** | [`phase8/CineRTX_Phase8_双路补帧架构设计.md`](phase8/CineRTX_Phase8_双路补帧架构设计.md) | 双路补帧（FRUC）顶层架构设计推演方案（纯C ABI隔离、NVDEC与NGX间嵌入拓扑、Flicks时钟驱动滑动窗口、Surface Lease显存租约、4×4网格双线性插值、场景硬切三级保护、Wave 1～4路线图） | `phase8-arch`, `fruc-architecture`, `sliding-window`, `surface-lease`, `nvofa-warp`, `rife-trt`, `abi-firewall` |
+| **69** | [`phase8/CineRTX_Phase8_参考资料.md`](phase8/CineRTX_Phase8_参考资料.md) | Phase 8 官方参考资料与接口规范速查（Optical Flow SDK 5.0.7 原生硬件光流与插帧规范、参数契约与最佳实践） | `phase8-refs`, `nvof-sdk`, `specs`, `guidelines` |
+| **70** | [`phase8/CineRTX_Phase8_最新代码深度验收报告暨全栈重构方案.md`](phase8/CineRTX_Phase8_最新代码深度验收报告暨全栈重构方案.md) | 最新代码深度验收报告暨“开箱即用 60 帧 + 大刀阔斧极简瘦身”全栈重构方案（四道阻断根因定性、假插帧欺骗性交付溯源、15个死代码文件拔除、三桥归一为 rtx_ngx_bridge、单文件<=1300行硬指标） | `phase8-audit`, `zero-config-60fps`, `radical-slimming`, `single-bridge`, `kiss` |
+| **71** | [`phase8/CineRTX_Phase8_返工施工任务书.md`](phase8/CineRTX_Phase8_返工施工任务书.md) | Phase 8 返工施工任务书（Track A～D 施工工单拆解、黄金默认值 SSOT 闭环、驱动级真光流内聚、4 大硬核红线门禁契约） | `phase8-rework-order`, `tasks`, `gates`, `nvof-warp` |
+| **72** | [`phase8/CineRTX_Phase8_返工交付验收实证报告.md`](phase8/CineRTX_Phase8_返工交付验收实证报告.md) | Phase 8 返工交付验收实证报告（四大门禁 100% 全绿、零参数 60 帧端到端真机转码实录、前 10 帧非零 SAD 真插帧像素级验证、PE 纯净度 Gate 4 通过） | `phase8-acceptance`, `gates-pass`, `sad-verified`, `60fps-golden` |
+
+
+
 
