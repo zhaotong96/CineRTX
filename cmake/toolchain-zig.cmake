@@ -25,7 +25,7 @@
 # Clang compiler.
 
 get_filename_component(_rtx_repo_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-set(_rtx_zig_bootstrap_dir "${_rtx_repo_root}/build/external/tools/zig")
+set(_rtx_zig_bootstrap_dir "${_rtx_repo_root}/.vs/build/external/tools/zig")
 set(_rtx_zig_version "0.13.0")
 set(_rtx_zig_url
     "https://ziglang.org/download/0.13.0/zig-windows-x86_64-0.13.0.zip")
@@ -124,7 +124,7 @@ if(NOT RTX_ZIG_EXECUTABLE AND CMAKE_HOST_WIN32)
         "${_rtx_zig_url}"
         "${_rtx_zig_sha256}"
         zig.exe
-        "${_rtx_repo_root}/build/external"
+        "${_rtx_repo_root}/.vs/build/external"
         _rtx_provisioned_zig)
     if(_rtx_provisioned_zig)
         set(RTX_ZIG_EXECUTABLE "${_rtx_provisioned_zig}")
@@ -150,15 +150,15 @@ set(RTX_ZIG_EXECUTABLE "${RTX_ZIG_EXECUTABLE}"
 # Zig needs writable cache and temp directories even on a host without
 # LOCALAPPDATA/TEMP; keep them inside the repository.
 if(NOT DEFINED ENV{ZIG_GLOBAL_CACHE_DIR})
-    file(MAKE_DIRECTORY "${_rtx_repo_root}/build/external/zig-cache")
-    set(ENV{ZIG_GLOBAL_CACHE_DIR} "${_rtx_repo_root}/build/external/zig-cache")
+    file(MAKE_DIRECTORY "${_rtx_repo_root}/.vs/build/external/zig-cache")
+    set(ENV{ZIG_GLOBAL_CACHE_DIR} "${_rtx_repo_root}/.vs/build/external/zig-cache")
 endif()
 if(NOT DEFINED ENV{ZIG_LOCAL_CACHE_DIR})
     set(ENV{ZIG_LOCAL_CACHE_DIR} "$ENV{ZIG_GLOBAL_CACHE_DIR}")
 endif()
 if(CMAKE_HOST_WIN32 AND NOT DEFINED ENV{TEMP})
-    file(MAKE_DIRECTORY "${_rtx_repo_root}/build/external/tmp")
-    set(ENV{TEMP} "${_rtx_repo_root}/build/external/tmp")
+    file(MAKE_DIRECTORY "${_rtx_repo_root}/.vs/build/external/tmp")
+    set(ENV{TEMP} "${_rtx_repo_root}/.vs/build/external/tmp")
 endif()
 if(CMAKE_HOST_WIN32 AND NOT DEFINED ENV{TMP})
     set(ENV{TMP} "$ENV{TEMP}")

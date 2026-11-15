@@ -10,11 +10,11 @@ any NVIDIA SDK type. The core never includes `cuda.h`, `nvEncodeAPI.h`,
 Headers:
 
 - [`include/shim/rtx_shim_abi.h`](../include/shim/rtx_shim_abi.h) — device,
-  diagnostics, frame, HDR, encoder, and backend functions.
+  diagnostics, frame, HDR, encoder, decoder, and backend functions
+  (`RTX_SHIM_ABI_VERSION` = `2u`).
 - [`include/shim/ngx_bridge_abi.h`](../include/shim/ngx_bridge_abi.h) —
-  D3D12/NGX bridge functions.
-- [`include/shim/i_engine_backend.h`](../include/shim/i_engine_backend.h) —
-  optional C++ convenience wrapper (not part of the binary contract).
+  D3D12/NGX bridge functions including the Phase 8 dual-path true
+  interpolation exports (`RTX_NGX_BRIDGE_ABI_VERSION` = `4u`).
 
 Both public headers are licensed `MIT OR Apache-2.0`.
 
@@ -29,7 +29,7 @@ Both public headers are licensed `MIT OR Apache-2.0`.
 | Struct padding | Explicit `reserved[]` arrays; zero-initialise all inputs |
 | Strings | Fixed-size, NUL-terminated, UTF-8 |
 | Handles | Opaque pointers owned by the shim |
-| ABI version | `RTX_SHIM_ABI_VERSION` (currently `2`) |
+| ABI version | `RTX_SHIM_ABI_VERSION` = `2u` |
 
 Compatibility policy:
 
@@ -49,12 +49,12 @@ Compatibility policy:
 | 3 | `RTX_ERR_IO` | File or stream failure |
 | 4 | `RTX_ERR_UNSUPPORTED` | Feature not available or geometry not upscalable |
 | 5 | `RTX_ERR_DLL_MISSING` | CUDA driver or required DLL absent |
-| 6 | `RTX_ERR_ARCH_UNSUPPORTED` | GPU older than Turing (sm_75) |
+| 6 | `RTX_ERR_ARCH_UNSUPPORTED` | GPU older than Turing (sm_75) for NGX features |
 | 7 | `RTX_ERR_DRIVER_TOO_OLD` | Driver below the minimum |
 | 8 | `RTX_ERR_DEVICE_LOST` | TDR or device removal |
-| 9 | `RTX_ERR_OUT_OF_MEMORY` | VRAM plan does not fit |
+| 9 | `RTX_ERR_OUT_OF_MEMORY` | Device plan does not fit |
 | 10 | `RTX_ERR_NGX` | NGX feature/context failure |
-| 11 | `RTX_ERR_TENSORRT_VERSION` | Version outside the 10.13.3.9 lock |
+| 11 | `RTX_ERR_RESERVED_11` | Reserved slot (`RTX_ERR_RESERVED_11 = 11`) |
 | 12 | `RTX_ERR_NOT_IMPLEMENTED` | Path not compiled in this build |
 | 13 | `RTX_ERR_INTERNAL` | Defensive catch-all |
 
@@ -69,9 +69,9 @@ RtxResult rtx_shim_probe(RtxDiagnostics* diagnostics);
 ```
 
 Fills device identity, compute capability, VRAM, driver/CUDA versions,
-capability bits, and one entry per component (CUDA, NVENC, NVDEC, NvOFFRUC,
-TensorRT, NGX). It does not create a CUDA context and does not allocate
-surfaces.
+capability bits, and one entry per component (CUDA driver, NVENC, NVDEC, NGX
+bridge, and the optional interpolation runtimes). It does not create a CUDA
+context and does not allocate surfaces.
 
 The function returns `RTX_OK` when the probe ran, even if no GPU or SDK is
 present. The answer is in `diagnostics`, not only in the return code. This is
@@ -98,24 +98,24 @@ Validation order:
 4. The target must not be smaller than the source.
 5. The CUDA driver and a device must be visible, and the device must expose an
    NVDEC engine plus NVENC.
-6. Upscaling (`target != source`), TrueHDR, and NvOFFRUC require compute
-   capability ≥ 7.5 (Turing); NVDEC/NVENC alone do not, so Maxwell GPUs create
-   a backend for the stage-1 codec path.
+6. Upscaling (`target != source`) and TrueHDR require compute capability ≥ 7.5
+   (Turing); NVDEC/NVENC alone do not, so Maxwell GPUs create a backend for
+   the codec path.
 7. If a requested RTX feature has no matching capability, return
    `RTX_ERR_NGX` (missing SDK) or `RTX_ERR_ARCH_UNSUPPORTED` (old GPU).
-8. RIFE returns `RTX_ERR_TENSORRT_VERSION` when TensorRT is absent, and
-   `RTX_ERR_NOT_IMPLEMENTED` while the inference path is not compiled.
+8. TensorRT RIFE interpolation reports a structured diagnostic when the
+   TensorRT runtime is absent; it never fabricates frames.
 
 On failure, `*backend` is always set to `NULL`. On success, the caller owns the
 handle and must pass it to `rtx_shim_destroy_backend()`. Destroying `NULL` is
 safe.
 
-### 4.2.1 Stage-1 codec handles
+### 4.2.1 Codec handles
 
 `rtx_shim_decoder_*` and `rtx_shim_encoder_*` (declared in
 `include/shim/rtx_shim_abi.h`) are independent opaque handles. They do not
-require `rtx_shim_create_backend()`; the container and raw transcode loops open
-a decoder and an encoder directly.
+require `rtx_shim_create_backend()`; the container transcode loop opens a
+decoder and an encoder directly.
 
 | Function | Contract |
 | --- | --- |
@@ -127,9 +127,7 @@ a decoder and an encoder directly.
 | `rtx_shim_encoder_encode` | Consumes an `RtxFrameDesc` whose planes are `CUdeviceptr`; no host copy. |
 | `rtx_shim_encoder_get_stats` | Reports the measured PCIe traffic counters. |
 
-Both handles are safe to destroy with `NULL`. `rtx_shim_decoder_download` and
-`rtx_shim_encoder_encode_host` exist only for the raw artefact path and are
-accounted as host pixel traffic in `RtxHwStats`.
+Both handles are safe to destroy with `NULL`.
 
 ### 4.3 Queries
 
@@ -191,7 +189,7 @@ intent for TrueHDR and the sidecar.
 `vram_budget_bytes` defaults to 7 GiB in the core. `truehdr` uses the 100-based
 scale: contrast 125, saturation 75, middle grey 44, peak 1000.
 
-## 6. NGX bridge ABI
+## 6. NGX bridge ABI (v4)
 
 On Windows the bridge is a separate shared library (`rtx_ngx_bridge.dll`)
 because only this component needs D3D12, DXGI, CUDA external memory, and NGX.
@@ -199,7 +197,31 @@ On non-Windows hosts the same C ABI is compiled into a static archive and
 linked into the image — no `librtx_ngx_bridge.so` is produced. It remains
 MIT/Apache-2.0.
 
-Lifecycle:
+`RTX_NGX_BRIDGE_ABI_VERSION` is `4u`
+(`include/shim/ngx_bridge_abi.h`). `rtx_ngx_bridge_abi_version()` returns it;
+callers must resolve it **before** using the newer exports. Version 4 covers,
+under the append-only policy:
+
+- the remaster contract: `rtx_ngx_bridge_remaster(bridge, in, out, stats)` —
+  one decoded NV12/P010 device frame in, one bridge-owned 4K P010 device frame
+  out (preprocess → fence signal `V` → VSR/TrueHDR → fence wait `V + 1` →
+  pack → stream sync), with `rtx_ngx_bridge_get_remaster_stats` for
+  cumulative counters and a **three-buffer P010 ring** (slot `i % 3`; the
+  caller owns the ring-depth contract, frame *i* may only be submitted after
+  frame *i−2* completed encoding);
+- Route A interpolation: `rtx_ngx_bridge_get_interp_buffer` (device NV12
+  scratch) and `rtx_ngx_bridge_interpolate_nv12` (NVOFA hardware optical flow
+  + `rtx_nvof_warp_nv12` PTX motion compensation);
+- Route B interpolation: `rtx_ngx_bridge_init_rife` (load a prebuilt
+  `.engine`), `rtx_ngx_bridge_interpolate_rife` (prev/current NV12 device
+  pointers + time phase `alpha` in (0, 1) → interpolated NV12; `scene_cut`
+  out-flag bypasses inference on hard cuts), `rtx_ngx_bridge_build_rife_engine`
+  (ONNX → TensorRT `.engine`), `rtx_ngx_bridge_destroy_rife`;
+- preview plumbing: `rtx_ngx_bridge_preview_buffer`,
+  `rtx_ngx_bridge_download_preview`, `rtx_ngx_bridge_upload_frame`,
+  `rtx_ngx_bridge_set_frame_stats`.
+
+Lifecycle (enhancement stage):
 
 1. `rtx_ngx_bridge_query_caps()` — reports whether VSR/TrueHDR, a D3D12 device,
    and CUDA interop are present.
@@ -231,6 +253,16 @@ opt-in switch — and the build fails with an explanatory message if the
 implementation translation unit is absent. Non-Windows hosts, which have no
 NGX/D3D12, compile the SDK-free stub instead.
 
+The only production consumer of the remaster export is
+`NvidiaTranscodeSession` (`src/core/hw_transcode.cpp`); the CLI, the Win32
+workstation, and the WebUI session all drive it. Interpolation is resolved by
+the same loader (`include/rtx/ngx_remaster.h` binds `interpolate_nv12_` /
+`interpolate_rife_` through the C ABI).
+
+Consumers must keep the destruction order: destroy the NVENC session
+**before** the bridge (the ring buffers are freed in the bridge destructor
+while the CUDA context binding is still alive).
+
 ## 7. Loader security
 
 `DynLibrary` uses:
@@ -244,11 +276,12 @@ It never calls `LoadLibraryW(name)` with a bare name, never searches the
 current directory, and never uses `PATH` for SDK components. A failure includes
 the attempted path and the OS error.
 
-The FRUC bridge (`offruc_bridge.cpp`) and the Zone C bridge
-(`rtx_ngx_bridge.dll` / `rife_builder.cpp`) follow the same order independently, because neither module
-is loaded through `DynLibrary`: `RTX_NVIDIA_DIR`, then the executable directory,
-then the bare name (System32 only). `NvOFFRUC.dll` and `nvinfer_10.dll` have no
-System32 fallback in practice — they are SDK redistributables, not drivers.
+The NGX bridge (`rtx_ngx_bridge.dll`), the NVOFA engine (`nvofapi64.dll`,
+System32 only), and the TensorRT runtime (`nvinfer.dll` family) follow the
+same audited order independently: `RTX_NVIDIA_DIR`, then the executable
+directory, then the bare name (System32 only). The TensorRT and NGX runtime
+DLLs are SDK redistributables, not drivers, so they have no practical System32
+presence.
 
 ## 8. Minimal consumer example
 
@@ -288,38 +321,3 @@ rtx_shim_destroy_backend(backend);
 
 Compile against the header only; load the library with the platform loader or
 let the CLI do it. Do not add `rtx_shim.lib` to the link line.
-
----
-
-## 9. ABI v2 append: remaster contract (2026-10-25)
-
-`include/shim/ngx_bridge_abi.h` gained a production remaster entry under the
-append-only policy (nothing existing changed; `RTX_NGX_BRIDGE_ABI_VERSION`
-stays `2u` because the addition is purely additive):
-
-* `rtx_ngx_bridge_abi_version()` — returns `2`. Callers must resolve it
-  **before** `rtx_ngx_bridge_remaster`; a bridge without the export predates
-  the contract and must be rejected (the GPL core loader
-  `src/core/ngx_remaster.cpp` enforces this).
-* `rtx_ngx_bridge_remaster(bridge, in, out, stats)` — one decoded NV12/P010
-  device frame in, one bridge-owned 4K P010 device frame out. Internally:
-  preprocess kernel → fence signal `V` → VSR/TrueHDR → fence wait `V + 1` →
-  pack v2 → stream sync. `V` always comes from `advance_timeline()`.
-  The P010 memory is a **two-buffer ring** (`out` parity follows the frame
-  counter); the caller owns the ring-depth contract: frame *i* may only be
-  submitted after frame *i−2* completed encoding. The call is synchronous —
-  on `RTX_OK` the returned planes are fully written.
-* `rtx_ngx_bridge_get_remaster_stats(bridge, stats)` — cumulative counters
-  (`preprocess_ms`, `ngx_ms`, `pack_kernel_ms`, `frame_ms`, `frames`,
-  `pack_launches`); diff two snapshots for per-frame numbers.
-* `RtxNgxRemasterInput::matrix` uses `0 = BT.709, 1 = BT.2020 NCL,
-  2 = BT.601`; `full_range` `0/1`; pitches are bytes.
-
-Consumers must keep the destruction order: destroy the NVENC session
-**before** the bridge (the ring buffers are freed in `~BridgeImpl` while the
-CUDA context binding is still alive).
-
-The only consumer is `rtx::runNvidiaRemasterTranscode`
-(`src/core/hw_transcode.cpp`); both the CLI and the GUI call it for container
-input, and no other path invokes this export. The verification-only entries
-(`runNvidiaContainerTranscode`, `runNvidiaRawTranscode`) never call the bridge.

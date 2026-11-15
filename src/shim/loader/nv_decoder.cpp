@@ -603,7 +603,7 @@ rtx_shim_decoder_receive(RtxDecoder* decoder, RtxFrameDesc* frame) {
     if (!decoder->ready.empty()) {
         // The encoder reads the surface on its own engine, so the export copy
         // for this specific slot must have finished before we hand it over.
-        decoder->waitSlotReady(decoder->ready.front().slot_index);
+        decoder->waitSlotReady(static_cast<uint32_t>(decoder->ready.front().slot_index));
         *frame = decoder->ready.front();
         decoder->ready.pop_front();
         return RTX_OK;

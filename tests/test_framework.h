@@ -76,7 +76,15 @@ std::string stringify(const T& value) {
 template <typename A, typename B>
 void checkEqual(Context& context, const char* file, int line, const char* actual_text,
                 const char* expected_text, const A& actual, const B& expected) {
-    if (actual == expected) {
+    if constexpr (std::is_integral_v<A> && std::is_integral_v<B>) {
+        // Mixed-sign integer comparison is a legitimate test idiom (e.g. an
+        // unsigned field against a signed literal); normalize both sides so
+        // clang -Wall does not flag the sign mismatch itself.
+        using Common = std::common_type_t<A, B>;
+        if (static_cast<Common>(actual) == static_cast<Common>(expected)) {
+            return;
+        }
+    } else if (actual == expected) {
         return;
     }
     fail(context, file, line,

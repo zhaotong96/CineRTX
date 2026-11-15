@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// Strongly-typed localisation contract (W7-3).
+// Strongly-typed localisation and Stage 2 SSOT parameter schema contract tests.
 
 #include "test_framework.h"
 
@@ -9,12 +9,14 @@
 #include <string>
 
 #include "rtx/i18n.h"
+#include "rtx/logger.h"
+#include "rtx/param_schema.h"
 #include "rtx/status.h"
 
 using namespace rtx;
 
 RTX_TEST(i18n_table_bounds) {
-    RTX_CHECK_EQ(static_cast<size_t>(StrId::Count), static_cast<size_t>(64));
+    RTX_CHECK_EQ(static_cast<size_t>(StrId::Count), static_cast<size_t>(113));
     RTX_CHECK_EQ(static_cast<size_t>(Language::Count), static_cast<size_t>(2));
 
     const Language saved = currentLanguage();
@@ -25,21 +27,15 @@ RTX_TEST(i18n_table_bounds) {
             const StrId id = static_cast<StrId>(index);
             const wchar_t* wide = trW(id);
             RTX_REQUIRE(wide != nullptr);
-            // Every entry must be non-empty in both languages: a missing
-            // translation is a build error, but this catches a stray L"".
             RTX_CHECK(wide[0] != L'\0');
             RTX_CHECK(!tr(id).empty());
             RTX_CHECK(strIdName(id) != std::string("Unknown"));
         }
     }
 
-    // Out-of-range ids return an empty string rather than reading past the
-    // table.  This is the only defensive branch on the paint path.
     RTX_CHECK(trW(static_cast<StrId>(9999))[0] == L'\0');
     RTX_CHECK_EQ(std::string(strIdName(static_cast<StrId>(9999))), std::string("Unknown"));
 
-    // The two languages must actually differ: a copy-paste table would pass
-    // every other check in this test.
     setLanguage(Language::En);
     const std::string english = tr(StrId::AppTitle);
     setLanguage(Language::Zh);
@@ -47,13 +43,15 @@ RTX_TEST(i18n_table_bounds) {
     RTX_CHECK(english != chinese);
     RTX_CHECK(!english.empty());
     RTX_CHECK(!chinese.empty());
+
+    const std::string json_dict = exportI18nJson();
+    RTX_CHECK(json_dict.find("\"en\":") != std::string::npos);
+    RTX_CHECK(json_dict.find("\"zh\":") != std::string::npos);
+    RTX_CHECK(json_dict.find("\"OptFps60Rife\":") != std::string::npos);
     setLanguage(saved);
 }
 
 RTX_TEST(i18n_switch_latency) {
-    // A language flip is one relaxed atomic store plus an InvalidateRect; the
-    // lookup itself is a single indexed load.  The budget is 1.0 us averaged
-    // over a full table sweep, which is what the paint path actually does.
     const Language saved = currentLanguage();
     constexpr int kIterations = 2000;
     volatile size_t sink = 0;
@@ -74,10 +72,9 @@ RTX_TEST(i18n_switch_latency) {
     const double per_lookup_ns =
         static_cast<double>(elapsed) / (static_cast<double>(kIterations) *
                                         static_cast<double>(StrId::Count));
-    RTX_CHECK(per_lookup_ns < 1000.0);  // < 1.0 us per entry
+    RTX_CHECK(per_lookup_ns < 1000.0);
     RTX_CHECK(sink > 0);
 
-    // Language parsing is the CLI boundary and must reject nonsense.
     RTX_CHECK(parseLanguage("zh-CN").has_value());
     RTX_CHECK(parseLanguage("EN").has_value());
     RTX_CHECK(parseLanguage("").has_value());
@@ -86,4 +83,41 @@ RTX_TEST(i18n_switch_latency) {
     RTX_CHECK(parseLanguage("en").value() == Language::En);
 
     setLanguage(saved);
+}
+
+RTX_TEST(param_schema_ssot_contract) {
+    TranscodeProfile profile{};
+    profile.input = "clip.mp4";
+    const auto valid = validateAndNormalizeProfile(profile, /*require_io_paths=*/true);
+    RTX_REQUIRE(valid.has_value());
+    RTX_CHECK_EQ(profile.output, std::string("clip_remaster_av1.mp4"));
+    RTX_CHECK_EQ(profile.qp, 24);
+    RTX_CHECK_EQ(profile.preset, 5);
+    RTX_CHECK_EQ(profile.vsr_quality, 4);
+    RTX_CHECK_EQ(profile.peak_nits, 1000);
+    RTX_CHECK_EQ(profile.fps_mode, std::string("60-nvofa"));
+
+    // Changing codec to hevc with auto_output=true updates auto-generated output suffix.
+    profile.codec = "hevc";
+    RTX_REQUIRE(validateAndNormalizeProfile(profile, true).has_value());
+    RTX_CHECK_EQ(profile.output, std::string("clip_remaster_hevc.mp4"));
+
+    // Deprecated 8-bit SDR H.264 output is rejected by the 10-bit HDR10 pipeline.
+    profile.codec = "h264";
+    RTX_CHECK(!validateAndNormalizeProfile(profile, true).has_value());
+
+    // JSON parsing and schema export round-trip.
+    const std::string schema_json = exportSchemaJson();
+    RTX_CHECK(schema_json.find("\"defaults\":") != std::string::npos);
+    RTX_CHECK(schema_json.find("\"qp\": 24") != std::string::npos);
+
+    auto parsed = parseProfileFromJson(
+        "{\"profile\":{\"input\":\"a.mp4\",\"codec\":\"hevc\",\"preset\":6,\"peakNits\":1500,\"fpsMode\":\"60-rife\"}}");
+    RTX_REQUIRE(parsed.has_value());
+    RTX_REQUIRE(validateAndNormalizeProfile(parsed.value(), true).has_value());
+    const HwTranscodeOptions hw = profileToHwOptions(parsed.value());
+    RTX_CHECK(hw.codec == VideoCodec::HEVC);
+    RTX_CHECK_EQ(hw.preset, 6);
+    RTX_CHECK_EQ(hw.peak_nits, 1500);
+    RTX_CHECK(!hw.rife_engine_path.empty());
 }

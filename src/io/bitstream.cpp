@@ -581,7 +581,7 @@ std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {
     if (looksLikeAnnexB(data, size)) {
         std::vector<uint8_t> out;
         for (const auto& unit : splitAnnexB(data, size)) {
-            appendBe32(out, unit.size());
+            appendBe32(out, static_cast<uint32_t>(unit.size()));
             out.insert(out.end(), unit.begin(), unit.end());
         }
         return out;
@@ -597,7 +597,7 @@ std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {
         }
     }
     std::vector<uint8_t> out;
-    appendBe32(out, size);
+    appendBe32(out, static_cast<uint32_t>(size));
     out.insert(out.end(), data, data + size);
     return out;
 }

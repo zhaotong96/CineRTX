@@ -11,6 +11,7 @@
 #include <vector>
 
 extern "C" {
+#include <libavcodec/avcodec.h>
 #include <libavformat/avio.h>
 #include <libavutil/error.h>
 }
@@ -336,4 +337,111 @@ RTX_TEST(io_memory_bframe_pts_reordering) {
 
     // Specifically: Packet 2 (B-frame) PTS must precede Packet 1 (P-frame) PTS
     RTX_CHECK(read_flicks[2] < read_flicks[1]);
+}
+
+RTX_TEST(io_memory_audio_video_stream_copy_roundtrip) {
+    // Deterministic zero-file-dependency verification of video + audio stream
+    // copy passthrough over MemoryAvioContext (replaces tests/unit/test_audio_stream_copy.cpp).
+    std::vector<uint8_t> hvcc = {
+        0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x78, 0xF0, 0x00, 0xFC,
+        0xFD, 0xF8, 0xF8, 0x00, 0x00, 0x0F, 0x00,
+    };
+
+    AVCodecParameters* raw_audio_par = avcodec_parameters_alloc();
+    RTX_REQUIRE(raw_audio_par != nullptr);
+    raw_audio_par->codec_type = AVMEDIA_TYPE_AUDIO;
+    raw_audio_par->codec_id = AV_CODEC_ID_PCM_S16LE;
+    raw_audio_par->sample_rate = 48000;
+    raw_audio_par->ch_layout.nb_channels = 2;
+    raw_audio_par->bits_per_coded_sample = 16;
+    raw_audio_par->block_align = 4;
+
+    std::shared_ptr<void> owned_audio_par(raw_audio_par, [](void* p) {
+        AVCodecParameters* cp = static_cast<AVCodecParameters*>(p);
+        avcodec_parameters_free(&cp);
+    });
+
+    MediaInfo info;
+    info.codec = VideoCodec::HEVC;
+    info.video_codec = "hevc";
+    info.width = 64;
+    info.height = 48;
+    info.bit_depth = 8;
+    info.frame_rate = Rational{25, 1};
+    info.time_base = Rational{1, 1000};
+    info.format_name = "matroska";
+    info.extradata = hvcc;
+    info.annex_b = true;
+    info.audio_streams = 1;
+    info.primary_audio_index = 1;
+
+    PassthroughStreamInfo audio_ps;
+    audio_ps.stream_index = 1;
+    audio_ps.codec_type = 1;
+    audio_ps.codec_id = static_cast<int>(AV_CODEC_ID_PCM_S16LE);
+    audio_ps.codec_name = "pcm_s16le";
+    audio_ps.time_base = Rational{1, 1000};
+    audio_ps.opaque_codecpar = owned_audio_par;
+    info.passthrough_streams.push_back(audio_ps);
+
+    std::vector<uint8_t> video_payload = {
+        0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0C, 0x01, 0x11, 0x22, 0x33, 0x44
+    };
+    std::vector<uint8_t> audio_payload(1920, 0x55); // 10 ms of 48kHz stereo S16LE
+
+    std::vector<uint8_t> container;
+    std::unique_ptr<IMuxer> muxer = makeMemoryMuxer(&container, "matroska");
+    RTX_REQUIRE(muxer != nullptr);
+    RTX_REQUIRE(muxer->open("av_roundtrip.mkv", info, Hdr10Metadata{}).has_value());
+
+    for (int i = 0; i < 4; ++i) {
+        Packet vpkt;
+        vpkt.stream_index = 0;
+        vpkt.data = video_payload;
+        vpkt.pts = i * 40;
+        vpkt.dts = vpkt.pts;
+        vpkt.duration = 40;
+        vpkt.keyframe = (i == 0);
+        vpkt.time_base = Rational{1, 1000};
+        RTX_REQUIRE(muxer->writePacket(vpkt).has_value());
+
+        Packet apkt;
+        apkt.stream_index = 1;
+        apkt.data = audio_payload;
+        apkt.pts = i * 40;
+        apkt.dts = apkt.pts;
+        apkt.duration = 10;
+        apkt.keyframe = true;
+        apkt.time_base = Rational{1, 1000};
+        RTX_REQUIRE(muxer->writeAudioPacket(apkt).has_value());
+    }
+    RTX_REQUIRE(muxer->finalize().has_value());
+    RTX_CHECK(container.size() > 512);
+
+    std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(container);
+    RTX_REQUIRE(demuxer != nullptr);
+    const Result<MediaInfo> opened = demuxer->open("av_roundtrip.mkv");
+    RTX_REQUIRE(opened.has_value());
+    RTX_CHECK_EQ(opened.value().audio_streams, 1);
+    RTX_CHECK(opened.value().primary_audio_index >= 0);
+    RTX_REQUIRE(!opened.value().audio_tracks.empty());
+    RTX_CHECK_EQ(opened.value().audio_tracks.front().sample_rate, 48000);
+    RTX_CHECK_EQ(opened.value().audio_tracks.front().channels, 2);
+
+    int video_read = 0;
+    int audio_read = 0;
+    for (int i = 0; i < 8; ++i) {
+        const Result<Packet> pkt = demuxer->readPacket();
+        RTX_REQUIRE(pkt.has_value());
+        if (pkt.value().stream_index == opened.value().primary_audio_index) {
+            ++audio_read;
+            RTX_CHECK_EQ(pkt.value().data.size(), audio_payload.size());
+        } else {
+            ++video_read;
+            RTX_CHECK_EQ(pkt.value().data.size(), video_payload.size());
+        }
+    }
+    RTX_CHECK_EQ(video_read, 4);
+    RTX_CHECK_EQ(audio_read, 4);
 }

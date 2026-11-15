@@ -87,6 +87,13 @@ RtxResult launchFusedRemaster(const FusedRemasterLaunch& launch, void* stream);
 RtxResult launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,
                                uint32_t pitch, uint32_t width, uint32_t height,
                                float alpha, uint64_t out_nv12, void* stream);
+RtxResult launchNvofWarpNv12(uint64_t prev_nv12, uint64_t curr_nv12,
+                            uint64_t fwd_flow, uint64_t bwd_flow, uint64_t cost_buffer,
+                            uint32_t pitch, uint32_t width, uint32_t height,
+                            uint32_t grid_width, uint32_t grid_height,
+                            float alpha, uint64_t out_nv12, void* stream,
+                            uint32_t flow_stride_bytes = 0,
+                            uint32_t cost_stride_bytes = 0);
 
 /* Last kernel-launch diagnostic (thread-safe mirror of
  * rtx_ngx_pack_last_error). */

@@ -7,6 +7,10 @@
 #include <cstring>
 #include <string>
 
+#include <utility>
+
+#include "rtx/geometry.h"
+#include "rtx/status.h"
 #include "rtx/types.h"
 
 using namespace rtx;
@@ -130,4 +134,108 @@ RTX_TEST(types_device_residency) {
     RTX_CHECK(frame.isDeviceResident());
     frame.device_planes[0] = kInvalidDevicePtr;
     RTX_CHECK(!frame.isDeviceResident());
+}
+
+// ---------------------------------------------------------------------------
+// Status and Result<T> contract (merged from test_status.cpp)
+// ---------------------------------------------------------------------------
+
+RTX_TEST(status_success_and_failure) {
+    const Result<void> success;
+    RTX_CHECK(success.has_value());
+    RTX_CHECK(static_cast<bool>(success));
+
+    const Result<void> failure = err(ErrorCode::Io, "disk on fire", "sector 7");
+    RTX_CHECK(!failure.has_value());
+    RTX_CHECK(!static_cast<bool>(failure));
+    RTX_CHECK_EQ(failure.error().code, ErrorCode::Io);
+    RTX_CHECK_EQ(failure.error().message, std::string("disk on fire"));
+    RTX_CHECK_EQ(failure.error().detail, std::string("sector 7"));
+    const std::string text = failure.error().toString();
+    RTX_CHECK(text.find("IO_ERROR") != std::string::npos);
+    RTX_CHECK(text.find("disk on fire") != std::string::npos);
+    RTX_CHECK(text.find("sector 7") != std::string::npos);
+}
+
+RTX_TEST(status_error_names_are_stable) {
+    RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::Ok)), std::string("OK"));
+    RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::InvalidArgument)),
+                 std::string("INVALID_ARGUMENT"));
+    RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::DllMissing)), std::string("DLL_MISSING"));
+    RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::Reserved11)),
+                 std::string("RESERVED_11"));
+    RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::Internal)), std::string("INTERNAL_ERROR"));
+}
+
+RTX_TEST(status_result_value) {
+    const Result<int> good = 41;
+    RTX_CHECK(good.has_value());
+    RTX_CHECK_EQ(good.value(), 41);
+
+    const Result<int> bad = err(ErrorCode::Timeout, "too slow", "2 s");
+    RTX_CHECK(!bad.has_value());
+    RTX_CHECK_EQ(bad.error().code, ErrorCode::Timeout);
+    RTX_CHECK_EQ(bad.error().message, std::string("too slow"));
+    RTX_CHECK_EQ(bad.value_or(7), 7);
+}
+
+RTX_TEST(status_result_void) {
+    Result<void> success;
+    RTX_CHECK(success.has_value());
+
+    Result<void> failure = err(ErrorCode::State, "not ready");
+    RTX_CHECK(!failure.has_value());
+    RTX_CHECK_EQ(failure.error().code, ErrorCode::State);
+
+    failure = err(ErrorCode::OutOfMemory, "no vram");
+    RTX_CHECK_EQ(failure.error().code, ErrorCode::OutOfMemory);
+}
+
+RTX_TEST(status_error_copy_and_move) {
+    Error assigned{ErrorCode::Internal, "stale message", "stale detail"};
+    const Error source{ErrorCode::Io, "assigned message", "assigned detail"};
+    assigned = source;
+    RTX_CHECK_EQ(assigned.message, std::string("assigned message"));
+    RTX_CHECK_EQ(assigned.detail, std::string("assigned detail"));
+
+    Error moved = std::move(assigned);
+    RTX_CHECK_EQ(moved.message, std::string("assigned message"));
+    RTX_CHECK_EQ(moved.detail, std::string("assigned detail"));
+
+    Error move_assigned{ErrorCode::Internal, "old message", "old detail"};
+    move_assigned = std::move(moved);
+    RTX_CHECK_EQ(move_assigned.message, std::string("assigned message"));
+    RTX_CHECK_EQ(move_assigned.detail, std::string("assigned detail"));
+}
+
+// ---------------------------------------------------------------------------
+// SmartGeometryCalculator portrait & pillarbox contract (merged from tests/unit)
+// ---------------------------------------------------------------------------
+RTX_TEST(smart_geometry_portrait_and_pillarbox) {
+    auto res_a = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::AutoDirect);
+    RTX_CHECK(res_a.is_portrait);
+    RTX_CHECK_EQ(res_a.canvas_width, 2160);
+    RTX_CHECK_EQ(res_a.canvas_height, 3840);
+    RTX_CHECK_EQ(res_a.scaled_width, 2160);
+    RTX_CHECK_EQ(res_a.scaled_height, 3840);
+
+    auto res_b = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::Pillarbox);
+    RTX_CHECK(res_b.is_portrait);
+    RTX_CHECK_EQ(res_b.canvas_width, 3840);
+    RTX_CHECK_EQ(res_b.canvas_height, 2160);
+    RTX_CHECK_EQ(res_b.scaled_height, 2160);
+    RTX_CHECK_EQ(res_b.scaled_width, 1214);
+    RTX_CHECK(res_b.pillarbox_left > 1300);
+    RTX_CHECK(res_b.pillarbox_right > 1300);
+    RTX_CHECK_EQ(res_b.pillarbox_left + res_b.scaled_width + res_b.pillarbox_right, 3840);
+
+    auto res_land = SmartGeometryCalculator::calculate(1920, 1080, GeometryTargetMode::AutoDirect);
+    RTX_CHECK(!res_land.is_portrait);
+    RTX_CHECK_EQ(res_land.canvas_width, 3840);
+    RTX_CHECK_EQ(res_land.canvas_height, 2160);
+
+    auto res_def = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::AutoDirect, 3840, 2160);
+    RTX_CHECK(res_def.is_portrait);
+    RTX_CHECK_EQ(res_def.canvas_width, 2160);
+    RTX_CHECK_EQ(res_def.canvas_height, 3840);
 }

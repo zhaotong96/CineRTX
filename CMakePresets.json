@@ -10,7 +10,7 @@
       "name": "base",
       "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/cmake/${presetName}",
+      "binaryDir": "${sourceDir}/.vs/build/cmake/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "RTX_BUILD_TESTS": "ON"
@@ -67,9 +67,9 @@
     {
       "name": "windows-msvc",
       "displayName": "Windows MSVC release",
-      "generator": "Visual Studio 17 2022",
+      "generator": "Visual Studio 18 2026",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/build/cmake/${presetName}",
+      "binaryDir": "${sourceDir}/.vs/build/cmake/${presetName}",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",

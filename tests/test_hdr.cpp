@@ -25,13 +25,6 @@ uint32_t readU32(const std::vector<uint8_t>& data, size_t offset) {
            static_cast<uint32_t>(data[offset + 3]);
 }
 
-uint32_t readLe32(const std::vector<uint8_t>& data, size_t offset) {
-    return static_cast<uint32_t>(data[offset]) |
-           (static_cast<uint32_t>(data[offset + 1]) << 8) |
-           (static_cast<uint32_t>(data[offset + 2]) << 16) |
-           (static_cast<uint32_t>(data[offset + 3]) << 24);
-}
-
 std::vector<uint8_t> removeEmulationPrevention(const std::vector<uint8_t>& escaped) {
     std::vector<uint8_t> rbsp;
     int zeros = 0;

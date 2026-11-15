@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define RTX_NGX_BRIDGE_ABI_VERSION 3u
+#define RTX_NGX_BRIDGE_ABI_VERSION 4u
 
 typedef struct RtxNgxBridge RtxNgxBridge;
 
@@ -261,6 +261,39 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_nv12(
 
 RTX_SHIM_API uint64_t RTX_SHIM_CALL rtx_ngx_bridge_get_interp_buffer(
     RtxNgxBridge* bridge, uint32_t width, uint32_t height);
+
+/* Phase 8 路线 B append-only ABI 扩展：TensorRT RIFE 深度学习补帧 */
+
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_init_rife(
+    RtxNgxBridge* bridge,
+    const char* engine_path,    /* 预编译 .engine 文件路径 */
+    uint32_t width,
+    uint32_t height
+);
+
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_rife(
+    RtxNgxBridge* bridge,
+    uint64_t prev_nv12,         /* CUdeviceptr: 前一帧 NV12 */
+    uint64_t curr_nv12,         /* CUdeviceptr: 当前帧 NV12 */
+    uint32_t pitch,             /* NV12 行距 (bytes) */
+    float alpha,                /* 时间相位 in (0, 1) */
+    uint64_t out_nv12,          /* CUdeviceptr: 输出 NV12 缓冲 */
+    int32_t full_range,         /* 0=Limited Range, 1=Full Range */
+    int32_t* scene_cut          /* out: 1=检测到场景硬切，已旁路推理 */
+);
+
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
+    const char* onnx_path,      /* 输入 ONNX 模型路径 */
+    const char* engine_out_path,/* 输出 .engine 文件路径 */
+    uint32_t width,
+    uint32_t height,
+    char* err_buf,              /* 错误消息缓冲区 */
+    uint32_t err_cap            /* err_buf 容量 */
+);
+
+RTX_SHIM_API void RTX_SHIM_CALL rtx_ngx_bridge_destroy_rife(
+    RtxNgxBridge* bridge
+);
 
 #ifdef __cplusplus
 } /* extern "C" */

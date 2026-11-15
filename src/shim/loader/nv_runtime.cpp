@@ -2,7 +2,7 @@
  * Copyright (c) 2026 RTX Transcode Engine contributors
  *
  * Component discovery for the NVIDIA runtime.  Every library is optional: the
- * engine degrades to the CPU reference path when a component is absent, and the
+ * engine reports diagnostic status when a component is absent, and the
  * diagnostics list explains exactly what was found.
  */
 
@@ -23,29 +23,6 @@
 
 namespace rtx_shim {
 namespace {
-
-std::vector<std::string> splitPaths(const std::string& value) {
-    std::vector<std::string> paths;
-#if defined(_WIN32)
-    constexpr char separator = ';';
-#else
-    constexpr char separator = ':';
-#endif
-    size_t start = 0;
-    while (start <= value.size()) {
-        const size_t end = value.find(separator, start);
-        const std::string part =
-            value.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (!part.empty()) {
-            paths.push_back(part);
-        }
-        if (end == std::string::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return paths;
-}
 
 std::filesystem::path utf8ToPath(const std::string& value) {
     return std::filesystem::path(std::u8string(value.begin(), value.end()));

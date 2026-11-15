@@ -2,6 +2,7 @@
 // Copyright (C) 2026 RTX Transcode Engine contributors
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -9,13 +10,17 @@
 #include <format>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "rtx/hw_transcode.h"
 #include "rtx/i18n.h"
+#include "rtx/logger.h"
 #include "rtx/ngx_remaster.h"
+#include "rtx/param_schema.h"
 #include "rtx/rational.h"
 #include "rtx/runtime_env.h"
 #include "rtx/status.h"
@@ -48,36 +53,26 @@ using namespace rtx;
 enum class Mode {
     None,
     Probe,
+    SchemaJson,
+    SessionStdio,
     Container,
     Help,
     Version,
+    BuildRifeEngine,
 };
 
 struct Options {
     Mode mode = Mode::None;
-    int frames = 0;
-    int target_width = 3840;
-    int target_height = 2160;
-    int vsr_quality = 4;
-    Rational target_fps{60, 1};
+    TranscodeProfile profile{};
+    bool explicit_target_dims = false;
     bool json = false;
     bool quiet = false;
     bool verbose = false;
-    bool frames_set = false;
-    std::filesystem::path input_path;
-    std::filesystem::path output_path;
     std::string language;
-    VideoCodec codec = VideoCodec::AV1;
-    int bitrate_kbps = 0;
-    int preset = 5;
-    int rate_control = 0;
-    int qp = 0;
-    int peak_nits = 1000;
-    int geometry_mode = 0;
-    bool copy_audio = true;
-    std::filesystem::path lut_path;
-    bool hdr10plus = false;
-    int gpu = -1;
+    std::filesystem::path onnx_path;
+    std::filesystem::path engine_path;
+    int opt_w = 1920;
+    int opt_h = 1080;
 };
 
 void printHelp() {
@@ -86,28 +81,40 @@ void printHelp() {
               << "Offline SDR -> 4K HDR10 60fps transcode engine\n\n"
               << "Usage:\n"
               << "  CineRTX --probe [--json]\n"
-              << "  CineRTX --input in.mp4 --output out.mp4 [options]\n\n"
+              << "  CineRTX --schema-json\n"
+              << "  CineRTX --session-stdio\n"
+              << "  CineRTX --input in.mp4 [--output out.mp4] [options]\n"
+              << "  CineRTX --build-rife-engine --onnx model.onnx --engine model.engine [--opt-w W --opt-h H]\n\n"
               << "Options:\n"
               << "  --input PATH                 Container input (MP4/MKV)\n"
-              << "  --output PATH                Container output (MP4/MKV)\n"
-              << "  --codec av1|hevc|h264        Output video codec (default: av1)\n"
+              << "  --output PATH                Container output (default: <stem>_remaster_<codec>.mp4)\n"
+              << "  --codec av1|hevc             10-bit HDR10 output video codec (default: av1)\n"
               << "  --bitrate KBPS               Encoder target bitrate (0 = auto)\n"
               << "  --preset 1..7                NVENC P1..P7 preset (default 5)\n"
               << "  --rate-control cbr|vbr|qp    NVENC rate control (default cbr)\n"
-              << "  --qp N                       Constant QP when --rate-control qp (0..51)\n"
-              << "  --target-width PX            Output width (default 3840)\n"
-              << "  --target-height PX           Output height (default 2160)\n"
+              << "  --qp N                       Constant QP when --rate-control qp (default 24, 0..51)\n"
+              << "  --resolution 4k|2k|fhd|native Output resolution preset (default: 4k)\n"
+              << "  --target-width PX            Explicit output width override (default 3840)\n"
+              << "  --target-height PX           Explicit output height override (default 2160)\n"
               << "  --target-fps N[/D]           Target frame rate (default 60, 0 = keep input)\n"
+              << "  --no-vsr                     Disable RTX VSR upscaling\n"
               << "  --vsr-quality 1..4           NGX VSR quality (default 4 Ultra)\n"
               << "  --peak-nits 400..4000        TrueHDR peak luminance in cd/m^2 (default 1000)\n"
               << "  --frames N                   Frame limit (0 = whole stream)\n"
-              << "  --pillarbox                  Pad landscape content instead of auto-rotate\n"
+              << "  --pillarbox                  Pad portrait content into 16:9 canvas instead of auto-rotate\n"
               << "  --no-audio                   Drop audio streams from output\n"
-              << "  --lut PATH                   Apply 3D LUT inside pack kernel\n"
-              << "  --hdr10plus                  Emit SMPTE ST 2094-40 (HDR10+) metadata\n"
+              << "  --lut PATH                   Apply .cube 3D LUT inside pack kernel\n"
+              << "  --hdr10plus                  Emit SMPTE ST 2094-40 (HDR10+) dynamic metadata\n"
               << "  --gpu N                      Bind to GPU device N (default 0)\n"
-              << "  --json                       Machine-readable output\n"
-              << "  --quiet, --verbose           Logging verbosity\n"
+              << "  --rife-engine PATH           TensorRT RIFE engine path for AI interpolation\n"
+              << "  --build-rife-engine          Build TensorRT engine from RIFE ONNX\n"
+              << "  --onnx PATH                  Input ONNX path for --build-rife-engine\n"
+              << "  --engine PATH                Output engine path for --build-rife-engine\n"
+              << "  --opt-w W, --opt-h H         Optimal profile resolution for --build-rife-engine (default: 1920x1080)\n"
+              << "  --schema-json                Export SSOT parameter schema & bilingual i18n dictionary as JSON\n"
+              << "  --session-stdio              Run JSON-over-stdio interactive transcode session (WebUI bridge)\n"
+              << "  --json                       Machine-readable JSON output\n"
+              << "  --quiet, --verbose           Logging verbosity (all logs also stream to DebugView)\n"
               << "  --lang en|zh                 Output language (default: zh)\n"
               << "  --version, --help            Show version/help\n";
 }
@@ -140,11 +147,15 @@ bool requirePath(int argc, char** argv, int& index, std::filesystem::path& path)
         std::cerr << "error: " << argv[index] << " requires a value\n";
         return false;
     }
-    path = std::filesystem::path(argv[++index]);
+    const std::string_view s(argv[++index]);
+    path = std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(s.data()), s.size()));
     return true;
 }
 
 bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
+    Rational target_fps{60, 1};
+    bool target_fps_set = false;
+
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         std::string value;
@@ -154,6 +165,10 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.mode = Mode::Version;
         } else if (argument == "--probe") {
             options.mode = Mode::Probe;
+        } else if (argument == "--schema-json" || argument == "--dump-schema-json") {
+            options.mode = Mode::SchemaJson;
+        } else if (argument == "--session-stdio") {
+            options.mode = Mode::SessionStdio;
         } else if (argument == "--lang") {
             if (!requireValue(argc, argv, i, options.language)) {
                 return false;
@@ -165,50 +180,32 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             }
             setLanguage(parsed.value());
         } else if (argument == "--input") {
-            if (!requirePath(argc, argv, i, options.input_path)) {
+            if (!requireValue(argc, argv, i, options.profile.input)) {
                 return false;
             }
             options.mode = Mode::Container;
         } else if (argument == "--output") {
-            if (!requirePath(argc, argv, i, options.output_path)) {
+            if (!requireValue(argc, argv, i, options.profile.output)) {
                 return false;
             }
+            options.profile.auto_output = false;
         } else if (argument == "--codec") {
-            if (!requireValue(argc, argv, i, value)) {
-                return false;
-            }
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char c) { return static_cast<char>(c | 0x20); });
-            if (value == "av1" || value == "0") {
-                options.codec = VideoCodec::AV1;
-            } else if (value == "hevc" || value == "h265" || value == "1") {
-                options.codec = VideoCodec::HEVC;
-            } else if (value == "h264" || value == "avc" || value == "2") {
-                options.codec = VideoCodec::H264;
-            } else {
-                error = "--codec must be av1, hevc or h264";
+            if (!requireValue(argc, argv, i, options.profile.codec)) {
                 return false;
             }
         } else if (argument == "--rate-control") {
-            if (!requireValue(argc, argv, i, value)) {
+            if (!requireValue(argc, argv, i, options.profile.rate_control)) {
                 return false;
             }
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char c) { return static_cast<char>(c | 0x20); });
-            if (value == "cbr" || value == "0") {
-                options.rate_control = 0;
-            } else if (value == "vbr" || value == "1") {
-                options.rate_control = 1;
-            } else if (value == "qp" || value == "constqp" || value == "2") {
-                options.rate_control = 2;
-            } else {
-                error = "--rate-control must be cbr, vbr or qp";
+        } else if (argument == "--resolution") {
+            if (!requireValue(argc, argv, i, options.profile.resolution)) {
                 return false;
             }
         } else if (argument == "--target-width" || argument == "--target-height" ||
                    argument == "--frames" || argument == "--vsr-quality" ||
                    argument == "--bitrate" || argument == "--preset" || argument == "--qp" ||
-                   argument == "--peak-nits" || argument == "--gpu") {
+                   argument == "--peak-nits" || argument == "--gpu" ||
+                   argument == "--opt-w" || argument == "--opt-h") {
             if (!requireValue(argc, argv, i, value)) {
                 return false;
             }
@@ -218,24 +215,29 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
                 return false;
             }
             if (argument == "--target-width") {
-                options.target_width = parsed;
+                options.profile.target_width = parsed;
+                options.explicit_target_dims = true;
             } else if (argument == "--target-height") {
-                options.target_height = parsed;
+                options.profile.target_height = parsed;
+                options.explicit_target_dims = true;
             } else if (argument == "--frames") {
-                options.frames = parsed;
-                options.frames_set = true;
+                options.profile.frames = parsed;
             } else if (argument == "--bitrate") {
-                options.bitrate_kbps = parsed;
+                options.profile.bitrate_kbps = parsed;
             } else if (argument == "--preset") {
-                options.preset = parsed;
+                options.profile.preset = parsed;
             } else if (argument == "--qp") {
-                options.qp = parsed;
+                options.profile.qp = parsed;
             } else if (argument == "--vsr-quality") {
-                options.vsr_quality = parsed;
+                options.profile.vsr_quality = parsed;
             } else if (argument == "--peak-nits") {
-                options.peak_nits = parsed;
+                options.profile.peak_nits = parsed;
             } else if (argument == "--gpu") {
-                options.gpu = parsed;
+                options.profile.gpu = parsed;
+            } else if (argument == "--opt-w") {
+                options.opt_w = parsed;
+            } else if (argument == "--opt-h") {
+                options.opt_h = parsed;
             }
         } else if (argument == "--target-fps") {
             if (!requireValue(argc, argv, i, value)) {
@@ -246,17 +248,34 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
                 error = "invalid frame rate for --target-fps: " + value;
                 return false;
             }
-            options.target_fps = parsed.value();
+            target_fps = parsed.value();
+            target_fps_set = true;
+        } else if (argument == "--no-vsr") {
+            options.profile.vsr_enabled = false;
         } else if (argument == "--pillarbox") {
-            options.geometry_mode = 1;
+            options.profile.geometry = "pillarbox";
         } else if (argument == "--no-audio") {
-            options.copy_audio = false;
+            options.profile.copy_audio = false;
         } else if (argument == "--lut") {
-            if (!requirePath(argc, argv, i, options.lut_path)) {
+            if (!requireValue(argc, argv, i, options.profile.lut)) {
                 return false;
             }
         } else if (argument == "--hdr10plus") {
-            options.hdr10plus = true;
+            options.profile.hdr10plus = true;
+        } else if (argument == "--rife-engine") {
+            if (!requireValue(argc, argv, i, options.profile.rife_engine)) {
+                return false;
+            }
+        } else if (argument == "--build-rife-engine") {
+            options.mode = Mode::BuildRifeEngine;
+        } else if (argument == "--onnx") {
+            if (!requirePath(argc, argv, i, options.onnx_path)) {
+                return false;
+            }
+        } else if (argument == "--engine") {
+            if (!requirePath(argc, argv, i, options.engine_path)) {
+                return false;
+            }
         } else if (argument == "--json") {
             options.json = true;
         } else if (argument == "--quiet") {
@@ -268,41 +287,43 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             return false;
         }
     }
+
     if (options.mode == Mode::None) {
         error = "no command specified (try --help)";
         return false;
     }
-    if (options.target_width < 0 || options.target_height < 0) {
-        error = "geometry must be positive (0 for default 4K)";
-        return false;
-    }
-    if (options.vsr_quality < 1 || options.vsr_quality > 4) {
-        error = "--vsr-quality must be in 1..4";
-        return false;
-    }
-    if (options.peak_nits < 400 || options.peak_nits > 4000) {
-        error = "--peak-nits must be in 400..4000";
-        return false;
-    }
-    if (options.gpu < -1) {
-        error = "--gpu must be a device index (>= 0)";
-        return false;
-    }
-    if (options.preset < 1 || options.preset > 7) {
-        error = "--preset must be in 1..7";
-        return false;
-    }
-    if (options.bitrate_kbps < 0 || options.qp < 0 || options.qp > 51) {
-        error = "--bitrate/--qp are out of range";
-        return false;
-    }
+
     if (options.mode == Mode::Container) {
-        if (options.input_path.empty()) {
-            error = "--input needs a container path";
+        const bool want_rife = !options.profile.rife_engine.empty();
+        if (target_fps_set && target_fps.num <= 0) {
+            options.profile.fps_mode = "original";
+        } else if (target_fps_set && target_fps.toDouble() >= 100.0) {
+            options.profile.fps_mode = want_rife ? "120-rife" : "120-nvofa";
+        } else {
+            options.profile.fps_mode = want_rife ? "60-rife" : "60-nvofa";
+        }
+
+        const int saved_w = options.profile.target_width;
+        const int saved_h = options.profile.target_height;
+        auto valid = validateAndNormalizeProfile(options.profile, /*require_io_paths=*/true);
+        if (!valid.has_value()) {
+            error = valid.error().message;
             return false;
         }
-        if (options.output_path.empty()) {
-            error = "container transcode requires --output";
+        if (options.explicit_target_dims) {
+            options.profile.target_width = saved_w;
+            options.profile.target_height = saved_h;
+        }
+        if (target_fps_set && target_fps.num > 0) {
+            // Preserve custom fractional rates such as 60000/1001 when specified on CLI.
+        }
+    } else if (options.mode == Mode::BuildRifeEngine) {
+        if (options.onnx_path.empty()) {
+            error = "--build-rife-engine requires --onnx <path>";
+            return false;
+        }
+        if (options.engine_path.empty()) {
+            error = "--build-rife-engine requires --engine <path>";
             return false;
         }
     }
@@ -374,34 +395,6 @@ int runProbe(const Options& options) {
     return 0;
 }
 
-HwTranscodeOptions makeHwOptions(const Options& options) {
-    HwTranscodeOptions hardware;
-    hardware.input_path = options.input_path;
-    hardware.output_path = options.output_path;
-    hardware.frame_limit = options.frames_set ? options.frames : 0;
-    hardware.codec = options.codec;
-    hardware.bit_depth = 10;
-    hardware.bitrate_kbps = options.bitrate_kbps;
-    hardware.preset = options.preset;
-    hardware.rate_control = options.rate_control;
-    hardware.qp = options.qp;
-    hardware.target_width = options.target_width;
-    hardware.target_height = options.target_height;
-    hardware.vsr_quality = options.vsr_quality;
-    hardware.peak_nits = options.peak_nits;
-    hardware.geometry_mode = options.geometry_mode;
-    hardware.copy_audio = options.copy_audio;
-    hardware.lut_path = options.lut_path;
-    hardware.hdr10plus = options.hdr10plus;
-    hardware.target_fps = options.target_fps;
-    hardware.fruc_enabled = (options.target_fps.num > 0);
-    if (options.gpu >= 0) {
-        hardware.device_index = options.gpu;
-    }
-    hardware.verbose = options.verbose;
-    return hardware;
-}
-
 void printHwReport(const HwTranscodeReport& report, const Options& options) {
     if (options.json) {
         std::cout << report.toJson();
@@ -422,17 +415,22 @@ void printHwReport(const HwTranscodeReport& report, const Options& options) {
     std::cout << "host pixel copies: decoder=" << report.decoder_host_pixel_copies
               << ", encoder=" << report.encoder_host_pixel_copies
               << "\n";
-    if (report.frames_interpolated > 0) {
+    // Phase 9 (RC-2): the fruc line must be visible whenever the FRUC backend
+    // is active, even with zero interpolated frames, and must carry the
+    // interpolation failure count so silent degradation cannot hide.
+    if (report.fruc_backend != "off") {
         std::cout << "fruc: backend=" << report.fruc_backend
                   << ", interpolated=" << report.frames_interpolated
-                  << ", scene cuts=" << report.fruc_scene_cuts << "\n";
+                  << ", scene cuts=" << report.fruc_scene_cuts
+                  << ", failures=" << report.fruc_failures << "\n";
     }
     std::cout << "elapsed: " << std::fixed << std::setprecision(1) << report.elapsed_ms
               << " ms\n";
 }
 
 int runHardwareMode(const Options& options) {
-    HwTranscodeOptions hardware = makeHwOptions(options);
+    HwTranscodeOptions hardware = profileToHwOptions(options.profile);
+    hardware.verbose = options.verbose;
     if (!options.quiet && !options.json) {
         hardware.progress = [](const HwTranscodeProgress& p) {
             if (p.total_frames > 0) {
@@ -452,10 +450,135 @@ int runHardwareMode(const Options& options) {
         std::cout << "\n";
     }
     if (!result.has_value()) {
-        std::cerr << "error: " << result.error().toString() << "\n";
+        logError(result.error().toString());
+        if (! isConsoleLogEnabled()) {
+            std::cerr << "error: " << result.error().toString() << "\n";
+        }
         return 1;
     }
     printHwReport(result.value(), options);
+    return 0;
+}
+
+int runSessionStdio() {
+    setConsoleLogEnabled(false);
+
+    std::string payload_line;
+    if (!std::getline(std::cin, payload_line)) {
+        std::cout << "{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"empty stdin payload\"}\n"
+                  << std::flush;
+        return 2;
+    }
+
+    Result<TranscodeProfile> parsed = parseProfileFromJson(payload_line);
+    if (!parsed.has_value()) {
+        std::cout << std::format(
+            "{{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"{}\"}}\n",
+            cli::escapeJson(parsed.error().toString())) << std::flush;
+        return 2;
+    }
+
+    TranscodeProfile profile = std::move(parsed.value());
+    Result<void> valid = validateAndNormalizeProfile(profile, /*require_io_paths=*/true);
+    if (!valid.has_value()) {
+        std::cout << std::format(
+            "{{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"{}\"}}\n",
+            cli::escapeJson(valid.error().toString())) << std::flush;
+        return 2;
+    }
+
+    std::mutex out_mutex;
+    setLogCallback([&out_mutex](LogLevel level, std::string_view msg) {
+        std::lock_guard<std::mutex> lock(out_mutex);
+        std::cout << std::format(
+            "{{\"type\":\"log\",\"level\":\"{}\",\"text\":\"{}\"}}\n",
+            logLevelName(level), cli::escapeJson(std::string(msg))) << std::flush;
+    });
+
+    std::atomic<bool> cancel_flag{false};
+    std::atomic<bool> job_finished{false};
+
+    std::thread stdin_watcher([&cancel_flag, &job_finished]() {
+        std::string cmd;
+        while (!job_finished.load(std::memory_order_acquire) && std::getline(std::cin, cmd)) {
+            if (cmd.find("cancel") != std::string::npos || cmd.find("stop") != std::string::npos) {
+                cancel_flag.store(true, std::memory_order_release);
+                logInfo("Received cooperative cancel signal over session-stdio");
+                break;
+            }
+        }
+    });
+    stdin_watcher.detach();
+
+    HwTranscodeOptions hw = profileToHwOptions(profile);
+    hw.cancel = &cancel_flag;
+
+    auto last_emit = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    hw.progress = [&](const HwTranscodeProgress& p) {
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - last_emit).count() < 0.20 &&
+            (p.total_frames == 0 || p.frames_encoded < p.total_frames)) {
+            return;
+        }
+        last_emit = now;
+        const double pct = p.total_frames > 0
+                               ? std::min(100.0, static_cast<double>(p.frames_encoded) * 100.0 / p.total_frames)
+                               : 0.0;
+        const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
+        std::lock_guard<std::mutex> lock(out_mutex);
+        std::cout << std::format(
+            "{{\"type\":\"progress\",\"pct\":{:.1f},\"frames\":{},\"total\":{},\"fps\":{:.1f}}}\n",
+            pct, p.frames_encoded, p.total_frames, fps) << std::flush;
+    };
+
+    Result<HwTranscodeReport> result = runNvidiaRemasterTranscode(hw);
+    job_finished.store(true, std::memory_order_release);
+    setLogCallback(nullptr);
+
+    std::lock_guard<std::mutex> lock(out_mutex);
+    if (result.has_value()) {
+        std::cout << std::format(
+            "{{\"type\":\"report\",\"status\":\"done\",\"exitCode\":0,\"report\":{}}}\n",
+            result.value().toJson()) << std::flush;
+        return 0;
+    }
+    const bool was_cancelled = cancel_flag.load(std::memory_order_acquire);
+    const char* status_str = was_cancelled ? "cancelled" : "failed";
+    const int exit_code = was_cancelled ? 130 : 1;
+    std::cout << std::format(
+        "{{\"type\":\"report\",\"status\":\"{}\",\"exitCode\":{},\"error\":\"{}\"}}\n",
+        status_str, exit_code, cli::escapeJson(result.error().toString())) << std::flush;
+    return exit_code;
+}
+
+int runBuildRifeEngine(const Options& options) {
+    rtx::NgxRemasterBridge bridge;
+    std::string error;
+    if (!bridge.open(&error)) {
+        logError("cannot load NGX bridge DLL: " + error);
+        return 1;
+    }
+    if (!bridge.hasRifeApi()) {
+        logError("loaded NGX bridge DLL does not support RIFE API");
+        return 1;
+    }
+    const std::string onnx_str = options.onnx_path.string();
+    const std::string engine_str = options.engine_path.string();
+    const uint32_t opt_w = options.opt_w > 0 ? static_cast<uint32_t>(options.opt_w) : 1920u;
+    const uint32_t opt_h = options.opt_h > 0 ? static_cast<uint32_t>(options.opt_h) : 1080u;
+
+    std::cout << "Building RIFE TensorRT engine...\n"
+              << "  ONNX: " << onnx_str << "\n"
+              << "  Engine: " << engine_str << "\n"
+              << "  Profile (Opt): " << opt_w << "x" << opt_h << "\n";
+
+    char log_buf[2048] = {};
+    const int32_t res = bridge.buildRifeEngine(onnx_str.c_str(), engine_str.c_str(), opt_w, opt_h, log_buf, sizeof(log_buf));
+    if (res != RTX_OK) {
+        logError(std::format("RIFE engine build failed (code {}): {}", res, log_buf));
+        return 1;
+    }
+    std::cout << "Build succeeded.\n" << log_buf << "\n";
     return 0;
 }
 
@@ -514,6 +637,17 @@ int rtxCliMain(int argc, char** argv) {
         printHelp();
         return 2;
     }
+    if (options.quiet) {
+        setLogLevel(LogLevel::Error);
+    } else if (options.verbose) {
+        setLogLevel(LogLevel::Debug);
+    } else {
+        setLogLevel(LogLevel::Info);
+    }
+    if (options.json) {
+        setConsoleLogEnabled(false);
+    }
+
     switch (options.mode) {
         case Mode::Help:
             printHelp();
@@ -521,10 +655,17 @@ int rtxCliMain(int argc, char** argv) {
         case Mode::Version:
             std::cout << "CineRTX " << RTX_VERSION_STRING << "\n";
             return 0;
+        case Mode::SchemaJson:
+            std::cout << exportSchemaJson();
+            return 0;
+        case Mode::SessionStdio:
+            return runSessionStdio();
         case Mode::Probe:
             return runProbe(options);
         case Mode::Container:
             return runHardwareMode(options);
+        case Mode::BuildRifeEngine:
+            return runBuildRifeEngine(options);
         case Mode::None:
             break;
     }

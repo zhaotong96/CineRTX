@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     }
 
     // A trailing '*' turns the filter into a prefix match, which is what the
-    // CTest contract gates (`--filter=fruc_abi_*`) rely on.
+    // CTest contract gates (`--filter=rife_*`) rely on.
     const bool prefix_filter = !filter.empty() && filter.back() == '*';
     const std::string filter_text =
         prefix_filter ? filter.substr(0, filter.size() - 1) : filter;

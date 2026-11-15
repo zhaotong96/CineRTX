@@ -24,10 +24,10 @@ setlocal EnableDelayedExpansion
 
 set "REPO=%~dp0"
 if "!REPO:~-1!"=="\" set "REPO=!REPO:~0,-1!"
-set "EXTDIR=!REPO!\build\external"
+set "EXTDIR=!REPO!\.vs\build\external"
 set "DLDIR=!EXTDIR!\download"
 set "TOOLDIR=!EXTDIR!\tools"
-set "BDIR=!REPO!\build"
+set "BDIR=!REPO!\.vs\build\cmake\windows-msvc-ninja"
 set "SYS32=%SystemRoot%\System32"
 
 REM Guarantee System32 is reachable for child processes even with empty PATH.

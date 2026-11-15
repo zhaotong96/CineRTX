@@ -25,14 +25,18 @@ namespace rtx::gui {
 namespace {
 
 constexpr wchar_t kPreviewChildClass[] = L"CineRTXPreviewChild";
+// Double-click forwarding for fullscreen quick-play toggling.
+constexpr LONG_PTR kChildClassStyle = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
 
 LRESULT CALLBACK previewChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
         case WM_MOUSEMOVE:
+        case WM_LBUTTONDBLCLK:
             // A/B split dragging: the parent computes the split ratio from the
             // child-relative coordinates and republishes it to the pipeline.
+            // WM_LBUTTONDBLCLK toggles borderless fullscreen quick-play.
             SendMessageW(GetParent(hwnd), WM_APP_SPLIT_DRAG, static_cast<WPARAM>(msg), lParam);
             return 0;
         default:
@@ -43,7 +47,7 @@ LRESULT CALLBACK previewChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 bool ensureChildClass(HINSTANCE instance) {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.style = static_cast<UINT>(kChildClassStyle);
     wc.lpfnWndProc = previewChildProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -298,6 +302,91 @@ void PreviewViewport::setBounds(int x, int y, int w, int h) noexcept {
     }
 }
 
+void PreviewViewport::resizeSwapChain(int width, int height) noexcept {
+    auto* swap = reinterpret_cast<IDXGISwapChain1*>(swap_chain_);
+    if (swap == nullptr || width <= 0 || height <= 0) {
+        return;
+    }
+    if (width == width_ && height == height_) {
+        return;
+    }
+    // RW-1 fix: geometry is owned exclusively by setBounds() (no MoveWindow
+    // here — the viewport never teleports).  1. Drain the in-flight frame.
+    auto* queue = reinterpret_cast<ID3D12CommandQueue*>(cmd_queue_);
+    auto* fence = reinterpret_cast<ID3D12Fence*>(cmd_fence_);
+    if (queue != nullptr && fence != nullptr && fence_event_ != nullptr) {
+        const UINT64 fence_val = ++fence_value_;
+        if (SUCCEEDED(queue->Signal(fence, fence_val))) {
+            if (fence->GetCompletedValue() < fence_val) {
+                if (SUCCEEDED(fence->SetEventOnCompletion(fence_val, fence_event_))) {
+                    WaitForSingleObject(fence_event_, 100);
+                }
+            }
+        }
+    }
+
+    // 2. Release back buffers (FLIP_DISCARD needs zero RTs across ResizeBuffers).
+    for (auto*& rt : render_targets_) {
+        safeRelease(reinterpret_cast<ID3D12Resource*&>(rt));
+    }
+
+    // 3. Release the old upload heap (RW-1: it MUST track the swap chain size).
+    auto* up_buf = reinterpret_cast<ID3D12Resource*>(upload_buffer_);
+    if (up_buf != nullptr) {
+        if (upload_map_ != nullptr) {
+            D3D12_RANGE written{0, 0};
+            up_buf->Unmap(0, &written);
+            upload_map_ = nullptr;
+        }
+        safeRelease(reinterpret_cast<ID3D12Resource*&>(upload_buffer_));
+    }
+
+    // 4. Resize the swap chain to the new viewport size.
+    if (FAILED(swap->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height),
+                                   DXGI_FORMAT_UNKNOWN,
+                                   tearing_supported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u))) {
+        return;
+    }
+    width_ = width;
+    height_ = height;
+
+    // 5. Re-acquire the resized back buffers.
+    for (UINT i = 0; i < 2; ++i) {
+        if (FAILED(swap->GetBuffer(i, IID_PPV_ARGS(
+                        reinterpret_cast<ID3D12Resource**>(&render_targets_[i]))))) {
+            return;
+        }
+    }
+
+    // 6. Reallocate the aligned D3D12 upload heap for the new frame size.
+    auto* device = reinterpret_cast<ID3D12Device*>(device_);
+    if (device == nullptr) {
+        return;
+    }
+    upload_pitch_ = (static_cast<uint32_t>(width) * 4u + 255u) & ~255u;
+    const UINT64 upload_size =
+        static_cast<UINT64>(upload_pitch_) * static_cast<UINT64>(height);
+    D3D12_HEAP_PROPERTIES upload_heap{};
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer_desc{};
+    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_desc.Width = upload_size;
+    buffer_desc.Height = 1;
+    buffer_desc.DepthOrArraySize = 1;
+    buffer_desc.MipLevels = 1;
+    buffer_desc.Format = DXGI_FORMAT_UNKNOWN;
+    buffer_desc.SampleDesc.Count = 1;
+    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ID3D12Resource* new_upload = nullptr;
+    if (SUCCEEDED(device->CreateCommittedResource(
+            &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&new_upload)))) {
+        upload_buffer_ = new_upload;
+        D3D12_RANGE read_range{0, 0};
+        new_upload->Map(0, &read_range, &upload_map_);
+    }
+}
+
 void PreviewViewport::presentFromHostOrShared(const void* r10g10b10a2_data,
                                               std::uint32_t pitch) noexcept {
     last_present_skipped_ = true;
@@ -340,11 +429,14 @@ void PreviewViewport::presentFromHostOrShared(const void* r10g10b10a2_data,
         return;
     }
 
-    // 3. Copy host rows into upload mapping
-    const uint32_t copy_bytes = static_cast<uint32_t>(width_) * 4u;
+    // 3. Bounds-defended host copy: never read past the staged 960x540
+    // source frame nor write past the upload heap (RW-1 fix).
+    const uint32_t copy_bytes =
+        (static_cast<uint32_t>(width_) * 4u < pitch) ? (static_cast<uint32_t>(width_) * 4u) : pitch;
     const uint8_t* source = static_cast<const uint8_t*>(r10g10b10a2_data);
     uint8_t* target = static_cast<uint8_t*>(upload_map_);
-    for (int row = 0; row < height_; ++row) {
+    const int copy_rows = (std::min)(height_, 540);
+    for (int row = 0; row < copy_rows; ++row) {
         std::memcpy(target + static_cast<size_t>(row) * upload_pitch_,
                     source + static_cast<size_t>(row) * pitch, copy_bytes);
     }

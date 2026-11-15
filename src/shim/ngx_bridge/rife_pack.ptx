@@ -1,0 +1,559 @@
+//
+// Generated NVIDIA PTX Assembly for CineRTX RIFE v4.25 TensorRT Pre/Post-Processing
+// Target: sm_70+ forward-compatible JIT (Turing / Ampere / Ada / Blackwell)
+//
+// Phase 9.1 (RW-P9-05): both kernels gained a .u32 param_full_range input and
+// a UNIFORM branch (kernel parameter -> no warp divergence) selecting between
+// the frozen BT.709 Limited-Range path (byte-identical to the Phase 9 frozen
+// build) and a BT.601 Full-Range path. All new constants are exact IEEE-754
+// single-precision encodings computed via python struct (self-verified):
+//   1.402     = 0f3FB374BC      0.344136  = 0f3EB03298
+//   0.714136  = 0f3F36D19E      1.772     = 0f3FE2D0E5
+//   1/255     = 0f3B808081      128.0     = 0f43000000
+//   0.299     = 0f3E991687      0.587     = 0f3F1645A2
+//   0.114     = 0f3DE978D5      0.168736  = 0f3E2CC921
+//   0.331264  = 0f3EA99B6F      0.5       = 0f3F000000
+//   0.418688  = 0f3ED65E46      0.081312  = 0f3DA686E8
+//   255.0     = 0f437F0000
+// Phase 9.1 (RW-P9-02): rife_fp32_to_fp16 / rife_fp16_to_fp32 conversion
+// kernels backing the kHALF engine I/O chain.
+//
+.version 7.0
+.target sm_70
+.address_size 64
+
+// ============================================================================
+// Kernel 1: rife_nv12_to_nchw_7ch_fp32
+// Converts prev_nv12 and curr_nv12 to 7-channel planar RGB [0, 1] + alpha
+// and computes 16x16 block SAD into sad_accum without warp-divergent shfl.sync.
+// ============================================================================
+.visible .entry rife_nv12_to_nchw_7ch_fp32(
+    .param .u64 param_prev_nv12,
+    .param .u64 param_curr_nv12,
+    .param .u32 param_pitch,
+    .param .u32 param_width,
+    .param .u32 param_height,
+    .param .u32 param_padded_width,
+    .param .u32 param_padded_height,
+    .param .u32 param_full_range,
+    .param .f32 param_alpha,
+    .param .u64 param_dst_tensor,
+    .param .u64 param_sad_accum
+)
+{
+    .reg .pred  %p<12>;
+    .reg .b16   %rs<8>;
+    .reg .b32   %r<45>;
+    .reg .b64   %rd<35>;
+    .reg .f32   %f<30>;
+
+    ld.param.u64    %rd1, [param_prev_nv12];
+    ld.param.u64    %rd2, [param_curr_nv12];
+    ld.param.u32    %r3,  [param_pitch];
+    ld.param.u32    %r4,  [param_width];
+    ld.param.u32    %r5,  [param_height];
+    ld.param.u32    %r6,  [param_padded_width];
+    ld.param.u32    %r7,  [param_padded_height];
+    ld.param.u32    %r44, [param_full_range];
+    ld.param.f32    %f1,  [param_alpha];
+    ld.param.u64    %rd3, [param_dst_tensor];
+    ld.param.u64    %rd4, [param_sad_accum];
+
+    // px = blockIdx.x * blockDim.x + threadIdx.x
+    mov.u32         %r8, %ctaid.x;
+    mov.u32         %r9, %ntid.x;
+    mov.u32         %r10, %tid.x;
+    mad.lo.u32      %r1, %r8, %r9, %r10;
+
+    // py = blockIdx.y * blockDim.y + threadIdx.y
+    mov.u32         %r11, %ctaid.y;
+    mov.u32         %r12, %ntid.y;
+    mov.u32         %r13, %tid.y;
+    mad.lo.u32      %r2, %r11, %r12, %r13;
+
+    // Bounds check on padded dimensions
+    setp.ge.u32     %p1, %r1, %r6;
+    setp.ge.u32     %p2, %r2, %r7;
+    or.pred         %p3, %p1, %p2;
+    @%p3 bra        L_EXIT_PRE;
+
+    // Clamp (sx, sy) to [0, width-1] and [0, height-1] for edge replication
+    sub.u32         %r14, %r4, 1;
+    min.u32         %r15, %r1, %r14;      // sx
+    sub.u32         %r16, %r5, 1;
+    min.u32         %r17, %r2, %r16;      // sy
+
+    // Y offset = sy * pitch + sx
+    mad.lo.u32      %r18, %r17, %r3, %r15;
+    cvt.u64.u32     %rd5, %r18;
+
+    // UV offset = (height + sy / 2) * pitch + (sx & ~1)
+    shr.u32         %r19, %r17, 1;
+    add.u32         %r20, %r5, %r19;
+    and.b32         %r21, %r15, -2;
+    mad.lo.u32      %r22, %r20, %r3, %r21;
+    cvt.u64.u32     %rd6, %r22;
+
+    // Load Prev Y, U, V
+    add.u64         %rd7, %rd1, %rd5;
+    ld.global.u8    %r23, [%rd7];         // y0
+    add.u64         %rd8, %rd1, %rd6;
+    ld.global.u8    %r24, [%rd8];         // u0
+    ld.global.u8    %r25, [%rd8+1];       // v0
+
+    // Load Curr Y, U, V
+    add.u64         %rd9, %rd2, %rd5;
+    ld.global.u8    %r26, [%rd9];         // y1
+    add.u64         %rd10, %rd2, %rd6;
+    ld.global.u8    %r27, [%rd10];        // u1
+    ld.global.u8    %r28, [%rd10+1];      // v1
+
+    // Compute SAD only for valid unpadded pixels (px < width && py < height), else 0
+    setp.lt.u32     %p4, %r1, %r4;
+    setp.lt.u32     %p5, %r2, %r5;
+    and.pred        %p6, %p4, %p5;
+    sub.s32         %r29, %r23, %r26;
+    abs.s32         %r29, %r29;
+    selp.u32        %r29, %r29, 0, %p6;
+
+    // Uniform warp-level SAD reduction (all active threads in padded tile participate)
+    shfl.sync.down.b32 %r30, %r29, 16, 31, 0xffffffff;
+    add.u32         %r29, %r29, %r30;
+    shfl.sync.down.b32 %r30, %r29, 8, 31, 0xffffffff;
+    add.u32         %r29, %r29, %r30;
+    shfl.sync.down.b32 %r30, %r29, 4, 31, 0xffffffff;
+    add.u32         %r29, %r29, %r30;
+    shfl.sync.down.b32 %r30, %r29, 2, 31, 0xffffffff;
+    add.u32         %r29, %r29, %r30;
+    shfl.sync.down.b32 %r30, %r29, 1, 31, 0xffffffff;
+    add.u32         %r29, %r29, %r30;
+
+    // Lane 0 of each warp atomically accumulates SAD if sad_accum != 0
+    mad.lo.u32      %r31, %r13, %r9, %r10;
+    and.b32         %r32, %r31, 31;
+    setp.eq.u32     %p7, %r32, 0;
+    setp.ne.u64     %p8, %rd4, 0;
+    and.pred        %p9, %p7, %p8;
+    setp.gt.u32     %p10, %r29, 0;
+    and.pred        %p9, %p9, %p10;
+    @!%p9 bra       L_AFTER_SAD;
+    cvt.u64.u32     %rd11, %r29;
+    atom.global.add.u64 %rd12, [%rd4], %rd11;
+
+L_AFTER_SAD:
+    // BT.709 Limited Range [16..235] -> Normalized RGB [0.0..1.0] (IEEE-754 Hex Constants)
+    cvt.rn.f32.u32  %f2, %r23;
+    sub.f32         %f2, %f2, 0f41800000;     // 16.0f
+    mul.f32         %f2, %f2, 0f3B95A106;     // 0.00456621f
+
+    cvt.rn.f32.u32  %f3, %r24;
+    sub.f32         %f3, %f3, 0f43000000;     // 128.0f
+
+    cvt.rn.f32.u32  %f4, %r25;
+    sub.f32         %f4, %f4, 0f43000000;     // 128.0f
+
+    fma.rn.f32      %f5, %f4, 0f3BE66666, %f2;// + 0.00703125f * v
+    max.f32         %f5, %f5, 0f00000000;
+    min.f32         %f5, %f5, 0f3F800000;
+
+    fma.rn.f32      %f6, %f3, 0fBA5B2574, %f2;// - 0.00083610f * u
+    fma.rn.f32      %f6, %f4, 0fBB08F5C3, %f6;// - 0.00208984f * v
+    max.f32         %f6, %f6, 0f00000000;
+    min.f32         %f6, %f6, 0f3F800000;
+
+    fma.rn.f32      %f7, %f3, 0f3C07AE14, %f2;// + 0.00828125f * u
+    max.f32         %f7, %f7, 0f00000000;
+    min.f32         %f7, %f7, 0f3F800000;
+
+    // --- Curr Frame ---
+    cvt.rn.f32.u32  %f8, %r26;
+    sub.f32         %f8, %f8, 0f41800000;
+    mul.f32         %f8, %f8, 0f3B95A106;
+
+    cvt.rn.f32.u32  %f9, %r27;
+    sub.f32         %f9, %f9, 0f43000000;
+
+    cvt.rn.f32.u32  %f10, %r28;
+    sub.f32         %f10, %f10, 0f43000000;
+
+    fma.rn.f32      %f11, %f10, 0f3BE66666, %f8;
+    max.f32         %f11, %f11, 0f00000000;
+    min.f32         %f11, %f11, 0f3F800000;
+
+    fma.rn.f32      %f12, %f9, 0fBA5B2574, %f8;
+    fma.rn.f32      %f12, %f10, 0fBB08F5C3, %f12;
+    max.f32         %f12, %f12, 0f00000000;
+    min.f32         %f12, %f12, 0f3F800000;
+
+    fma.rn.f32      %f13, %f9, 0f3C07AE14, %f8;
+    max.f32         %f13, %f13, 0f00000000;
+    min.f32         %f13, %f13, 0f3F800000;
+
+    // Write 7 planes
+    mul.lo.u32      %r33, %r6, %r7;
+    mad.lo.u32      %r34, %r2, %r6, %r1;
+    cvt.u64.u32     %rd13, %r33;
+    shl.b64         %rd13, %rd13, 2;
+    cvt.u64.u32     %rd14, %r34;
+    shl.b64         %rd14, %rd14, 2;
+    add.u64         %rd15, %rd3, %rd14;
+
+    // Uniform full-range dispatch: param_full_range is a kernel parameter so
+    // every thread of the warp takes the same branch (no warp divergence).
+    setp.ne.u32     %p11, %r44, 0;
+    @%p11 bra       L_FULLRANGE_PRE;
+
+    // --- BT.709 Limited-Range stores (frozen Phase 9 sequence, unchanged) ---
+    st.global.f32   [%rd15], %f5;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f6;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f7;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f11;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f12;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f13;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f1;
+    bra             L_EXIT_PRE;
+
+L_FULLRANGE_PRE:
+    // --- BT.601 Full Range: R = Y + 1.402*(V-128), G = Y - 0.344136*(U-128)
+    //     - 0.714136*(V-128), B = Y + 1.772*(U-128), all /255 normalized. ---
+    // --- Prev Frame ---
+    cvt.rn.f32.u32  %f14, %r23;               // Y0 (0..255)
+    cvt.rn.f32.u32  %f15, %r24;               // U0
+    cvt.rn.f32.u32  %f16, %r25;               // V0
+    sub.f32         %f15, %f15, 0f43000000;   // U0 - 128.0f
+    sub.f32         %f16, %f16, 0f43000000;   // V0 - 128.0f
+
+    fma.rn.f32      %f5, %f16, 0f3FB374BC, %f14;  // R255 = Y + 1.402*(V-128)
+    fma.rn.f32      %f17, %f15, 0fBEB03298, %f14; // t = Y - 0.344136*(U-128)
+    fma.rn.f32      %f6, %f16, 0fBF36D19E, %f17;  // G255 = t - 0.714136*(V-128)
+    fma.rn.f32      %f7, %f15, 0f3FE2D0E5, %f14;  // B255 = Y + 1.772*(U-128)
+    mul.f32         %f5, %f5, 0f3B808081;         // /255
+    mul.f32         %f6, %f6, 0f3B808081;
+    mul.f32         %f7, %f7, 0f3B808081;
+    max.f32         %f5, %f5, 0f00000000;
+    min.f32         %f5, %f5, 0f3F800000;
+    max.f32         %f6, %f6, 0f00000000;
+    min.f32         %f6, %f6, 0f3F800000;
+    max.f32         %f7, %f7, 0f00000000;
+    min.f32         %f7, %f7, 0f3F800000;
+
+    // --- Curr Frame ---
+    cvt.rn.f32.u32  %f18, %r26;               // Y1
+    cvt.rn.f32.u32  %f19, %r27;               // U1
+    cvt.rn.f32.u32  %f20, %r28;               // V1
+    sub.f32         %f19, %f19, 0f43000000;
+    sub.f32         %f20, %f20, 0f43000000;
+
+    fma.rn.f32      %f11, %f20, 0f3FB374BC, %f18;
+    fma.rn.f32      %f21, %f19, 0fBEB03298, %f18;
+    fma.rn.f32      %f12, %f20, 0fBF36D19E, %f21;
+    fma.rn.f32      %f13, %f19, 0f3FE2D0E5, %f18;
+    mul.f32         %f11, %f11, 0f3B808081;
+    mul.f32         %f12, %f12, 0f3B808081;
+    mul.f32         %f13, %f13, 0f3B808081;
+    max.f32         %f11, %f11, 0f00000000;
+    min.f32         %f11, %f11, 0f3F800000;
+    max.f32         %f12, %f12, 0f00000000;
+    min.f32         %f12, %f12, 0f3F800000;
+    max.f32         %f13, %f13, 0f00000000;
+    min.f32         %f13, %f13, 0f3F800000;
+
+    st.global.f32   [%rd15], %f5;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f6;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f7;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f11;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f12;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f13;
+    add.u64         %rd15, %rd15, %rd13;
+    st.global.f32   [%rd15], %f1;
+
+L_EXIT_PRE:
+    ret;
+}
+
+// ============================================================================
+// Kernel 2: rife_nchw_3ch_fp32_to_nv12
+// ============================================================================
+.visible .entry rife_nchw_3ch_fp32_to_nv12(
+    .param .u64 param_src_tensor,
+    .param .u64 param_dst_nv12,
+    .param .u32 param_pitch,
+    .param .u32 param_width,
+    .param .u32 param_height,
+    .param .u32 param_padded_width,
+    .param .u32 param_padded_height,
+    .param .u32 param_full_range
+)
+{
+    .reg .pred  %p<8>;
+    .reg .b32   %r<30>;
+    .reg .b64   %rd<25>;
+    .reg .f32   %f<20>;
+
+    ld.param.u64    %rd1, [param_src_tensor];
+    ld.param.u64    %rd2, [param_dst_nv12];
+    ld.param.u32    %r3,  [param_pitch];
+    ld.param.u32    %r4,  [param_width];
+    ld.param.u32    %r5,  [param_height];
+    ld.param.u32    %r6,  [param_padded_width];
+    ld.param.u32    %r7,  [param_padded_height];
+    ld.param.u32    %r29, [param_full_range];
+
+    mov.u32         %r8, %ctaid.x;
+    mov.u32         %r9, %ntid.x;
+    mov.u32         %r10, %tid.x;
+    mad.lo.u32      %r1, %r8, %r9, %r10;      // px
+
+    mov.u32         %r11, %ctaid.y;
+    mov.u32         %r12, %ntid.y;
+    mov.u32         %r13, %tid.y;
+    mad.lo.u32      %r2, %r11, %r12, %r13;    // py
+
+    setp.ge.u32     %p1, %r1, %r4;
+    setp.ge.u32     %p2, %r2, %r5;
+    or.pred         %p3, %p1, %p2;
+    @%p3 bra        L_EXIT_POST;
+
+    // Uniform full-range dispatch (kernel parameter, no warp divergence).
+    setp.ne.u32     %p6, %r29, 0;
+    @%p6 bra        L_FULLRANGE_POST;
+
+    // --- BT.709 Limited-Range path (frozen Phase 9 sequence, unchanged) ---
+    mul.lo.u32      %r14, %r6, %r7;
+    mad.lo.u32      %r15, %r2, %r6, %r1;
+    cvt.u64.u32     %rd3, %r14;
+    shl.b64         %rd3, %rd3, 2;
+    cvt.u64.u32     %rd4, %r15;
+    shl.b64         %rd4, %rd4, 2;
+    add.u64         %rd5, %rd1, %rd4;
+
+    ld.global.f32   %f1, [%rd5];
+    add.u64         %rd5, %rd5, %rd3;
+    ld.global.f32   %f2, [%rd5];
+    add.u64         %rd5, %rd5, %rd3;
+    ld.global.f32   %f3, [%rd5];
+
+    max.f32         %f1, %f1, 0f00000000;
+    min.f32         %f1, %f1, 0f3F800000;
+    max.f32         %f2, %f2, 0f00000000;
+    min.f32         %f2, %f2, 0f3F800000;
+    max.f32         %f3, %f3, 0f00000000;
+    min.f32         %f3, %f3, 0f3F800000;
+
+    // Y calculation with IEEE hex floats
+    mov.f32         %f4, 0f41840000;          // 16.5f
+    fma.rn.f32      %f4, %f1, 0f423A3C36, %f4;// 46.5588f
+    fma.rn.f32      %f4, %f2, 0f431CA0F9, %f4;// 156.6288f
+    fma.rn.f32      %f4, %f3, 0f417CFF97, %f4;// 15.8124f
+    max.f32         %f4, %f4, 0f41800000;     // 16.0f
+    min.f32         %f4, %f4, 0f436B0000;     // 235.0f
+    cvt.rzi.u32.f32 %r16, %f4;
+
+    mad.lo.u32      %r17, %r2, %r3, %r1;
+    cvt.u64.u32     %rd6, %r17;
+    add.u64         %rd7, %rd2, %rd6;
+    st.global.u8    [%rd7], %r16;
+
+    and.b32         %r18, %r1, 1;
+    and.b32         %r19, %r2, 1;
+    or.b32          %r20, %r18, %r19;
+    setp.ne.u32     %p4, %r20, 0;
+    @%p4 bra        L_EXIT_POST;
+
+    mov.f32         %f5, 0f43008000;          // 128.5f
+    fma.rn.f32      %f5, %f1, 0fC1CD5048, %f5;// -25.6642f
+    fma.rn.f32      %f5, %f2, 0fC2ACABF0, %f5;// -86.3358f
+    fma.rn.f32      %f5, %f3, 0f42E00000, %f5;// 112.0f
+    max.f32         %f5, %f5, 0f41800000;     // 16.0f
+    min.f32         %f5, %f5, 0f43700000;     // 240.0f
+    cvt.rzi.u32.f32 %r21, %f5;
+
+    mov.f32         %f6, 0f43008000;
+    fma.rn.f32      %f6, %f1, 0f42E00000, %f6;// 112.0f
+    fma.rn.f32      %f6, %f2, 0fC2CB75EA, %f6;// -101.7303f
+    fma.rn.f32      %f6, %f3, 0fC12450B0, %f6;// -10.2697f
+    max.f32         %f6, %f6, 0f41800000;
+    min.f32         %f6, %f6, 0f43700000;
+    cvt.rzi.u32.f32 %r22, %f6;
+
+    shr.u32         %r23, %r2, 1;
+    add.u32         %r24, %r5, %r23;
+    mad.lo.u32      %r25, %r24, %r3, %r1;
+    cvt.u64.u32     %rd8, %r25;
+    add.u64         %rd9, %rd2, %rd8;
+    st.global.u8    [%rd9], %r21;
+    st.global.u8    [%rd9+1], %r22;
+    bra             L_EXIT_POST;
+
+L_FULLRANGE_POST:
+    // --- BT.601 Full Range path:
+    //     Y = 0.299R + 0.587G + 0.114B                     (0..255)
+    //     U = 128 - 0.168736R - 0.331264G + 0.5B           (0..255)
+    //     V = 128 + 0.5R - 0.418688G - 0.081312B           (0..255) ---
+    mul.lo.u32      %r14, %r6, %r7;
+    mad.lo.u32      %r15, %r2, %r6, %r1;
+    cvt.u64.u32     %rd3, %r14;
+    shl.b64         %rd3, %rd3, 2;
+    cvt.u64.u32     %rd4, %r15;
+    shl.b64         %rd4, %rd4, 2;
+    add.u64         %rd5, %rd1, %rd4;
+
+    ld.global.f32   %f1, [%rd5];
+    add.u64         %rd5, %rd5, %rd3;
+    ld.global.f32   %f2, [%rd5];
+    add.u64         %rd5, %rd5, %rd3;
+    ld.global.f32   %f3, [%rd5];
+
+    max.f32         %f1, %f1, 0f00000000;
+    min.f32         %f1, %f1, 0f3F800000;
+    max.f32         %f2, %f2, 0f00000000;
+    min.f32         %f2, %f2, 0f3F800000;
+    max.f32         %f3, %f3, 0f00000000;
+    min.f32         %f3, %f3, 0f3F800000;
+
+    mov.f32         %f4, 0f00000000;
+    fma.rn.f32      %f4, %f1, 0f3E991687, %f4;// 0.299f * R
+    fma.rn.f32      %f4, %f2, 0f3F1645A2, %f4;// 0.587f * G
+    fma.rn.f32      %f4, %f3, 0f3DE978D5, %f4;// 0.114f * B
+    max.f32         %f4, %f4, 0f00000000;
+    min.f32         %f4, %f4, 0f437F0000;     // 255.0f
+    cvt.rzi.u32.f32 %r16, %f4;
+
+    mad.lo.u32      %r17, %r2, %r3, %r1;
+    cvt.u64.u32     %rd6, %r17;
+    add.u64         %rd7, %rd2, %rd6;
+    st.global.u8    [%rd7], %r16;
+
+    and.b32         %r18, %r1, 1;
+    and.b32         %r19, %r2, 1;
+    or.b32          %r20, %r18, %r19;
+    setp.ne.u32     %p4, %r20, 0;
+    @%p4 bra        L_EXIT_POST;
+
+    mov.f32         %f5, 0f43000000;          // 128.0f
+    fma.rn.f32      %f5, %f1, 0fBE2CC921, %f5;// - 0.168736f * R
+    fma.rn.f32      %f5, %f2, 0fBEA99B6F, %f5;// - 0.331264f * G
+    fma.rn.f32      %f5, %f3, 0f3F000000, %f5;// + 0.5f * B
+    max.f32         %f5, %f5, 0f00000000;
+    min.f32         %f5, %f5, 0f437F0000;
+    cvt.rzi.u32.f32 %r21, %f5;
+
+    mov.f32         %f6, 0f43000000;
+    fma.rn.f32      %f6, %f1, 0f3F000000, %f6;// + 0.5f * R
+    fma.rn.f32      %f6, %f2, 0fBED65E46, %f6;// - 0.418688f * G
+    fma.rn.f32      %f6, %f3, 0fBDA686E8, %f6;// - 0.081312f * B
+    max.f32         %f6, %f6, 0f00000000;
+    min.f32         %f6, %f6, 0f437F0000;
+    cvt.rzi.u32.f32 %r22, %f6;
+
+    shr.u32         %r23, %r2, 1;
+    add.u32         %r24, %r5, %r23;
+    mad.lo.u32      %r25, %r24, %r3, %r1;
+    cvt.u64.u32     %rd8, %r25;
+    add.u64         %rd9, %rd2, %rd8;
+    st.global.u8    [%rd9], %r21;
+    st.global.u8    [%rd9+1], %r22;
+
+L_EXIT_POST:
+    ret;
+}
+
+// ============================================================================
+// Kernel 3: rife_fp32_to_fp16
+// Element-wise IEEE-754 binary32 -> binary16 conversion (RW-P9-02 FP16 chain).
+// Grid: (count + 255) / 256 blocks, 256 threads per block.
+// ============================================================================
+.visible .entry rife_fp32_to_fp16(
+    .param .u64 param_src,
+    .param .u64 param_dst,
+    .param .u32 param_count
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<8>;
+    .reg .b64   %rd<8>;
+    .reg .f32   %f<4>;
+
+    ld.param.u64    %rd1, [param_src];
+    ld.param.u64    %rd2, [param_dst];
+    ld.param.u32    %r1, [param_count];
+
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mov.u32         %r4, %tid.x;
+    mad.lo.u32      %r5, %r2, %r3, %r4;       // idx
+
+    setp.ge.u32     %p1, %r5, %r1;
+    @%p1 bra        L_F32F16_DONE;
+
+    cvt.u64.u32     %rd3, %r5;
+    shl.b64         %rd3, %rd3, 2;            // src byte offset = idx * 4
+    add.u64         %rd4, %rd1, %rd3;
+    ld.global.f32   %f1, [%rd4];
+    // CUDA 13.5 driver JIT (PTX ISA 9.0 semantics): .f16 registers cannot be
+    // moved or memory-transferred; cvt.rn.f16.f32 writes the binary16 value
+    // directly into a .b16 register.
+    cvt.rn.f16.f32  %rs1, %f1;
+    shr.b64         %rd5, %rd3, 1;            // dst byte offset = idx * 2
+    add.u64         %rd6, %rd2, %rd5;
+    st.global.b16   [%rd6], %rs1;
+
+L_F32F16_DONE:
+    ret;
+}
+
+// ============================================================================
+// Kernel 4: rife_fp16_to_fp32
+// Element-wise IEEE-754 binary16 -> binary32 conversion (RW-P9-02 FP16 chain).
+// Grid: (count + 255) / 256 blocks, 256 threads per block.
+// ============================================================================
+.visible .entry rife_fp16_to_fp32(
+    .param .u64 param_src,
+    .param .u64 param_dst,
+    .param .u32 param_count
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<8>;
+    .reg .b64   %rd<8>;
+    .reg .f32   %f<4>;
+
+    ld.param.u64    %rd1, [param_src];
+    ld.param.u64    %rd2, [param_dst];
+    ld.param.u32    %r1, [param_count];
+
+    mov.u32         %r2, %ctaid.x;
+    mov.u32         %r3, %ntid.x;
+    mov.u32         %r4, %tid.x;
+    mad.lo.u32      %r5, %r2, %r3, %r4;       // idx
+
+    setp.ge.u32     %p1, %r5, %r1;
+    @%p1 bra        L_F16F32_DONE;
+
+    cvt.u64.u32     %rd3, %r5;
+    shl.b64         %rd3, %rd3, 1;            // src byte offset = idx * 2
+    add.u64         %rd4, %rd1, %rd3;
+    ld.global.b16   %rs1, [%rd4];
+    // cvt.f32.f16 accepts the .b16 register under the CUDA 13.5 driver JIT
+    // (PTX ISA 9.0 semantics).
+    cvt.f32.f16     %f1, %rs1;
+    shl.b64         %rd5, %rd3, 1;            // dst byte offset = idx * 4
+    add.u64         %rd6, %rd2, %rd5;
+    st.global.f32   [%rd6], %f1;
+
+L_F16F32_DONE:
+    ret;
+}

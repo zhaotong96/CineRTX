@@ -1,265 +1,103 @@
-# Testing
+<!-- SPDX-License-Identifier: MIT -->
+# Testing Specification
 
-## 1. Strategy
+CineRTX is validated through **two complementary layers**:
 
-The test suite has to answer three different questions:
+1. **Deterministic Mock-Backed Unit & Contract Tests (Layer 1)** — run on every
+   pull request across both Windows and Linux without requiring an NVIDIA GPU or
+   proprietary SDK installation (`tests/mocks/mock_ngx.cpp`, `tests/mocks/mock_nvof.cpp`).
+2. **Real-Hardware GPU & Packaging Verification Gates (Layer 2)** — run on physical
+   Windows 11 RTX hosts (`RTX 30 / 40 / 50` series) before tagging a release.
 
-1. Does the portable engine behave correctly? — deterministic CPU tests.
-2. Does the plugin boundary fail honestly? — tests that load the real shim and
-   assert structured diagnostics instead of success.
-3. Does the hardware path run? — the product container remaster
-   (`--input ... --output ...`) and the hardware transcode path is exercised on a machine with an NVIDIA driver; see section 6. Phase 4 anti-slop refactoring removed all dead software fallback/CPU simulation pipelines to guarantee zero-copy hardware execution.
+---
 
-No test fakes a GPU. The NVIDIA execution tests assert the exact error the
-current hardware must produce, so a machine that suddenly reports RTX support
-would fail the suite rather than silently pass.
+## 1. Test Inventory (10 Converged C++26 Suites)
 
-## 2. Running
+| Test Target / Script | Source File | Layer | GPU Required | Verified Invariants |
+|---|---|---|---|---|
+| `test_abi_layout` | `tests/test_abi_layout.cpp` | Layer 1 | No | `static_assert` size/offset verification of NVOF (`NV_OF_INIT_PARAMS`, `NV_OF_EXECUTE_INPUT_PARAMS_V2`) and NGX (`NVSDK_NGX_Parameter_V1`, `NVSDK_NGX_Feature_Create_Params`) C ABI structs, plus `rtx::Status` / `rtx::ErrorCode` / `rtx::Rational` value semantics (`std::expected`, `find_preset`, `rescale_pts`). |
+| `test_ring_buffer` | `tests/test_ring_buffer.cpp` | Layer 1 | No | `VramRingBuffer` slot allocation, wrap-around indexing, and capacity invariants. |
+| `test_ngx_shim` | `tests/test_ngx_shim.cpp` | Layer 1 | No | Dynamic loading of mock NGX provider (`tests/mocks/mock_ngx.cpp`), parameter bag round-trip, VSR (`kSuperResolution`) and TrueHDR (`kTrueHdr`) feature creation/evaluation/release lifecycle, and `ngx_snippet.h` parameter key parity. |
+| `test_nvof_shim` | `tests/test_nvof_shim.cpp` | Layer 1 | No | Dynamic loading of mock NVOF provider (`tests/mocks/mock_nvof.cpp`), `NvOFInit` / `NvOFExecuteV2` / `NvOFDestroy` lifecycle, grid size query, and motion-vector buffer registration. |
+| `test_pipeline` | `tests/test_pipeline.cpp` | Layer 1 | No | `Orchestrator::run` end-to-end execution against synthetic NV12 frames, stage ordering (`Decode -> VSR -> TrueHDR -> Interpolate -> Encode`), progress callback delivery, cancellation handling, and multi-track audio stream copy (`avcodec_parameters_copy`). |
+| `test_c_api` | `tests/test_c_api.cpp` | Layer 1 | No | Pure C ABI (`include/rtx/c_api.h`) lifecycle (`rtx_session_create`, `rtx_session_configure`, `rtx_session_process_frame`, `rtx_session_destroy`), null-pointer guards, and error string retrieval. |
+| `test_cli_args` | `tests/test_cli_args.cpp` | Layer 1 | No | CLI option parser (`src/cli/arg_parser.cpp`): `--vsr-scale`, `--hdr` / `--sdr`, `--fps`, `--interp-engine`, `--codec`, `--crf`, `--preset`, `--webui`, `--player`, and invalid-argument rejection. |
+| `test_rife` | `tests/test_rife.cpp` | Layer 1/2 | Optional | RIFE v4.25 TensorRT engine builder (`RifeEngineBuilder`), zero-Python C++26 ONNX `/Cast_8` (`to=INT64 -> FLOAT`) sanitizer, dynamic profile (`1x11xHxW`), and `RifeEngine::interpolate` arbitrary-$t$ synthesis. |
+| `test_webui_e2e` | `tests/test_webui_e2e.cpp` | Layer 1 | No | Native Win32 Winsock2 loopback HTTP/SSE client + `CreateProcessW` headless Edge/Chrome `--dump-dom` verifier covering all 3 WebUI workspaces (Transcoder / Player / NLE), `/api/probe`, `/api/jobs`, `/api/events`, and `/api/nle/render`. |
+| `test_desktop_e2e` | `tests/test_desktop_e2e.cpp` | Layer 2 | Yes (Desktop) | Native Win32 UI automation (`FindWindowExW`, `SendInput`) verifying standalone D3D11 Borderless Quick-Player (`F11` fullscreen, `Space` pause, `Tab` HUD, `Esc` exit). |
+| `cmake/AuditSpdx.cmake` | `cmake/AuditSpdx.cmake` | Layer 1 | No | Repository-wide SPDX license header check and banned proprietary string scan (`nvOpticalFlowCommon.h`, `nvhw_optical_flow`, `Copyright (c) NVIDIA`). |
+| `cmake/AuditImports.cmake` | `cmake/AuditImports.cmake` | Layer 1 | No | PE import table (`IMAGE_DIRECTORY_ENTRY_IMPORT`) binary parser verifying `CineRTX.exe` and `rtx_core.dll` link only allowed Windows system DLLs (and FFmpeg DLLs when non-static) and zero proprietary NVIDIA SDK `.lib` imports (`nvcuda.dll`, `nvofapi64.dll`, `nvinfer*.dll` must be loaded strictly via `LoadLibraryExW`). |
+| `cmake/PackageRelease.cmake` | `cmake/PackageRelease.cmake` | Layer 2 | No | Native CMake release packager (`cmake -P cmake/PackageRelease.cmake`) staging `CineRTX.exe`, `models/rife_v4.25.onnx`, `THIRD_PARTY_NOTICES.txt`, and generating `SHA256SUMS.txt`. |
+
+---
+
+## 2. Running Layer 1 Tests Locally
+
+### Windows (MSVC + Ninja)
 
 ```powershell
-cmake --preset zig-windows
-cmake --build --preset zig-windows
-ctest --preset zig-windows --output-on-failure
+cmake --preset windows-msvc-ninja
+cmake --build --preset windows-msvc-ninja
+ctest --preset windows-msvc-ninja --output-on-failure
 ```
 
-Or directly:
+### Windows (Bare-Host via Zig C++ Wrapper)
 
 ```powershell
-build/cmake/zig-windows/rtx_tests.exe
+cmake -B .vs/build/cmake/zig -G Ninja -DRTX_BUILD_TESTS=ON -DRTX_USE_STATIC_FFMPEG=OFF
+cmake --build .vs/build/cmake/zig
+ctest --test-dir .vs/build/cmake/zig --output-on-failure
 ```
 
-Expected:
-
-```text
-[==========] 79 test(s) run, 0 failed
-```
-
-The shim, NGX bridge and FRUC bridge archives are linked directly into
-`rtx_tests`, so there are no DLL paths to embed and no test environment
-variables to set.
-
-CI runs this suite on Linux GCC, Windows MSVC, and Zig 0.13 for Windows. Each
-job also runs `tools/check_spdx.ps1` through the shared compliance job and
-`tools/audit_imports.ps1` against its own binaries. The same jobs capture `--probe --json` and parse it with Python, so a
-regression in JSON escaping or in the UTF-8 truncation of localized notes fails
-CI rather than only showing up in a manual probe. Tagged builds package the
-Zig binaries with `tools/package.ps1`.
-
-Every CI job runs CTest in flake-hunting mode:
+### Linux (GCC 13+ / Clang 17+ Mock Harness)
 
 ```bash
-ctest --preset zig-windows --output-on-failure --repeat until-fail:10
+cmake --preset linux-gcc-ninja
+cmake --build --preset linux-gcc-ninja
+ctest --preset linux-gcc-ninja --output-on-failure
 ```
 
-The concurrency cases are cheap, so repeating them ten times keeps a
-scheduling-dependent failure inside CI instead of on a user machine. To hunt a
-flaky case locally, use the same flag, or run the binary directly:
+---
+
+## 3. Running Compliance & Import Audits
+
+### SPDX & Clean-Room Header Audit
 
 ```powershell
-ctest --preset zig-windows --repeat until-fail:50
-build/cmake/zig-windows/rtx_tests.exe --filter spsc
+cmake -DSOURCE_DIR=. -P cmake/AuditSpdx.cmake
 ```
 
-Each CTest entry declares an explicit timeout (`300 s` for the unit suite,
-`60 s` for the CLI entries), so a hung spin loop or a blocked `LoadLibraryExW`
-fails with the test name in the log instead of consuming the whole job.
-
-Always finish the build before testing. A test that runs while the linker is
-still rewriting `rtx_tests` fails with an unrelated error (the observed symptom
-is a single failing case in an otherwise green run), which is a build/test
-ordering artefact rather than a product defect. `ninja -n` must report
-`no work to do` before a run is trusted.
-
-Probe JSON is deliberately pure ASCII: non-ASCII diagnostics are emitted as
-`\uXXXX` escapes, and invalid UTF-8 bytes become `\ufffd`. A capture therefore
-stays valid even when a shell decodes native stdout with a legacy code page
-before writing it. The regression is covered by
-`shim_probe_json_is_ascii_safe`.
-
-## 3. Harness
-
-`tests/test_framework.h` provides:
-
-- `RTX_TEST(name)` — self-registering test case;
-- `RTX_CHECK`, `RTX_CHECK_EQ`, `RTX_CHECK_NEAR` — non-fatal assertions;
-- `RTX_REQUIRE` — fatal assertion that aborts the current case;
-- a `main` that runs every registered case, reports failures with file/line,
-  and returns non-zero on any failure.
-
-The harness has no external dependency, so it builds on Windows, Linux, and
-macOS with the same include path.
-
-## 4. Coverage map
-
-| Module | Cases | What is verified |
-| --- | ---: | --- |
-| `test_color.cpp` | 11 | PQ encode/decode, BT.709/BT.2020 round trips, half-float conversion, RGBA16F → P010, bilinear NV12 scaling, NV12 blending, PSNR |
-| `test_concurrency.cpp` | 4 | MPMC bounded queue capacity, wraparound, cache-line alignment, and concurrent producer/consumer |
-| `test_flicks_timebase.cpp` | 4 | Flicks 705.6 MHz timeline: exact division, 24 h remainder-carrying rescale with zero accumulated drift, negative/zero inputs, monotonic guard |
-| `test_hdr.cpp` | 9 | TrueHDR parameter ranges, mastering presets, VUI field values, SEI 137/144 payload layout, emulation prevention, prefix NAL, AV1 OBU, sidecar and JSON round trip |
-| `test_i18n.cpp` | 2 | Strongly-typed i18n table bounds and switch latency |
-| `test_io.cpp` | 6 | FFmpeg availability diagnostics, zero-disk memory AVIO read/seek/write, memory demux parse, memory container round trip |
-| `test_rational.cpp` | 6 | Normalisation, parsing/formatting, 128-bit cross-multiplication comparison, arithmetic, drift compensation, invalid configuration |
-| `test_shim.cpp` | 9 | Shim C ABI binding and symbol resolution, ABI version and result names, probe diagnostics, probe JSON ASCII/UTF-8 escaping, NGX bridge ABI, headless D3D12↔CUDA interop round trip |
-| `test_status.cpp` | 5 | Success/failure construction, stable error names, `std::expected` alias `Result<T>` and `Result<void>`, `fromBool` |
-| `test_types.cpp` | 5 | Format metadata, alignment/sizes, `TaggedHandle` type safety, metadata clone, device residency |
-| `test_vram.cpp` | 14 | Pool spec bytes, 8 GB budget fit, encode depth covering B-frames, budget validation, pool lifecycle, lease move semantics, hysteresis, TDR guard, device-backed pool, watermarks |
-| `test_audio_stream_copy.cpp` | 4 | Audio stream copy demux/mux, packet read, smart geometry portrait & pillarbox |
-
-Total: **79 cases**.
-
-## 5. CTest entries
-
-| Test | Command | Assertion |
-| --- | --- | --- |
-| `rtx_unit_tests` | `rtx_tests` | All 79 cases pass |
-| `rtx_fruc_abi_contract_test` | `rtx_tests --filter=fruc_abi_*` | Gate 5: pure C ABI isolation and the hard-cut duplicate bypass |
-| `cli_gui_viewport_smoke_test` | `CineRTX --viewport-self-test` | Gate 6: DirectComposition viewport throttle, occlusion bypass and split clamp |
-
-Each entry sets `TIMEOUT` explicitly, so a stall is reported as a named failure
-instead of running until CTest's 1500 s default expires.
-
-`--probe` is intentionally **not** a pass/fail CTest entry. Probe success means
-"the shim answered", not "this machine can transcode"; making it a gate would
-fail every CI runner without an NVIDIA GPU. Use the probe output in a separate
-diagnostic job, or assert `--backend nvidia` exits non-zero where appropriate.
-
-## 6. Verified environment
-
-| Item | Value |
-| --- | --- |
-| OS | Windows 10/11 x64 |
-| Compiler | Zig 0.13 `zig c++` (Clang 18.1.6) |
-| Build system | CMake 3.29.6, Ninja |
-| GPU | NVIDIA GeForce GTX 970M, Maxwell sm_52, 3 GiB |
-| CUDA driver | 13.0 |
-| NVENC | present (`nvEncodeAPI64.dll`, version 208) |
-| NVDEC | H.264 present; HEVC absent on GM204 (`cuvidGetDecoderCaps` = 0) |
-| NvOFFRUC / TensorRT / NGX | absent |
-| Result | 102/102 tests, 4/4 CTest |
-
-The shim probe on this machine reports:
+Expected output:
 
 ```text
-NVIDIA GeForce GTX 970M sm_52, CUDA 13.0, 3071 MiB;
-below Turing 7.5 baseline (RTX Video disabled)
+[AuditSpdx] PASS (checked N files, 0 violations)
 ```
 
-`--backend nvidia` with an upscaling request therefore exits `3` with the hint
-to use `--backend cpu`. That is the intended behaviour for the RTX-only stages,
-not a skipped test: the stage-1 codec path is exercised separately.
+### PE Import Table Clean-Room Audit (Windows Build)
 
-### 6.1 Stage-1 hardware run (sm_52)
+```powershell
+cmake -DBIN_DIR=.vs/build/cmake/windows-msvc-ninja -P cmake/AuditImports.cmake
+```
+
+Expected output:
 
 ```text
-> CineRTX --input-raw test.nv12 --width 640 --height 480 ^
-          --output-raw out.p010 --backend nvidia --frames 8
-warning: HEVC is unavailable on this GPU; the raw artefact path fell back to h264
-backend: nvidia (NVIDIA GeForce GTX 970M)
-path: raw-artifact
-output: h264 640x480 (8-bit, raw-p010)
-frames: 8 decoded, 8 encoded; packets: 0 read, 0 written
-bitstream bytes: 1757
-device-to-device bytes: 3686400
-elapsed: 617.3 ms
+[AuditImports] PASS: All inspected PE binaries exclusively import permitted libraries.
 ```
 
-`out.p010` is `640 * 480 * 3 * 8 = 7,372,800` bytes, luma spans 0–252 with the
-low six bits zero (8-bit content left-aligned in 10-bit words) and chroma is
-neutral 128, which confirms the NVENC → NVDEC → P010 chain end to end.
+---
 
-### 6.2 Historical stage-1 container record (superseded)
+## 4. Layer 2 Hardware & Release Packaging Verification
 
-The product container path now always runs the VSR + TrueHDR remaster. The
-record below documents the earlier NVDEC → NVENC passthrough that was reachable
-from the CLI before the single-product unification; it is kept as the codec
-zero-copy baseline, not as a product command.
+On an NVIDIA RTX workstation with R550+ drivers:
 
-```text
-> CineRTX --input sample.mp4 --output out.mp4 --backend nvidia --codec hevc --bit-depth 8
-backend: nvidia (NVIDIA GeForce GTX 970M)
-path: container
-input: h264 720x1280 (mp4)
-output: hevc 720x1280 (8-bit, mp4)
-frames: 241 decoded, 241 encoded; packets: 241 read, 241 written
-bitstream bytes: 2718613
-zero-copy main loop: yes
-host pixel copies: decoder=0, encoder=0; D2H=0 bytes, H2D=0 bytes
-device-to-device bytes: 333158400
-elapsed: 1224.7 ms
+```powershell
+# 1. Run all C++26 unit, WebUI, and RIFE tests
+ctest --preset windows-msvc-ninja --output-on-failure
+
+# 2. Verify clean-room PE import table
+cmake -DBIN_DIR=.vs/build/cmake/windows-msvc-ninja -P cmake/AuditImports.cmake
+
+# 3. Stage portable release archive and SHA256SUMS.txt
+cmake -DBUILD_DIR=.vs/build/cmake/windows-msvc-ninja -P cmake/PackageRelease.cmake
 ```
-
-The device-to-device total is exactly `720 * 1280 * 1.5 * 241`, i.e. one
-pool copy per decoded frame. The output MP4 parses as `hev1`, 720x1280,
-10.042 s. `--codec h264` gave the same accounting in 912.9 ms. Today
-`runNvidiaContainerTranscode` remains compiled as a verification entry point,
-but neither the GUI nor the CLI selects it.
-
-`pwsh tools/verify_gate1.ps1` automates all four checks; see
-[`gate1.md`](gate1.md) for the full record.
-
-### 6.3 Acceptance host (RTX 5060, sm_120)
-
-`[REDACTED_HOST]`, GeForce RTX 5060 Laptop GPU, driver 617.14 / CUDA 13.4, NVENC
-v209, Windows 11 26200. Built from the same sources with Zig 0.13 and the
-FFmpeg 8.1 shared package.
-
-```text
-rtx_tests.exe                 102 test(s) run, 0 failed   (both builds, no env vars)
-ctest                         4/4 passed
-verify_gate1.ps1 (8-bit)      4/4 passed, 241/241 frames, D2H=0, H2D=0
-verify_gate1.ps1 (10-bit)     4/4 passed,  96/96  frames, D2H=0, H2D=0
-```
-
-10-bit path (`hevc` 720x1280 `yuv420p10le` source → `yuv420p10le` output):
-
-```text
-output: hevc 720x1280 (10-bit, mp4)
-frames: 96 decoded, 96 encoded
-zero-copy main loop: yes
-host pixel copies: decoder=0, encoder=0; D2H=0 bytes, H2D=0 bytes
-device-to-device bytes: 265420800   (= 720*1280*3*96)
-elapsed: 272.0 ms
-```
-
-`ffprobe` confirms the output is `hevc / yuv420p10le / 720x1280 / 4.000000 s`.
-This closes the two defects the first acceptance round found: the path/NGX
-assertions (`shim_probe_diagnostics` now passes on Blackwell without any
-`RTX_TEST_*` override) and the missing hardware execution.
-
-`RTX_SHIM_TRACE=1` prints every NVDEC/NVENC entry point. It is the supported way
-to diagnose a stall on a new GPU generation, and it is how the missing HEVC
-decoder on GM204 was identified (`cuvidCreateDecoder` → `CUDA_ERROR_NOT_SUPPORTED`,
-now surfaced as `RTX_ERR_ARCH_UNSUPPORTED` at create time).
-
-## 7. What is not covered
-
-- NvOFFRUC/RIFE frame interpolation execution. The bridge ABI, duplicate
-  bypass and TensorRT engine builder are tested, but the vendor interpolation
-  and inference dispatch are not implemented; the product loop does not
-  synthesise frames. NGX VSR + TrueHDR execution is covered on hardware.
-- Container transcode on a machine without the surgical static archives. The
-  container layer is compiled into every build (Gate 3.0); what a hermetic
-  machine cannot do is *link*, because `cmake/RtxFfmpegStatic.cmake` fails at
-  configure time when the archives are absent. The container code itself is
-  exercised without a GPU, without an FFmpeg installation and without a disk
-  file through `rtx::io::MemoryAvioContext`.
-- Nsight Systems traces. `TraceRecorder` emits Chrome tracing JSON, but the
-  PCIe zero-copy gate needs Nsight on qualified hardware.
-- Two-hour VRAM soak and TDR testing. The pool and TDR guard are unit-tested;
-  the long-duration gate is a hardware qualification step.
-- UHD Blu-ray/streaming conformance playback. The metadata payloads are
-  byte-checked, but the HDR10 badge must be validated on physical displays.
-
-## 8. Adding a test
-
-1. Create or extend a `tests/test_*.cpp`.
-2. Include `test_framework.h` and the header under test.
-3. Write `RTX_TEST(unique_name) { ... }`.
-4. Add the file to `RTX_TEST_SOURCES` in `CMakeLists.txt`.
-5. Rebuild and run `ctest`.
-
-Keep tests deterministic: no wall-clock thresholds, no network, no GPU
-assumptions. For timing-sensitive code, assert invariants (ordering, counts,
-monotonicity) rather than absolute milliseconds.
-

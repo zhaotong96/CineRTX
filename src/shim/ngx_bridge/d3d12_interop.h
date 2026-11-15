@@ -163,6 +163,7 @@ public:
 
     void* device() const noexcept { return device_; }
     void* queue() const noexcept { return queue_; }
+    void* context() const noexcept { return cuda_context_; }
     // Current value of the shared timeline fence (advanced by every queue
     // signal).  Callers pick the next CUDA-side signal value from it.
     uint64_t timeline_value() const noexcept { return fence_value_; }

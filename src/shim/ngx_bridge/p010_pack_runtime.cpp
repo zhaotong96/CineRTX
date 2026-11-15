@@ -481,70 +481,189 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_launch(
     return RTX_OK;
 }
 
-static const char kInterpolatePtx[] =
+static const char kNvofWarpPtx[] =
     ".version 7.0\n"
-    ".target sm_50\n"
+    ".target sm_70\n"
     ".address_size 64\n"
-    ".visible .entry rtx_interpolate_nv12(\n"
+    ".visible .entry rtx_nvof_warp_nv12(\n"
     "    .param .u64 prev_ptr,\n"
     "    .param .u64 curr_ptr,\n"
+    "    .param .u64 fwd_flow_ptr,\n"
+    "    .param .u64 bwd_flow_ptr,\n"
+    "    .param .u64 cost_ptr,\n"
     "    .param .u32 pitch,\n"
     "    .param .u32 width,\n"
     "    .param .u32 height,\n"
+    "    .param .u32 grid_width,\n"
+    "    .param .u32 grid_height,\n"
+    "    .param .u32 flow_stride_bytes,\n"
+    "    .param .u32 cost_stride_bytes,\n"
     "    .param .f32 alpha,\n"
     "    .param .u64 out_ptr\n"
     ")\n"
     "{\n"
-    "    .reg .pred %p<3>;\n"
-    "    .reg .b32 %r<12>;\n"
-    "    .reg .b64 %rd<14>;\n"
-    "    .reg .f32 %f<8>;\n"
+    "    .reg .pred %p<10>;\n"
+    "    .reg .b32 %r<44>;\n"
+    "    .reg .b64 %rd<26>;\n"
+    "    .reg .f32 %f<26>;\n"
     "    ld.param.u32 %r1, [pitch];\n"
     "    ld.param.u32 %r2, [width];\n"
     "    ld.param.u32 %r3, [height];\n"
+    "    ld.param.u32 %r4, [grid_width];\n"
+    "    ld.param.u32 %r5, [grid_height];\n"
+    "    ld.param.u32 %r36, [flow_stride_bytes];\n"
+    "    ld.param.u32 %r37, [cost_stride_bytes];\n"
     "    ld.param.f32 %f1, [alpha];\n"
     "    ld.param.u64 %rd1, [prev_ptr];\n"
     "    ld.param.u64 %rd2, [curr_ptr];\n"
-    "    ld.param.u64 %rd3, [out_ptr];\n"
-    "    mov.u32 %r4, %r3;\n"
-    "    shr.u32 %r5, %r4, 1;\n"
-    "    add.u32 %r6, %r4, %r5;\n"
-    "    mov.u32 %r7, %ctaid.x;\n"
-    "    mov.u32 %r8, %ntid.x;\n"
-    "    mov.u32 %r9, %tid.x;\n"
-    "    mad.lo.u32 %r10, %r7, %r8, %r9;\n"
-    "    mov.u32 %r7, %ctaid.y;\n"
-    "    mov.u32 %r8, %ntid.y;\n"
-    "    mov.u32 %r9, %tid.y;\n"
-    "    mad.lo.u32 %r11, %r7, %r8, %r9;\n"
-    "    setp.ge.u32 %p1, %r10, %r2;\n"
-    "    @%p1 bra DONE;\n"
-    "    setp.ge.u32 %p2, %r11, %r6;\n"
-    "    @%p2 bra DONE;\n"
-    "    cvt.u64.u32 %rd4, %r11;\n"
-    "    cvt.u64.u32 %rd5, %r1;\n"
-    "    mul.wide.u32 %rd6, %r11, %r1;\n"
-    "    cvt.u64.u32 %rd7, %r10;\n"
-    "    add.u64 %rd8, %rd6, %rd7;\n"
-    "    add.u64 %rd9, %rd1, %rd8;\n"
-    "    add.u64 %rd10, %rd2, %rd8;\n"
-    "    add.u64 %rd11, %rd3, %rd8;\n"
-    "    ld.global.u8 %r1, [%rd9];\n"
-    "    ld.global.u8 %r2, [%rd10];\n"
-    "    cvt.rn.f32.u32 %f2, %r1;\n"
-    "    cvt.rn.f32.u32 %f3, %r2;\n"
-    "    sub.f32 %f4, 1.0, %f1;\n"
-    "    mul.f32 %f5, %f4, %f2;\n"
-    "    fma.rn.f32 %f6, %f1, %f3, %f5;\n"
-    "    cvt.rni.u32.f32 %r3, %f6;\n"
-    "    st.global.u8 [%rd11], %r3;\n"
-    "DONE:\n"
+    "    ld.param.u64 %rd3, [fwd_flow_ptr];\n"
+    "    ld.param.u64 %rd5, [cost_ptr];\n"
+    "    ld.param.u64 %rd6, [out_ptr];\n"
+    "    mov.u32 %r6, %ctaid.x;\n"
+    "    mov.u32 %r7, %ntid.x;\n"
+    "    mov.u32 %r8, %tid.x;\n"
+    "    mad.lo.u32 %r9, %r6, %r7, %r8;\n"
+    "    mov.u32 %r10, %ctaid.y;\n"
+    "    mov.u32 %r11, %ntid.y;\n"
+    "    mov.u32 %r12, %tid.y;\n"
+    "    mad.lo.u32 %r13, %r10, %r11, %r12;\n"
+    "    shr.u32 %r14, %r3, 1;\n"
+    "    add.u32 %r15, %r3, %r14;\n"
+    "    setp.ge.u32 %p1, %r9, %r2;\n"
+    "    @%p1 bra L_WARP_DONE;\n"
+    "    setp.ge.u32 %p2, %r13, %r15;\n"
+    "    @%p2 bra L_WARP_DONE;\n"
+    "    mul.wide.u32 %rd7, %r13, %r1;\n"
+    "    cvt.u64.u32 %rd8, %r9;\n"
+    "    add.u64 %rd9, %rd7, %rd8;\n"
+    "    add.u64 %rd10, %rd6, %rd9;\n"
+    "    add.u64 %rd11, %rd1, %rd9;\n"
+    "    add.u64 %rd12, %rd2, %rd9;\n"
+    "    sub.f32 %f8, 0f3F800000, %f1;\n"
+    "    setp.eq.u64 %p6, %rd3, 0;\n"
+    "    @%p6 bra L_LINEAR_BLEND;\n"
+    "    setp.lt.u32 %p3, %r13, %r3;\n"
+    "    @!%p3 bra L_UV_GRID;\n"
+    "    mov.u32 %r19, %r13;\n"
+    "    shr.u32 %r16, %r9, 2;\n"
+    "    shr.u32 %r17, %r13, 2;\n"
+    "    bra L_CLAMP_GRID;\n"
+    "L_UV_GRID:\n"
+    "    sub.u32 %r18, %r13, %r3;\n"
+    "    shl.b32 %r19, %r18, 1;\n"
+    "    shr.u32 %r16, %r9, 2;\n"
+    "    shr.u32 %r17, %r19, 2;\n"
+    "L_CLAMP_GRID:\n"
+    "    sub.u32 %r20, %r4, 1;\n"
+    "    min.u32 %r16, %r16, %r20;\n"
+    "    sub.u32 %r21, %r5, 1;\n"
+    "    min.u32 %r17, %r17, %r21;\n"
+    "    add.u32 %r38, %r17, 1;\n"
+    "    min.u32 %r38, %r38, %r21;\n"
+    "    setp.eq.u64 %p4, %rd5, 0;\n"
+    "    @%p4 bra L_WARP_FLOW;\n"
+    "    mad.lo.u32 %r22, %r17, %r37, %r16;\n"
+    "    cvt.u64.u32 %rd13, %r22;\n"
+    "    add.u64 %rd14, %rd5, %rd13;\n"
+    "    ld.global.u8 %r23, [%rd14];\n"
+    "    setp.gt.u32 %p5, %r23, 140;\n"
+    "    @%p5 bra L_LINEAR_BLEND;\n"
+    "L_WARP_FLOW:\n"
+    "    shl.b32 %r24, %r16, 2;\n"
+    "    mad.lo.u32 %r39, %r17, %r36, %r24;\n"
+    "    cvt.u64.u32 %rd15, %r39;\n"
+    "    add.u64 %rd16, %rd3, %rd15;\n"
+    "    ld.global.s16 %r25, [%rd16];\n"
+    "    ld.global.s16 %r26, [%rd16+2];\n"
+    "    mad.lo.u32 %r40, %r38, %r36, %r24;\n"
+    "    cvt.u64.u32 %rd22, %r40;\n"
+    "    add.u64 %rd23, %rd3, %rd22;\n"
+    "    ld.global.s16 %r30, [%rd23];\n"
+    "    ld.global.s16 %r31, [%rd23+2];\n"
+    "    and.b32 %r41, %r19, 3;\n"
+    "    cvt.rn.f32.u32 %f19, %r41;\n"
+    "    mul.f32 %f19, %f19, 0f3E800000;\n" // 0.25f vertical sub-block interpolation weight
+    "    sub.f32 %f20, 0f3F800000, %f19;\n"
+    "    cvt.rn.f32.s32 %f2, %r25;\n"
+    "    cvt.rn.f32.s32 %f17, %r30;\n"
+    "    mul.f32 %f2, %f2, %f20;\n"
+    "    mad.rn.f32 %f2, %f17, %f19, %f2;\n"
+    "    mul.f32 %f2, %f2, 0f3D000000;\n" // 0.03125f = 1/32
+    "    cvt.rn.f32.s32 %f3, %r26;\n"
+    "    cvt.rn.f32.s32 %f18, %r31;\n"
+    "    mul.f32 %f3, %f3, %f20;\n"
+    "    mad.rn.f32 %f3, %f18, %f19, %f3;\n"
+    "    mul.f32 %f3, %f3, 0f3D000000;\n"
+    "    @!%p3 mul.f32 %f3, %f3, 0f3F000000;\n" // UV vertical height is 0.5x of Y; horizontal byte width is 1.0x
+    "    cvt.rn.f32.u32 %f4, %r9;\n"
+    "    cvt.rn.f32.u32 %f5, %r13;\n"
+    "    mul.f32 %f6, %f2, %f1;\n"
+    "    mul.f32 %f7, %f3, %f1;\n"
+    "    mul.f32 %f9, %f2, %f8;\n"
+    "    mul.f32 %f10, %f3, %f8;\n"
+    "    sub.f32 %f11, %f4, %f6;\n"
+    "    sub.f32 %f12, %f5, %f7;\n"
+    "    add.f32 %f13, %f4, %f9;\n"
+    "    add.f32 %f14, %f5, %f10;\n"
+    "    sub.u32 %r20, %r2, 1;\n"
+    "    selp.s32 %r32, 0, %r3, %p3;\n"
+    "    sub.u32 %r33, %r3, 1;\n"
+    "    sub.u32 %r21, %r15, 1;\n"
+    "    selp.s32 %r34, %r33, %r21, %p3;\n"
+    "    and.b32 %r35, %r9, 1;\n"
+    "    cvt.rni.s32.f32 %r27, %f11;\n"
+    "    max.s32 %r27, %r27, 0;\n"
+    "    min.s32 %r27, %r27, %r20;\n"
+    "    @!%p3 and.b32 %r27, %r27, -2;\n"
+    "    @!%p3 or.b32 %r27, %r27, %r35;\n"
+    "    cvt.rni.s32.f32 %r28, %f12;\n"
+    "    max.s32 %r28, %r28, %r32;\n"
+    "    min.s32 %r28, %r28, %r34;\n"
+    "    mul.wide.u32 %rd17, %r28, %r1;\n"
+    "    cvt.u64.u32 %rd18, %r27;\n"
+    "    add.u64 %rd19, %rd17, %rd18;\n"
+    "    add.u64 %rd20, %rd1, %rd19;\n"
+    "    ld.global.u8 %r25, [%rd20];\n"
+    "    cvt.rni.s32.f32 %r27, %f13;\n"
+    "    max.s32 %r27, %r27, 0;\n"
+    "    min.s32 %r27, %r27, %r20;\n"
+    "    @!%p3 and.b32 %r27, %r27, -2;\n"
+    "    @!%p3 or.b32 %r27, %r27, %r35;\n"
+    "    cvt.rni.s32.f32 %r28, %f14;\n"
+    "    max.s32 %r28, %r28, %r32;\n"
+    "    min.s32 %r28, %r28, %r34;\n"
+    "    mul.wide.u32 %rd17, %r28, %r1;\n"
+    "    cvt.u64.u32 %rd18, %r27;\n"
+    "    add.u64 %rd19, %rd17, %rd18;\n"
+    "    add.u64 %rd21, %rd2, %rd19;\n"
+    "    ld.global.u8 %r26, [%rd21];\n"
+    "    cvt.rn.f32.u32 %f15, %r25;\n"
+    "    cvt.rn.f32.u32 %f16, %r26;\n"
+    "    mul.f32 %f15, %f15, %f8;\n"
+    "    mad.rn.f32 %f15, %f16, %f1, %f15;\n"
+    "    cvt.rni.u32.f32 %r23, %f15;\n"
+    "    st.global.u8 [%rd10], %r23;\n"
+    "    bra L_WARP_DONE;\n"
+    "L_LINEAR_BLEND:\n"
+    "    ld.global.u8 %r25, [%rd11];\n"
+    "    ld.global.u8 %r26, [%rd12];\n"
+    "    cvt.rn.f32.u32 %f15, %r25;\n"
+    "    cvt.rn.f32.u32 %f16, %r26;\n"
+    "    mul.f32 %f15, %f15, %f8;\n"
+    "    mad.rn.f32 %f15, %f16, %f1, %f15;\n"
+    "    cvt.rni.u32.f32 %r23, %f15;\n"
+    "    st.global.u8 [%rd10], %r23;\n"
+    "L_WARP_DONE:\n"
     "    ret;\n"
     "}\n";
 
-RtxResult rtx_ngx::launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,
-                               uint32_t pitch, uint32_t width, uint32_t height,
-                               float alpha, uint64_t out_nv12, void* stream) {
+RtxResult rtx_ngx::launchNvofWarpNv12(
+    uint64_t prev_nv12, uint64_t curr_nv12,
+    uint64_t fwd_flow, uint64_t bwd_flow, uint64_t cost_buffer,
+    uint32_t pitch, uint32_t width, uint32_t height,
+    uint32_t grid_width, uint32_t grid_height,
+    float alpha, uint64_t out_nv12, void* stream,
+    uint32_t flow_stride_bytes, uint32_t cost_stride_bytes) {
     if (prev_nv12 == 0 || curr_nv12 == 0 || out_nv12 == 0 || pitch == 0 || width == 0 || height == 0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
@@ -557,26 +676,34 @@ RtxResult rtx_ngx::launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,
         return RTX_ERR_INTERNAL;
     }
     if (pack.interp_kernel == nullptr) {
-        const CUresult res = pack.api.module_load_data(&pack.interp_module, kInterpolatePtx);
+        const CUresult res = pack.api.module_load_data(&pack.interp_module, kNvofWarpPtx);
         if (res != kSuccess) {
-            pack.error = "cuModuleLoadData failed for interpolate PTX: " + std::to_string(res);
+            pack.error = "cuModuleLoadData failed for NVOFA warp PTX: " + std::to_string(res);
             return RTX_ERR_NGX;
         }
-        const CUresult fn_res = pack.api.module_get_function(&pack.interp_kernel, pack.interp_module, "rtx_interpolate_nv12");
+        const CUresult fn_res = pack.api.module_get_function(&pack.interp_kernel, pack.interp_module, "rtx_nvof_warp_nv12");
         if (fn_res != kSuccess || pack.interp_kernel == nullptr) {
-            pack.error = "cuModuleGetFunction failed for rtx_interpolate_nv12";
+            pack.error = "cuModuleGetFunction failed for rtx_nvof_warp_nv12";
             return RTX_ERR_NGX;
         }
     }
     unsigned long long p_prev = prev_nv12;
     unsigned long long p_curr = curr_nv12;
+    unsigned long long p_fwd = fwd_flow;
+    unsigned long long p_bwd = bwd_flow;
+    unsigned long long p_cost = cost_buffer;
     unsigned int p_pitch = pitch;
     unsigned int p_width = width;
     unsigned int p_height = height;
+    unsigned int p_gw = grid_width ? grid_width : (width + 3u) / 4u;
+    unsigned int p_gh = grid_height ? grid_height : (height + 3u) / 4u;
+    unsigned int p_flow_stride = flow_stride_bytes ? flow_stride_bytes : (p_gw * 4u);
+    unsigned int p_cost_stride = cost_stride_bytes ? cost_stride_bytes : p_gw;
     float p_alpha = alpha;
     unsigned long long p_out = out_nv12;
 
-    void* args[] = { &p_prev, &p_curr, &p_pitch, &p_width, &p_height, &p_alpha, &p_out };
+    void* args[] = { &p_prev, &p_curr, &p_fwd, &p_bwd, &p_cost, &p_pitch, &p_width, &p_height,
+                     &p_gw, &p_gh, &p_flow_stride, &p_cost_stride, &p_alpha, &p_out };
     const unsigned block_x = 16;
     const unsigned block_y = 16;
     const unsigned total_rows = height + height / 2;
@@ -591,10 +718,17 @@ RtxResult rtx_ngx::launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,
         if (pack.api.get_error_name != nullptr) {
             (void)pack.api.get_error_name(launched, &name);
         }
-        pack.error = std::string("cuLaunchKernel failed for rtx_interpolate_nv12: ") + name;
+        pack.error = std::string("cuLaunchKernel failed for rtx_nvof_warp_nv12: ") + name;
         return RTX_ERR_INTERNAL;
     }
     return RTX_OK;
+}
+
+RtxResult rtx_ngx::launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,
+                               uint32_t pitch, uint32_t width, uint32_t height,
+                               float alpha, uint64_t out_nv12, void* stream) {
+    return launchNvofWarpNv12(prev_nv12, curr_nv12, 0, 0, 0, pitch, width, height,
+                              (width + 3u) / 4u, (height + 3u) / 4u, alpha, out_nv12, stream);
 }
 
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_ngx_pack_last_error(void) {

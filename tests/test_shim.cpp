@@ -463,3 +463,45 @@ RTX_TEST(shim_probe_json_is_ascii_safe) {
     }
     RTX_CHECK(ascii_only);
 }
+
+RTX_TEST(shim_pe_static_import_table_zero_leak_gate) {
+#if defined(_WIN32)
+    // Native C++26 PE Import Directory parser (replaces tools/audit_imports.ps1
+    // at CTest execution time). Verifies that the running test binary and
+    // any adjacent CineRTX.exe do not statically import NVIDIA driver/SDK DLLs
+    // or dynamic FFmpeg libraries.
+    HMODULE self_mod = GetModuleHandleW(nullptr);
+    RTX_REQUIRE(self_mod != nullptr);
+    const auto* base = reinterpret_cast<const uint8_t*>(self_mod);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    RTX_REQUIRE(dos->e_magic == IMAGE_DOS_SIGNATURE);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    RTX_REQUIRE(nt->Signature == IMAGE_NT_SIGNATURE);
+
+    const auto& imp_dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (imp_dir.VirtualAddress != 0 && imp_dir.Size >= sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+        const auto* desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + imp_dir.VirtualAddress);
+        for (; desc->Name != 0; ++desc) {
+            const char* dll_name = reinterpret_cast<const char*>(base + desc->Name);
+            std::string lower(dll_name ? dll_name : "");
+            for (char& c : lower) {
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            }
+            RTX_CHECK(lower.find("nvcuda") == std::string::npos);
+            RTX_CHECK(lower.find("nvcuvid") == std::string::npos);
+            RTX_CHECK(lower.find("nvencodeapi") == std::string::npos);
+            RTX_CHECK(lower.find("nvofapi") == std::string::npos);
+            RTX_CHECK(lower.find("nvoffruc") == std::string::npos);
+            RTX_CHECK(lower.find("nvinfer") == std::string::npos);
+            RTX_CHECK(lower.find("nvonnxparser") == std::string::npos);
+            RTX_CHECK(lower.find("avcodec") == std::string::npos);
+            RTX_CHECK(lower.find("avformat") == std::string::npos);
+            RTX_CHECK(lower.find("avutil") == std::string::npos);
+            RTX_CHECK(lower.find("swresample") == std::string::npos);
+            RTX_CHECK(lower.find("ws2_32") == std::string::npos);
+        }
+    }
+#else
+    RTX_CHECK(true);
+#endif
+}

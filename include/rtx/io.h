@@ -78,7 +78,7 @@ public:
     // stream to the latest key frame at or before `video_stream_pts` (PTS in
     // the video stream's own time base).  Subsequent readPacket() calls
     // deliver packets from that point.
-    virtual Result<void> seekToKeyframeBefore(int64_t video_stream_pts) { return err(ErrorCode::Unsupported, "this demuxer cannot seek"); }
+    virtual Result<void> seekToKeyframeBefore([[maybe_unused]] int64_t video_stream_pts) { return err(ErrorCode::Unsupported, "this demuxer cannot seek"); }
 };
 
 class IMuxer {

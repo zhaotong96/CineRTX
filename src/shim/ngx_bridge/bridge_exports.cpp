@@ -36,7 +36,9 @@
 #include <string>
 
 #include "d3d12_interop.h"
+#include "nvof_engine.h"
 #include "p010_pack_runtime.h"
+#include "rife_engine.h"
 #if defined(RTX_HAVE_NGX_SDK)
 #include "ngx_d3d12_bridge.h"
 #endif
@@ -118,8 +120,13 @@ struct BridgeImpl {
     size_t upload_bytes = 0;
     uint64_t interp_buffer = 0;
     size_t interp_bytes = 0;
+    std::unique_ptr<rtx_ngx::NvofEngine> nvof_engine;
+    std::unique_ptr<rtx_ngx::RifeEngine> rife_engine;
 
     ~BridgeImpl() {
+        if (rife_engine) {
+            rife_engine.reset();
+        }
         // The core must destroy its NVENC session before the bridge, but even
         // a misordered caller gets a safe teardown: flush NGX first (waits for
         // the outstanding signal), then free the P010 ring while the interop
@@ -1109,7 +1116,8 @@ RTX_SHIM_API uint64_t RTX_SHIM_CALL rtx_ngx_bridge_get_interp_buffer(
     BridgeImpl* impl = asBridge(bridge);
     if (!impl->interop || !impl->interop->valid()) return 0;
     std::lock_guard<std::mutex> lock(impl->remaster_mutex);
-    const size_t needed = static_cast<size_t>(width) * height * 3u / 2u;
+    const uint32_t aligned_width = std::max<uint32_t>(width, (width + 511u) & ~511u);
+    const size_t needed = static_cast<size_t>(aligned_width) * height * 3u / 2u;
     if (impl->interp_buffer != 0 && impl->interp_bytes >= needed) {
         return impl->interp_buffer;
     }
@@ -1141,6 +1149,12 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_nv12(
         return RTX_ERR_INVALID_ARGUMENT;
     }
     std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    std::string ctx_err;
+    if (!impl->interop->bind_context(&ctx_err)) {
+        impl->error = "rtx_ngx_bridge_nvof: " + ctx_err;
+        return RTX_ERR_INTERNAL;
+    }
+
     uint32_t width = impl->config.input_width ? impl->config.input_width : pitch;
     uint32_t height = impl->config.input_height ? impl->config.input_height : 1080;
     if (out_nv12 == 0) {
@@ -1162,8 +1176,159 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_nv12(
         }
         out_nv12 = impl->interp_buffer;
     }
-    return rtx_ngx::launchInterpolateNv12(prev_nv12, curr_nv12, pitch, width, height, alpha, out_nv12,
-                                         impl->interop->pack_stream());
+
+    // Lazy initialization of hardware NVOFA engine
+    if (!impl->nvof_engine || impl->nvof_engine->width() != width || impl->nvof_engine->height() != height) {
+        impl->nvof_engine = std::make_unique<rtx_ngx::NvofEngine>();
+        std::string of_err;
+        if (!impl->nvof_engine->init(impl->interop->context(), width, height, impl->interop->pack_stream(), &of_err)) {
+            // NVOFA fallback: launch warp with identity flow (scene bypass)
+            return rtx_ngx::launchNvofWarpNv12(prev_nv12, curr_nv12, 0, 0, 0, pitch, width, height,
+                                               (width + 3u) / 4u, (height + 3u) / 4u, alpha, out_nv12,
+                                               impl->interop->pack_stream());
+        }
+    }
+
+    uint64_t fwd_flow = 0;
+    uint64_t bwd_flow = 0;
+    uint64_t cost_buffer = 0;
+    std::string exec_err;
+    if (!impl->nvof_engine->execute(prev_nv12, curr_nv12, pitch, impl->interop->pack_stream(),
+                                   &fwd_flow, &bwd_flow, &cost_buffer, &exec_err)) {
+        const RtxResult fb_res = rtx_ngx::launchNvofWarpNv12(
+            prev_nv12, curr_nv12, 0, 0, 0, pitch, width, height,
+            (width + 3u) / 4u, (height + 3u) / 4u, alpha, out_nv12,
+            impl->interop->pack_stream(), 0, 0);
+        if (fb_res == RTX_OK) {
+            std::string sync_err;
+            (void)impl->interop->stream_synchronize(impl->interop->pack_stream(), &sync_err);
+        }
+        return fb_res;
+    }
+
+    const RtxResult warp_res = rtx_ngx::launchNvofWarpNv12(
+        prev_nv12, curr_nv12, fwd_flow, bwd_flow, cost_buffer, pitch, width, height,
+        impl->nvof_engine->gridWidth(), impl->nvof_engine->gridHeight(),
+        alpha, out_nv12, impl->interop->pack_stream(),
+        impl->nvof_engine->flowStrideBytes(), impl->nvof_engine->costStrideBytes());
+    if (warp_res == RTX_OK) {
+        std::string sync_err;
+        (void)impl->interop->stream_synchronize(impl->interop->pack_stream(), &sync_err);
+    }
+    return warp_res;
+}
+
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_init_rife(
+    RtxNgxBridge* bridge,
+    const char* engine_path,
+    uint32_t width,
+    uint32_t height) {
+    if (bridge == nullptr || engine_path == nullptr || width == 0 || height == 0) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    BridgeImpl* impl = asBridge(bridge);
+    if (!impl->interop || !impl->interop->valid()) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    std::string ctx_err;
+    if (!impl->interop->bind_context(&ctx_err)) {
+        impl->error = "rtx_ngx_bridge_init_rife: " + ctx_err;
+        return RTX_ERR_INTERNAL;
+    }
+
+    if (!impl->rife_engine) {
+        impl->rife_engine = std::make_unique<rtx_ngx::RifeEngine>();
+    }
+    std::string err;
+    if (!impl->rife_engine->loadEngine(engine_path, width, height, &err)) {
+        impl->error = "rtx_ngx_bridge_init_rife: " + err;
+        return RTX_ERR_DLL_MISSING;
+    }
+    impl->error.clear();
+    return RTX_OK;
+}
+
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_rife(
+    RtxNgxBridge* bridge,
+    uint64_t prev_nv12,
+    uint64_t curr_nv12,
+    uint32_t pitch,
+    float alpha,
+    uint64_t out_nv12,
+    int32_t full_range,
+    int32_t* scene_cut) {
+    if (bridge == nullptr || prev_nv12 == 0 || curr_nv12 == 0 || pitch == 0) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    BridgeImpl* impl = asBridge(bridge);
+    if (!impl->interop || !impl->interop->valid() || !impl->rife_engine || !impl->rife_engine->isLoaded()) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    std::string ctx_err;
+    if (!impl->interop->bind_context(&ctx_err)) {
+        impl->error = "rtx_ngx_bridge_interpolate_rife: " + ctx_err;
+        return RTX_ERR_INTERNAL;
+    }
+
+    uint32_t height = impl->config.input_height ? impl->config.input_height : 1080;
+    const size_t needed = static_cast<size_t>(pitch) * height * 3u / 2u;
+    if (out_nv12 == 0) {
+        if (impl->interp_buffer == 0 || impl->interp_bytes < needed) {
+            if (impl->interp_buffer != 0) {
+                std::string ignored;
+                (void)impl->interop->free_device(impl->interp_buffer, &ignored);
+                impl->interp_buffer = 0;
+            }
+            uint64_t pointer = 0;
+            size_t p = 0;
+            std::string error;
+            if (!impl->interop->alloc_pitched(&pointer, &p, needed, 1, &error)) {
+                return RTX_ERR_OUT_OF_MEMORY;
+            }
+            impl->interp_buffer = pointer;
+            impl->interp_bytes = needed;
+        }
+        out_nv12 = impl->interp_buffer;
+    } else if (impl->interp_bytes < needed && out_nv12 == impl->interp_buffer) {
+        // Enlarge interp_buffer if caller passed cached pointer but pitch grew
+        std::string ignored;
+        (void)impl->interop->free_device(impl->interp_buffer, &ignored);
+        uint64_t pointer = 0;
+        size_t p = 0;
+        std::string error;
+        if (!impl->interop->alloc_pitched(&pointer, &p, needed, 1, &error)) {
+            return RTX_ERR_OUT_OF_MEMORY;
+        }
+        impl->interp_buffer = pointer;
+        impl->interp_bytes = needed;
+        out_nv12 = impl->interp_buffer;
+    }
+    int32_t local_scene_cut = 0;
+    int32_t rife_res = impl->rife_engine->interpolate(
+        prev_nv12, curr_nv12, pitch, alpha, out_nv12, full_range, &local_scene_cut,
+        impl->interop->pack_stream());
+    if (scene_cut) {
+        *scene_cut = local_scene_cut;
+    }
+    if (rife_res == RTX_OK) {
+        std::string sync_err;
+        (void)impl->interop->stream_synchronize(impl->interop->pack_stream(), &sync_err);
+    } else {
+        impl->error = "rtx_ngx_bridge_interpolate_rife: TensorRT RIFE inference failed";
+    }
+    return rife_res;
+}
+
+RTX_SHIM_API void RTX_SHIM_CALL rtx_ngx_bridge_destroy_rife(
+    RtxNgxBridge* bridge) {
+    if (bridge == nullptr) return;
+    BridgeImpl* impl = asBridge(bridge);
+    std::lock_guard<std::mutex> lock(impl->remaster_mutex);
+    if (impl->rife_engine) {
+        impl->rife_engine.reset();
+    }
 }
 
 }  // extern "C"

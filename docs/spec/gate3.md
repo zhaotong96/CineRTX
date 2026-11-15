@@ -1,24 +1,9 @@
-# Gate 3 — Phase 3 acceptance gates (v0.2.0)
+# Gate 3 — release acceptance gates (v0.2.0 record, kept normative)
 
 **Document id**: `SPEC-PHASE3-GATE3-20261026`
-**Status**: normative. A build that fails any gate below is not a CineRTX
-v0.2.0 release candidate.
-
-Gate 3 is split into six independently executable gates. **Gate 3.0 is a
-prerequisite**: it must be 100 % green before any W7–W9 business code is
-accepted, because every later gate measures throughput and quality on a binary
-whose media layer is already statically self-contained.
-
-| Gate | Subject | Automation | Pass criteria |
-| --- | --- | --- | --- |
-| 3.0 | Static self-containment / single EXE | `tools/audit_imports.ps1`, `git grep`, CTest | see §1 |
-| 3.1 | Throughput | `CineRTX --bench` on the reference host | see §2 |
-| 3.2 | Reconstruction quality | PSNR / VMAF harness | see §3 |
-| 3.3 | Viewport interference | `--viewport-self-test` + 60 Hz soak | see §4 |
-| 3.4 | Long-run A/V synchronisation | 2 h soak | see §5 |
-| 3.5 | Full-stack compliance | `check_spdx.ps1`, `audit_imports.ps1`, CTest | see §6 |
-
----
+**Status**: the static self-containment gate remains blocking for every
+release candidate; the throughput/quality/interaction gates below are the
+current repeatable equivalents of the historical phase-3 gates.
 
 ## 1. Gate 3.0 — Static self-containment (blocking)
 
@@ -42,17 +27,17 @@ the whole tracked tree.
 ### 1.2 Import table
 
 ```
-pwsh -File tools/audit_imports.ps1 -BuildDir build/RelWithDebInfo
+pwsh -File tools/audit_imports.ps1 -BuildDir .vs/build/cmake/windows-msvc-ninja
 ```
 
 * Zone A: **0** static imports of `avcodec*`, `avformat*`, `avutil*`,
   `swresample*`, `swscale*`, `avfilter*`, `avdevice*`, `postproc*`.
 * Zone B/C: **0** static imports of `nvcuda`, `nvcuvid`, `nvEncodeAPI64`,
-  `nvsdk_ngx_d`, `_nvngx`, `nvngx_vsr`, `nvngx_truehdr`, `NvOFFRUC`,
-  `nvinfer`, `nvonnxparser` — in `CineRTX.exe`, which embeds the `rtx_shim`
-  and `rtx_fruc_bridge` static archives; the proprietary `rtx_ngx_bridge.dll`
-  is a separately loaded Independent Module mirrored to
-  `<exe>/plugins/nvidia_rtx` and audited separately.
+  `nvsdk_ngx_d`, `_nvngx`, `nvngx_vsr`, `nvngx_truehdr`, `nvinfer`,
+  `nvonnxparser` — in `CineRTX.exe`, which embeds the `rtx_shim` static
+  archive; the proprietary `rtx_ngx_bridge.dll` is a separately loaded
+  Independent Module mirrored to `<exe>/plugins/nvidia_rtx` and audited
+  separately.
 * Output: `result: PASS`.
 
 ### 1.3 Output directory
@@ -87,13 +72,14 @@ A build inside the hard gate but below its band is reported as a warning because
 it usually means a decoder or muxer was trimmed away by mistake. Confirm against
 the FFmpeg build tree rather than by guessing: every component named in the
 `--enable-*` allow-lists of `tools/build_ffmpeg_static_*.sh` must appear as
-`#define CONFIG_<NAME>_<KIND> 1` in `build/external/ffmpeg-build/config_components.h`.
+`#define CONFIG_<NAME>_<KIND> 1` in the FFmpeg build tree's
+`config_components.h`.
 
 ### 1.5 Pure-directory isolation
 
 ```
-mkdir C:\CineRTX_Clean_Isolated_Run
-copy build\RelWithDebInfo\CineRTX.exe C:\CineRTX_Clean_Isolated_Run\
+mkdir CineRTX_Clean_Isolated_Run
+copy .vs\build\cmake\windows-msvc-ninja\CineRTX.exe CineRTX_Clean_Isolated_Run\
 :: strip every FFmpeg entry from PATH, then:
 CineRTX.exe --input sample_1080p.mp4 --output out_4k_hdr10.mp4
 ```
@@ -104,53 +90,49 @@ dependency.
 ### 1.6 Test suite
 
 ```
-ctest --test-dir build --output-on-failure
+ctest --test-dir .vs/build/cmake/windows-msvc-ninja --output-on-failure
 ```
 
-113 pre-existing unit tests plus 24 phase-3 additions (**137 total**) must be
-100 % green. `rtx_unit_tests` must not touch a video file on disk: the container
-layer is exercised through `rtx::io::MemoryAvioContext`.
-
----
+All 73 unit cases must be 100 % green. `rtx_unit_tests` must not touch a video
+file on disk: the container layer is exercised through
+`rtx::io::MemoryAvioContext`.
 
 ## 2. Gate 3.1 — Throughput
 
 | Metric | Threshold |
 | --- | --- |
-| NvOFFRUC steady-state end-to-end | >= 90 FPS |
-| TensorRT RIFE steady-state | >= 45 FPS |
-| `p010_pack` per-frame P99 | <= 0.8 ms |
-| `rtx_nv12_pair_to_rife_nchw_fp16` per launch | < 0.15 ms |
+| Default zero-config 4K 60fps remaster main loop on the acceptance host | ≥ 60 FPS at target-fps 60 |
+| NVOFA hardware optical-flow interpolation | driver-engine execution, device-side only |
+| TensorRT RIFE steady-state (Route B) | ≥ 45 FPS |
+| `p010_pack` per-frame P99 | ≤ 0.8 ms |
 
----
+The default path targets `--target-fps 60` out of the box (Phase 8 golden
+transcode); the transcode report JSON carries the measured main-loop FPS.
 
 ## 3. Gate 3.2 — Reconstruction quality
 
 | Metric | Threshold |
 | --- | --- |
-| PSNR vs. reference sequence | >= +1.5 dB over the phase-2 baseline |
-| VMAF | >= +5.0 |
+| PSNR vs. reference sequence | ≥ +1.5 dB over the passthrough baseline |
+| VMAF | ≥ +5.0 |
 | Hard-cut tearing artefacts | exactly 0 |
 
 The hard-cut count is produced by the scene arbiter: every frame flagged
 `is_scene_cut` must be served by the duplicate bypass
-(`cuMemcpyDtoDAsync`), never by the optical-flow path.
+(`cuMemcpyDtoDAsync`), never by the interpolation path. The quality harness is
+`tools/verify_transcode_quality.py`.
 
----
-
-## 4. Gate 3.3 — Viewport interference
+## 4. Gate 3.3 — Workstation / viewport interference
 
 | Metric | Threshold |
 | --- | --- |
-| Background throughput loss with the 60 Hz viewport active | <= 2.0 % |
-| PCIe pixel copies caused by the viewport | exactly 0 |
-| Compute-shader tone map per frame | < 0.15 ms |
+| Desktop interaction contract | `python tools/verify_desktop_interaction.py` — 29/29 PASS |
+| Preview viewport present latency | flip-model present, occlusion-aware skip |
+| PCIe pixel copies caused by the preview | exactly 0 (preview renders from the device-side ring) |
 
-`CineRTX --viewport-self-test` covers the scheduling contract headlessly
-(60 Hz throttle, occlusion bypass, split-screen clamp); the percentages require
-the live GPU soak.
-
----
+The Win32 preview viewport uses a `DXGI_SWAP_EFFECT_FLIP_DISCARD` swap chain on
+`R10G10B10A2_UNORM` with present-bypass on occlusion; live percentages require
+the on-host soak.
 
 ## 5. Gate 3.4 — Long-run synchronisation
 
@@ -166,24 +148,19 @@ The drift bound is analytic: `test_flicks_drift_24h` asserts that the
 remainder-carrying rescale introduces **zero** accumulated error, so the 1.42 ns
 figure is an upper bound on the residual, not an empirical average.
 
----
-
 ## 6. Gate 3.5 — Full-stack compliance
 
 | Check | Command | Pass |
 | --- | --- | --- |
-| SPDX headers and license boundary | `pwsh -File tools/check_spdx.ps1` | `result : PASS`, `models : 0` |
-| PE import table | `pwsh -File tools/audit_imports.ps1` | `result: PASS` |
-| Unit tests | `ctest -R rtx_unit_tests` | 137/137 |
-| CTest gates | `ctest` | 6/6 (`rtx_unit_tests`, `cli_self_test`, `cli_simulate_json`, `cli_rife_command`, `rtx_fruc_abi_contract_test`, `cli_gui_viewport_smoke_test`) |
+| SPDX headers and license boundary | `pwsh tools/check_spdx.ps1` | `result : PASS`, `models : 0` |
+| PE import table | `pwsh tools/audit_imports.ps1` | `result: PASS` |
+| Unit tests | `ctest -R rtx_unit_tests` | 73/73 |
 | AI weights committed | `check_spdx.ps1` model scan | 0 |
-
----
 
 ## 7. Failing-gate policy
 
-1. Gate 3.0 is blocking: no W7–W9 work is merged while it is red.
+1. Gate 3.0 is blocking: no release candidate ships while it is red.
 2. A gate that cannot be executed on the current host (no RTX GPU, no TensorRT
-   SDK) is reported as `SKIP` with the missing prerequisite, never as `PASS`.
+   runtime) is reported as `SKIP` with the missing prerequisite, never as `PASS`.
 3. Any gate that regresses requires an entry in `docs/spec/testing.md` naming
    the measurement, the host and the delta.

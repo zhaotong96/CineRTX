@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "ui": {
+    "lang": "zh",
+    "autoOutput": true,
+    "showLog": true,
+    "workspace": "encoder"
+  },
+  "engine": {
+    "path": "CineRTX.exe",
+    "workDir": ""
+  },
+  "profile": {
+    "input": "",
+    "output": "",
+    "codec": "av1",
+    "preset": 5,
+    "rateControl": "cbr",
+    "bitrateKbps": 0,
+    "qp": 24,
+    "resolution": "4k",
+    "geometry": "auto",
+    "vsrEnabled": true,
+    "vsrQuality": 4,
+    "peakNits": 1000,
+    "fpsMode": "60-nvofa",
+    "rifeEngine": "",
+    "copyAudio": true,
+    "hdr10plus": false,
+    "lut": "",
+    "gpu": 0,
+    "frames": 0
+  },
+  "queue": [],
+  "player": {
+    "input": "",
+    "abMode": "split",
+    "splitPos": 50,
+    "osd": true,
+    "loop": true,
+    "speed": 1.0,
+    "audioTrack": 0,
+    "subTrack": -1
+  },
+  "nle": {
+    "sequenceName": "4K_60FPS_HDR10_Master_Seq",
+    "playheadMs": 0,
+    "inMs": 0,
+    "outMs": 10000,
+    "zoom": 100,
+    "tool": "select",
+    "selectedClipId": "clip-1",
+    "mediaBin": [],
+    "tracks": [
+      {
+        "id": "V2",
+        "label": "V2 · LUT & HDR10+ 调色调整层 (Adjustment Layer)",
+        "kind": "adjustment",
+        "mute": false,
+        "lock": false,
+        "visible": true,
+        "clips": [
+          {
+            "id": "clip-lut",
+            "name": "HDR10+ LUT Grade",
+            "startMs": 0,
+            "endMs": 10000,
+            "tone": "gold"
+          }
+        ]
+      },
+      {
+        "id": "V1",
+        "label": "V1 · 4K VSR + FRUC 视频主轨 (Video Master)",
+        "kind": "video",
+        "mute": false,
+        "lock": false,
+        "visible": true,
+        "clips": [
+          {
+            "id": "clip-1",
+            "name": "Master Clip · 4K HDR10",
+            "startMs": 0,
+            "endMs": 10000,
+            "tone": "green"
+          }
+        ]
+      },
+      {
+        "id": "A1",
+        "label": "A1 · 多声道无损直通音轨 (Audio Stream Copy)",
+        "kind": "audio",
+        "mute": false,
+        "lock": false,
+        "visible": true,
+        "clips": [
+          {
+            "id": "clip-a1",
+            "name": "Lossless Audio Passthrough",
+            "startMs": 0,
+            "endMs": 10000,
+            "tone": "cyan"
+          }
+        ]
+      },
+      {
+        "id": "S1",
+        "label": "S1 · 内挂字幕直通轨 (Subtitle Passthrough)",
+        "kind": "subtitle",
+        "mute": false,
+        "lock": false,
+        "visible": true,
+        "clips": [
+          {
+            "id": "clip-s1",
+            "name": "Embedded Subtitles",
+            "startMs": 0,
+            "endMs": 10000,
+            "tone": "violet"
+          }
+        ]
+      }
+    ]
+  }
+}

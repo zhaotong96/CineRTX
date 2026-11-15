@@ -135,6 +135,10 @@ bool NgxRemasterBridge::bindEmbedded(std::string* error) {
     upload_frame_ = &rtx_ngx_bridge_upload_frame;
     interpolate_nv12_ = &rtx_ngx_bridge_interpolate_nv12;
     get_interp_buffer_ = &rtx_ngx_bridge_get_interp_buffer;
+    init_rife_ = &rtx_ngx_bridge_init_rife;
+    interpolate_rife_ = &rtx_ngx_bridge_interpolate_rife;
+    build_rife_engine_ = &rtx_ngx_bridge_build_rife_engine;
+    destroy_rife_ = &rtx_ngx_bridge_destroy_rife;
     embedded_ = true;
     path_ = "embedded:rtx_ngx_bridge";
     error_.clear();
@@ -237,6 +241,10 @@ bool NgxRemasterBridge::open(std::string* error) {
         (void)resolve(upload_frame_, "rtx_ngx_bridge_upload_frame", nullptr);
         (void)resolve(interpolate_nv12_, "rtx_ngx_bridge_interpolate_nv12", nullptr);
         (void)resolve(get_interp_buffer_, "rtx_ngx_bridge_get_interp_buffer", nullptr);
+        (void)resolve(init_rife_, "rtx_ngx_bridge_init_rife", nullptr);
+        (void)resolve(interpolate_rife_, "rtx_ngx_bridge_interpolate_rife", nullptr);
+        (void)resolve(build_rife_engine_, "rtx_ngx_bridge_build_rife_engine", nullptr);
+        (void)resolve(destroy_rife_, "rtx_ngx_bridge_destroy_rife", nullptr);
 
         error_.clear();
         if (error != nullptr) {
@@ -283,6 +291,12 @@ void NgxRemasterBridge::close() {
     preview_buffer_ = nullptr;
     download_preview_ = nullptr;
     upload_frame_ = nullptr;
+    interpolate_nv12_ = nullptr;
+    get_interp_buffer_ = nullptr;
+    init_rife_ = nullptr;
+    interpolate_rife_ = nullptr;
+    build_rife_engine_ = nullptr;
+    destroy_rife_ = nullptr;
 }
 
 RtxResult NgxRemasterBridge::queryCaps(RtxNgxBridgeCaps* caps) const {
@@ -351,6 +365,31 @@ RtxResult NgxRemasterBridge::interpolateNv12(RtxNgxBridge* bridge, uint64_t prev
 
 uint64_t NgxRemasterBridge::getInterpBuffer(RtxNgxBridge* bridge, uint32_t width, uint32_t height) const {
     return get_interp_buffer_ != nullptr ? get_interp_buffer_(bridge, width, height) : 0;
+}
+
+int32_t NgxRemasterBridge::initRife(RtxNgxBridge* bridge, const char* engine_path, uint32_t width, uint32_t height) const {
+    return init_rife_ != nullptr ? init_rife_(bridge, engine_path, width, height) : RTX_ERR_DLL_MISSING;
+}
+
+int32_t NgxRemasterBridge::interpolateRife(RtxNgxBridge* bridge, uint64_t prev_nv12, uint64_t curr_nv12,
+                                         uint32_t pitch, float alpha, uint64_t out_nv12, int32_t full_range,
+                                         int32_t* scene_cut) const {
+    return interpolate_rife_ != nullptr
+               ? interpolate_rife_(bridge, prev_nv12, curr_nv12, pitch, alpha, out_nv12, full_range, scene_cut)
+               : RTX_ERR_DLL_MISSING;
+}
+
+int32_t NgxRemasterBridge::buildRifeEngine(const char* onnx_path, const char* engine_out_path,
+                                         uint32_t width, uint32_t height, char* err_buf, uint32_t err_cap) const {
+    return build_rife_engine_ != nullptr
+               ? build_rife_engine_(onnx_path, engine_out_path, width, height, err_buf, err_cap)
+               : RTX_ERR_DLL_MISSING;
+}
+
+void NgxRemasterBridge::destroyRife(RtxNgxBridge* bridge) const {
+    if (destroy_rife_ != nullptr) {
+        destroy_rife_(bridge);
+    }
 }
 
 const char* NgxRemasterBridge::lastError(RtxNgxBridge* bridge) const {

@@ -64,6 +64,14 @@ public:
     RtxResult interpolateNv12(RtxNgxBridge* bridge, uint64_t prev_nv12, uint64_t curr_nv12,
                              uint32_t pitch, float alpha, uint64_t out_nv12) const;
     uint64_t getInterpBuffer(RtxNgxBridge* bridge, uint32_t width, uint32_t height) const;
+    int32_t initRife(RtxNgxBridge* bridge, const char* engine_path, uint32_t width, uint32_t height) const;
+    int32_t interpolateRife(RtxNgxBridge* bridge, uint64_t prev_nv12, uint64_t curr_nv12,
+                           uint32_t pitch, float alpha, uint64_t out_nv12, int32_t full_range,
+                           int32_t* scene_cut) const;
+    int32_t buildRifeEngine(const char* onnx_path, const char* engine_out_path,
+                           uint32_t width, uint32_t height, char* err_buf, uint32_t err_cap) const;
+    void destroyRife(RtxNgxBridge* bridge) const;
+    bool hasRifeApi() const noexcept { return init_rife_ != nullptr; }
     bool hasPhase7Api() const noexcept { return set_lut3d_ != nullptr; }
     const char* lastError(RtxNgxBridge* bridge) const;
 
@@ -98,6 +106,10 @@ private:
                                             uint64_t*) = nullptr;
     int32_t(RTX_SHIM_CALL* interpolate_nv12_)(RtxNgxBridge*, uint64_t, uint64_t, uint32_t, float, uint64_t) = nullptr;
     uint64_t(RTX_SHIM_CALL* get_interp_buffer_)(RtxNgxBridge*, uint32_t, uint32_t) = nullptr;
+    int32_t(RTX_SHIM_CALL* init_rife_)(RtxNgxBridge*, const char*, uint32_t, uint32_t) = nullptr;
+    int32_t(RTX_SHIM_CALL* interpolate_rife_)(RtxNgxBridge*, uint64_t, uint64_t, uint32_t, float, uint64_t, int32_t, int32_t*) = nullptr;
+    int32_t(RTX_SHIM_CALL* build_rife_engine_)(const char*, const char*, uint32_t, uint32_t, char*, uint32_t) = nullptr;
+    void(RTX_SHIM_CALL* destroy_rife_)(RtxNgxBridge*) = nullptr;
 };
 
 }  // namespace rtx

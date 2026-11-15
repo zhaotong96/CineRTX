@@ -4,6 +4,7 @@
 #include "rtx/geometry.h"
 #include "bitstream.h"
 #include "rtx/hdr.h"
+#include "rtx/logger.h"
 #include "rtx/lut3d.h"
 #include "rtx/ngx_remaster.h"
 #include "rtx/nvidia_shim.h"
@@ -135,16 +136,11 @@ void applyHdrDefaults(Hdr10Metadata& hdr) {
 }
 Rational chooseFrameRate(const HwTranscodeOptions& options, const MediaInfo& info) {
     const Rational src_fps = (info.frame_rate.valid() && info.frame_rate.num > 0) ? info.frame_rate : Rational{24, 1};
-    if (options.fps.valid() && options.fps.num > 0) return options.fps;
     if (options.fruc_enabled) {
         if (options.target_fps.valid() && options.target_fps.num > 0) return options.target_fps;
         if (src_fps.toDouble() < 59.9) return Rational{60, 1};
     }
     return src_fps;
-}
-int chooseOutputDepth(const HwTranscodeOptions& options, const MediaInfo& info) {
-    if (options.bit_depth == 8 || options.bit_depth == 10) return options.bit_depth;
-    return info.bit_depth > 8 ? 10 : 8;
 }
 
 struct DecoderDeleter {
@@ -186,7 +182,7 @@ std::string HwTranscodeReport::toJson() const {
         "  \"input_width\": {}, \"input_height\": {}, \"output_width\": {}, \"output_height\": {}, \"output_bit_depth\": {}, \"packets_read\": {}, \"packets_written\": {}, \"frames_decoded\": {}, \"frames_encoded\": {}, \"bitstream_bytes\": {},\n"
         "  \"decoder_device_to_device_bytes\": {}, \"decoder_device_to_host_bytes\": {}, \"decoder_host_pixel_copies\": {}, \"encoder_host_to_device_bytes\": {}, \"encoder_host_pixel_copies\": {}, \"zero_copy_main_loop\": {},\n"
         "  \"elapsed_ms\": {}, \"main_loop_ms\": {}, \"remaster_preprocess_ms\": {}, \"remaster_ngx_ms\": {}, \"remaster_pack_kernel_ms\": {}, \"remaster_frame_ms\": {}, \"remaster_pack_kernel_max_ms\": {},\n"
-        "  \"remaster_pack_launches\": {}, \"vsr_quality\": {}, \"measured_max_cll_nits\": {}, \"measured_max_fall_nits\": {}, \"frames_interpolated\": {}, \"fruc_scene_cuts\": {}, \"fruc_backend\": \"{}\"\n}}\n",
+        "  \"remaster_pack_launches\": {}, \"vsr_quality\": {}, \"measured_max_cll_nits\": {}, \"measured_max_fall_nits\": {}, \"frames_interpolated\": {}, \"fruc_scene_cuts\": {}, \"fruc_failures\": {}, \"fruc_backend\": \"{}\"\n}}\n",
         jsonEscape(backend), jsonEscape(device), jsonEscape(path), jsonEscape(input_container), jsonEscape(output_container),
         jsonEscape(input_codec), jsonEscape(output_codec), input_width, input_height, output_width, output_height, output_bit_depth,
         packets_read, packets_written, frames_decoded, frames_encoded, bitstream_bytes,
@@ -194,7 +190,7 @@ std::string HwTranscodeReport::toJson() const {
         encoder_host_to_device_bytes, encoder_host_pixel_copies, zero_copy_main_loop ? "true" : "false",
         elapsed_ms, main_loop_ms, remaster_preprocess_ms, remaster_ngx_ms, remaster_pack_kernel_ms,
         remaster_frame_ms, remaster_pack_kernel_max_ms, remaster_pack_launches, vsr_quality,
-        measured_max_cll_nits, measured_max_fall_nits, frames_interpolated, fruc_scene_cuts, jsonEscape(fruc_backend));
+        measured_max_cll_nits, measured_max_fall_nits, frames_interpolated, fruc_scene_cuts, fruc_failures, jsonEscape(fruc_backend));
 }
 
 // ---------------------------------------------------------------------------
@@ -286,23 +282,12 @@ private:
              (diagnostics_.device.compute_major == 8 && diagnostics_.device.compute_minor < 9))) {
             options_.codec = VideoCodec::HEVC;
             report.output_codec = "hevc";
-            std::cerr << "[WARN] GPU (SM " << diagnostics_.device.compute_major << "."
-                      << diagnostics_.device.compute_minor
-                      << ") lacks hardware AV1 NVENC; automatically falling back to HEVC Main10.\n";
+            logWarn(std::format("GPU (SM {}.{}) lacks hardware AV1 NVENC; automatically falling back to HEVC Main10.",
+                                diagnostics_.device.compute_major, diagnostics_.device.compute_minor));
         }
 
         const int source_depth = info_.bit_depth > 8 ? 10 : 8;
-        int output_depth = 10;
-        if (!is_remaster) {
-            output_depth = chooseOutputDepth(options, info_);
-            if (output_depth != source_depth) {
-                return err(ErrorCode::Unsupported, "stage-1 zero-copy transcode preserves the source bit depth",
-                           "source bit depth is " + std::to_string(source_depth) + ", requested " + std::to_string(output_depth));
-            }
-            if (output_depth > 8 && options.codec == VideoCodec::H264) {
-                return err(ErrorCode::Unsupported, "H.264 NVENC does not support 10-bit encoding");
-            }
-        }
+        const int output_depth = 10;
         report.output_bit_depth = output_depth;
 
         const bool is_portrait_input = (info_.width > 0 && info_.height > 0 && info_.width < info_.height);
@@ -325,26 +310,18 @@ private:
             report.output_height = target_height_;
         }
 
-        const bool enable_truehdr = options.hdr;
+        const bool enable_truehdr = true;
         // Phase 6.1 微瑕 1: bind the GUI/CLI peak-nits option end to end.
         const int clamped_nits = std::clamp(options.peak_nits > 0 ? options.peak_nits : 1000, 400, 4000);
         if (is_remaster) {
-            if (enable_truehdr) {
-                TrueHdrParameters hdr_params{};
-                hdr_params.max_luminance = clamped_nits;
-                const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(hdr_params);
-                if (!canonical.has_value()) {
-                    return std::unexpected(canonical.error());
-                }
-                hdr_ = canonical.value();
-                applyHdrDefaults(hdr_);
-            } else {
-                hdr_.enabled = false;
-                hdr_.color.primaries = ColorPrimaries::BT709;
-                hdr_.color.transfer = TransferFunction::BT709;
-                hdr_.color.matrix = MatrixCoefficients::BT709;
-                hdr_.color.range = ColorRange::Limited;
+            TrueHdrParameters hdr_params{};
+            hdr_params.max_luminance = clamped_nits;
+            const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(hdr_params);
+            if (!canonical.has_value()) {
+                return std::unexpected(canonical.error());
             }
+            hdr_ = canonical.value();
+            applyHdrDefaults(hdr_);
 
             RtxNgxBridgeConfig bridge_config{};
             std::memcpy(bridge_config.luid, diagnostics_.device.luid, sizeof(bridge_config.luid));
@@ -415,15 +392,6 @@ private:
                     preview_pitch_ = pitch;
                 }
             }
-        } else {
-            if (options.hdr) {
-                hdr_ = info_.hdr;
-                if (!hdr_.enabled && info_.color.transfer != TransferFunction::BT709) {
-                    hdr_.enabled = true;
-                    hdr_.color = info_.color;
-                }
-                applyHdrDefaults(hdr_);
-            }
         }
 
         RtxDecoderConfig decoder_config{};
@@ -476,6 +444,10 @@ private:
         output_info_.color = hdr_.color;
         output_info_.bit_depth = output_depth;
         frame_rate_ = chooseFrameRate(options, info_);
+        // Phase 9 (RC-6): propagate the target frame rate into the container
+        // stream info; otherwise the muxer writes the source fps even when
+        // NVENC encodes the 120fps stream.
+        output_info_.frame_rate = frame_rate_;
         return {};
     }
 
@@ -520,7 +492,7 @@ public:
         header.resize(header_size);
         output_info_.annex_b = (options_.codec != VideoCodec::AV1);
         output_info_.extradata = (options_.codec == VideoCodec::AV1)
-            ? makeAv1ConfigRecord(header.data(), header.size(), options_.hdr)
+            ? makeAv1ConfigRecord(header.data(), header.size(), true)
             : (options_.codec == VideoCodec::HEVC ? makeHevcConfigRecord(header.data(), header.size())
                                                   : makeAvcConfigRecord(header.data(), header.size()));
         if (output_info_.extradata.empty()) return err(ErrorCode::Internal, "cannot build codec config record");
@@ -650,12 +622,9 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
     if (options.input_path.empty() || options.output_path.empty()) {
         return err(ErrorCode::InvalidArgument, "remaster transcode requires input and output paths");
     }
-    if (options.codec != VideoCodec::HEVC && options.codec != VideoCodec::AV1 && options.codec != VideoCodec::H264) {
-        return err(ErrorCode::Unsupported, "the VSR-remaster path supports AV1, HEVC and H.264 output");
-    }
-    if (options.hdr && options.codec == VideoCodec::H264) {
+    if (options.codec != VideoCodec::HEVC && options.codec != VideoCodec::AV1) {
         return err(ErrorCode::InvalidArgument,
-                   "TrueHDR requires 10-bit encoding (AV1 or HEVC); H.264 only supports 8-bit SDR");
+                   "the 10-bit HDR10 VSR-remaster pipeline supports AV1 and HEVC Main10 output only");
     }
     if (options.vsr_quality < 1 || options.vsr_quality > 4) {
         return err(ErrorCode::InvalidArgument, "vsr_quality must be in 1..4");
@@ -737,6 +706,50 @@ RtxNgxRemasterStats previous_stats{};
         return consumer_failed || cancelled();
     };
 
+    const bool fruc_enabled = options.fruc_enabled;
+    const bool rife_requested = fruc_enabled && !options.rife_engine_path.empty();
+    uint64_t fruc_out_buffer = 0;
+    bool rife_active = false;
+
+    if (rife_requested) {
+        if (!session.bridgeLoader().hasRifeApi()) {
+            return err(ErrorCode::Unsupported,
+                       "loaded rtx_ngx_bridge.dll does not export the Phase 8 RIFE API (ABI < 4)");
+        }
+        const uint32_t in_w = static_cast<uint32_t>(session.info().width);
+        const uint32_t in_h = static_cast<uint32_t>(session.info().height);
+        const std::string engine_path_str = options.rife_engine_path.string();
+        const int32_t r_res = session.bridgeLoader().initRife(
+            session.bridge(), engine_path_str.c_str(), in_w, in_h);
+        if (r_res != RTX_OK) {
+            return err(mapShimResult(static_cast<RtxResult>(r_res)),
+                       describe("rtx_ngx_bridge_init_rife", static_cast<RtxResult>(r_res),
+                                session.bridgeLoader().lastError(session.bridge())));
+        }
+        rife_active = true;
+        report.fruc_backend = "rife-trt";
+        fruc_out_buffer = session.bridgeLoader().getInterpBuffer(session.bridge(), in_w, in_h);
+        logInfo(std::format("FRUC Route B active: TensorRT RIFE ({})", engine_path_str));
+    } else if (fruc_enabled) {
+        report.fruc_backend = "nvof";
+        fruc_out_buffer = session.bridgeLoader().getInterpBuffer(
+            session.bridge(), static_cast<uint32_t>(session.info().width), static_cast<uint32_t>(session.info().height));
+        logInfo("FRUC Route A active: NVOFA hardware optical flow");
+    } else {
+        logInfo("FRUC disabled: preserving source frame rate");
+    }
+
+    struct RifeCleanupGuard {
+        NgxRemasterBridge& loader;
+        RtxNgxBridge* bridge;
+        bool active;
+        ~RifeCleanupGuard() {
+            if (active && bridge && loader.hasRifeApi()) {
+                loader.destroyRife(bridge);
+            }
+        }
+    } rife_guard{session.bridgeLoader(), session.bridge(), rife_active};
+
     std::thread encode_thread([&]() {
         for (;;) {
             PendingEncode item;
@@ -796,6 +809,23 @@ RtxNgxRemasterStats previous_stats{};
             reportProgress();
         }
     });
+
+    struct ThreadJoiner {
+        std::thread& th;
+        std::mutex& mtx;
+        std::condition_variable& cv;
+        bool& done;
+        ~ThreadJoiner() {
+            if (th.joinable()) {
+                {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    done = true;
+                }
+                cv.notify_all();
+                th.join();
+            }
+        }
+    } joiner{encode_thread, pipeline_mutex, queue_ready, producer_done};
 
     auto processFrame = [&](const RtxFrameDesc& frame, int64_t pts_override = -1,
                             bool release_slot = true) -> Result<void> {
@@ -922,12 +952,11 @@ RtxNgxRemasterStats previous_stats{};
         return consumer_failed ? consumer_error : Result<void>{};
     };
 
-    const bool fruc_enabled = options.fruc_enabled;
-    const uint64_t fruc_out_buffer = fruc_enabled ? session.bridgeLoader().getInterpBuffer(
-        session.bridge(), static_cast<uint32_t>(session.info().width), static_cast<uint32_t>(session.info().height)) : 0;
-    if (fruc_enabled && fruc_out_buffer != 0) report.fruc_backend = "nvof";
-
     bool has_prev_frame = false;
+    // Phase 9.1 (RW-P9-04): per-session [FRUC-ERROR] log quota. The previous
+    // static thread_local counter survived across transcode sessions in the
+    // resident GUI/WebUI process and permanently deafened later tasks.
+    int fruc_error_logs = 0;
     RtxFrameDesc prev_frame{};
     int64_t prev_pts_flicks = 0, next_out_pts_flicks = -1;
     constexpr int64_t kFlicksPerTick90k = 7840;
@@ -977,25 +1006,76 @@ RtxNgxRemasterStats previous_stats{};
                 if (!res.has_value()) return res;
             } else {
                 const uint32_t pitch = prev_frame.pitches[0];
-                const RtxResult status = session.bridgeLoader().interpolateNv12(
-                    session.bridge(),
-                    prev_frame.planes[0],
-                    frame.planes[0],
-                    pitch,
-                    alpha,
-                    fruc_out_buffer);
-                if (status == RTX_OK) {
-                    ++report.frames_interpolated;
-                    RtxFrameDesc interp_frame = prev_frame;
-                    interp_frame.planes[0] = fruc_out_buffer;
-                    interp_frame.planes[1] = fruc_out_buffer + static_cast<uint64_t>(pitch) * prev_frame.height;
-                    interp_frame.pts = out_pts_90k;
-                    interp_frame.slot_index = 0xFFFFFFFF;
-                    auto res = processFrame(interp_frame, out_pts_90k, /*release_slot=*/false);
-                    if (!res.has_value()) return res;
+                if (rife_active) {
+                    int32_t scene_cut = 0;
+                    const int32_t status = session.bridgeLoader().interpolateRife(
+                        session.bridge(),
+                        prev_frame.planes[0],
+                        frame.planes[0],
+                        pitch,
+                        alpha,
+                        fruc_out_buffer,
+                        input_full_range,
+                        &scene_cut);
+                    if (status == RTX_OK) {
+                        if (scene_cut != 0) {
+                            ++report.fruc_scene_cuts;
+                            // Phase 9 (RC-2): nearest-neighbor phase step at
+                            // hard cuts instead of freezing the whole window
+                            // on the previous shot.
+                            const RtxFrameDesc& fallback_target =
+                                (alpha < 0.5f) ? prev_frame : frame;
+                            auto res = processFrame(fallback_target, out_pts_90k, /*release_slot=*/false);
+                            if (!res.has_value()) return res;
+                        } else {
+                            ++report.frames_interpolated;
+                            RtxFrameDesc interp_frame = prev_frame;
+                            interp_frame.planes[0] = fruc_out_buffer;
+                            interp_frame.planes[1] = fruc_out_buffer + static_cast<uint64_t>(pitch) * prev_frame.height;
+                            interp_frame.pts = out_pts_90k;
+                            interp_frame.slot_index = 0xFFFFFFFF;
+                            auto res = processFrame(interp_frame, out_pts_90k, /*release_slot=*/false);
+                            if (!res.has_value()) return res;
+                        }
+                    } else {
+                        // Phase 9 (RC-2): interpolation failures must never be
+                        // swallowed silently. Rate-limit the first five errors
+                        // (per-session quota, see RW-P9-04), count every
+                        // failure, and fall back to the nearest source frame
+                        // with a phase step.
+                        ++report.fruc_failures;
+                        if (fruc_error_logs < 5) {
+                            ++fruc_error_logs;
+                            logError(std::format(
+                                "[FRUC-ERROR] RIFE interpolation failed (code={}): {} — falling back to nearest source frame",
+                                status, session.bridgeLoader().lastError(session.bridge())));
+                        }
+                        const RtxFrameDesc& fallback_target =
+                            (alpha < 0.5f) ? prev_frame : frame;
+                        auto res = processFrame(fallback_target, out_pts_90k, /*release_slot=*/false);
+                        if (!res.has_value()) return res;
+                    }
                 } else {
-                    auto res = processFrame(prev_frame, out_pts_90k, /*release_slot=*/false);
-                    if (!res.has_value()) return res;
+                    const RtxResult status = session.bridgeLoader().interpolateNv12(
+                        session.bridge(),
+                        prev_frame.planes[0],
+                        frame.planes[0],
+                        pitch,
+                        alpha,
+                        fruc_out_buffer);
+                    if (status == RTX_OK) {
+                        ++report.frames_interpolated;
+                        RtxFrameDesc interp_frame = prev_frame;
+                        interp_frame.planes[0] = fruc_out_buffer;
+                        interp_frame.planes[1] = fruc_out_buffer + static_cast<uint64_t>(pitch) * prev_frame.height;
+                        interp_frame.pts = out_pts_90k;
+                        interp_frame.slot_index = 0xFFFFFFFF;
+                        auto res = processFrame(interp_frame, out_pts_90k, /*release_slot=*/false);
+                        if (!res.has_value()) return res;
+                    } else {
+                        auto res = processFrame(prev_frame, out_pts_90k, /*release_slot=*/false);
+                        if (!res.has_value()) return res;
+                    }
                 }
             }
             next_out_pts_flicks += delta_out_flicks;
@@ -1168,9 +1248,19 @@ RtxNgxRemasterStats previous_stats{};
     auto finished = finishPipeline();
     releasePrevLease();
     if (!pipeline_status.has_value()) {
+        if (cancelled() && session.isMuxerOpen()) {
+            (void)session.flushEncoder(report);
+            (void)session.finalize(report, started);
+            logInfo(std::format("Cooperative cancel completed: finalized container trailer ({} frames encoded)",
+                                report.frames_encoded));
+        }
         return std::unexpected(pipeline_status.error());
     }
     if (!finished.has_value()) {
+        if (cancelled() && session.isMuxerOpen()) {
+            (void)session.flushEncoder(report);
+            (void)session.finalize(report, started);
+        }
         return std::unexpected(finished.error());
     }
 
@@ -1195,6 +1285,21 @@ RtxNgxRemasterStats previous_stats{};
             }
             ++report.packets_written;
         }
+    }
+
+    // Phase 9.1 (RW-P9-04) hard circuit breaker: when RIFE interpolation was
+    // requested but every intermediate frame failed, refuse the ExitCode 0
+    // fake success. The container trailer is finalized first so the artifact
+    // is inspectable, then the session fails with an explicit diagnosis.
+    if (rife_active && report.fruc_failures > 0 && report.frames_interpolated == 0) {
+        const auto breaker_finalize = session.finalize(report, started);
+        if (!breaker_finalize.has_value()) {
+            return std::unexpected(breaker_finalize.error());
+        }
+        return err(ErrorCode::Internal,
+                   std::format("RIFE frame interpolation failed on all {} intermediate frame(s): {}",
+                               report.fruc_failures,
+                               session.bridgeLoader().lastError(session.bridge())));
     }
 
     auto finalized = session.finalize(report, started);

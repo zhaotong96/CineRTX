@@ -18,6 +18,30 @@ include_guard(GLOBAL)
 function(rtx_fetch_archive url expected_sha archive out_var)
     set(${out_var} FALSE PARENT_SCOPE)
 
+    get_filename_component(_archive_name "${archive}" NAME)
+    get_filename_component(_archive_dir "${archive}" DIRECTORY)
+    file(MAKE_DIRECTORY "${_archive_dir}")
+
+    if(NOT EXISTS "${archive}")
+        foreach(_local_cand
+                "${CMAKE_SOURCE_DIR}/${_archive_name}"
+                "${CMAKE_SOURCE_DIR}/../${_archive_name}"
+                "${CMAKE_SOURCE_DIR}/.vs/build/external/${_archive_name}"
+                "${CMAKE_SOURCE_DIR}/.vs/build/external/download/${_archive_name}"
+                "${CMAKE_SOURCE_DIR}/build/external/${_archive_name}"
+                "${CMAKE_SOURCE_DIR}/build/external/download/${_archive_name}")
+            if(EXISTS "${_local_cand}")
+                file(SHA256 "${_local_cand}" _cand_sha)
+                if(_cand_sha STREQUAL "${expected_sha}")
+                    message(STATUS "[CineRTX-Bootstrap] Reusing local archive ${_local_cand}")
+                    file(COPY_FILE "${_local_cand}" "${archive}")
+                    set(${out_var} TRUE PARENT_SCOPE)
+                    return()
+                endif()
+            endif()
+        endforeach()
+    endif()
+
     if(EXISTS "${archive}")
         file(SHA256 "${archive}" _archive_sha)
         if(_archive_sha STREQUAL "${expected_sha}")

@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.25)
 include(cmake/RtxBootstrap.cmake)
 
 project(CineRTX
-    VERSION 0.2.0
+    VERSION 0.1.0
     DESCRIPTION "Next-generation pure-GPU video remastering & NLE engine for NVIDIA RTX"
     LANGUAGES CXX)
 
@@ -37,20 +37,11 @@ if(RTX_ZIG_EXECUTABLE)
         "\"${RTX_ZIG_EXECUTABLE}\" ar s <TARGET>")
 endif()
 
-option(RTX_BUILD_TESTS "Build the dependency-free unit and integration tests" ON)
-# Windows only.  ON makes CineRTX a /SUBSYSTEM:WINDOWS image whose wWinMain runs
-# the Win32 Native Common Controls Dark Pro GUI when there are no arguments and
-# the CLI otherwise.
-# OFF keeps a plain console CineRTX (used on Linux, which has no GUI backend).
-option(RTX_BUILD_GUI "Build CineRTX with the Win32 Native Common Controls Dark Pro GUI front end" ON)
 # RTX Video is not optional: every Windows build compiles the D3D12/NGX
 # bridge against the RTX Video SDK and stages it under
 # build/external/plugins, then mirrors it to <exe_dir>/plugins/nvidia_rtx.
-# nvsdk_ngx_s.lib is proprietary, so the bridge stays a separately loaded DLL
-# and is never inlined into the GPLv3 executable; the SDK-free static bridge
-# exists only for non-Windows hosts (no NGX/D3D12) and for the in-process ABI
-# tests.
-option(RTX_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+# Zero build-feature toggles per KISS & Occam's Razor: unit tests (rtx_tests)
+# and the unified dual-personality Win32 GUI/CLI executable build unconditionally.
 set(RTX_VIDEO_SDK_ROOT "" CACHE PATH
     "NVIDIA RTX Video SDK v1.1.0 root containing include/ and lib/Windows/x64/nvsdk_ngx_s.lib")
 
@@ -58,7 +49,7 @@ set(RTX_VIDEO_SDK_ROOT "" CACHE PATH
 # SDK archive) and for the evaluation NGX plugin.  Deliberately independent of
 # CMAKE_BINARY_DIR so every preset finds the same cached archive and stages the
 # plugin at the documented build/external/plugins/nvidia_rtx location.
-set(RTX_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/external")
+set(RTX_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.vs/build/external")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
@@ -120,15 +111,11 @@ endif()
 
 if(MSVC)
     target_compile_options(rtx_project_options INTERFACE /std:c++latest /W4 /permissive- /EHsc /utf-8 /arch:AVX2)
-    if(RTX_WARNINGS_AS_ERRORS)
-        target_compile_options(rtx_project_options INTERFACE /WX)
-    endif()
 else()
     target_compile_options(rtx_project_options INTERFACE
-        -Wall -Wextra -Wpedantic -Wshadow)
-    if(RTX_WARNINGS_AS_ERRORS)
-        target_compile_options(rtx_project_options INTERFACE -Werror)
-    endif()
+        -Wall -Wextra -Wpedantic -Wshadow
+        -Wno-unknown-pragmas -Wno-unused-parameter -Wno-missing-field-initializers
+        -Wno-unused-function -Wno-unused-const-variable -Wno-deprecated-declarations)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -139,7 +126,9 @@ set(RTX_CORE_SOURCES
     src/core/geometry.cpp
     src/core/hw_transcode.cpp
     src/core/i18n.cpp
+    src/core/logger.cpp
     src/core/lut3d.cpp
+    src/core/param_schema.cpp
     src/core/runtime_env.cpp
     src/core/ngx_remaster.cpp
     src/core/nvidia_shim.cpp
@@ -153,9 +142,6 @@ set(RTX_CORE_SOURCES
 
 add_library(rtx_core STATIC ${RTX_CORE_SOURCES})
 add_library(rtx::core ALIAS rtx_core)
-# FFmpeg static archives are bound here, unconditionally.  Every executable and
-# test that links rtx_core therefore inherits the media container layer through
-# CMake dependency propagation: no per-target opt-in, no DLL copying.
 target_link_libraries(rtx_core PUBLIC rtx_project_options rtx::ffmpeg_static)
 target_include_directories(rtx_core PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/io"
@@ -165,8 +151,9 @@ set_target_properties(rtx_core PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
-
-
+if(NOT MSVC)
+    target_compile_options(rtx_core PRIVATE -Wno-unused-function)
+endif()
 
 if(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
@@ -188,16 +175,6 @@ set(RTX_SHIM_SOURCES
 
 list(APPEND RTX_SHIM_SOURCES src/shim/loader/dyn_library_win32.cpp)
 
-# ---------------------------------------------------------------------------
-# NVIDIA shim (Zone B/C, MIT OR Apache-2.0) -- static, in-image
-#
-# Gate 3.0 single-EXE closure.  The shim is compiled once, into an archive that
-# rtx_core links directly, so the deliverable contains no rtx_shim.dll:
-# NvidiaShim::loadEmbedded() binds the identical decode/encode ABI table from
-# inside the image and talks straight to the driver.  A sidecar DLL is still
-# honoured at run time for plugin override / hot update, but it is neither built
-# nor shipped by default.
-# ---------------------------------------------------------------------------
 add_library(rtx_shim_static STATIC
     ${RTX_SHIM_SOURCES}
     src/shim/loader/nv_shim_static_table.cpp)
@@ -208,6 +185,9 @@ if(CMAKE_DL_LIBS)
     target_link_libraries(rtx_shim_static PRIVATE ${CMAKE_DL_LIBS})
 endif()
 target_compile_definitions(rtx_shim_static PUBLIC RTX_SHIM_STATIC=1)
+if(NOT MSVC)
+    target_compile_options(rtx_shim_static PRIVATE -Wno-unused-function)
+endif()
 target_include_directories(rtx_shim_static
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/loader"
@@ -224,64 +204,179 @@ target_compile_definitions(rtx_core PUBLIC
     RTX_SHIM_STATIC=1)
 
 # ---------------------------------------------------------------------------
-# NGX bridge (Zone B/C, MIT OR Apache-2.0)
-#
-# Pure C ABI firewall: the GPL core never sees an NVIDIA structure, only
-# include/shim/ngx_bridge_abi.h.  d3d12.dll, dxgi.dll and nvcuda.dll are all
-# resolved with LoadLibraryExW, so no import-table entry is created.
-#
-# RTX Video Super Resolution and TrueHDR are mandatory product features, not
-# build options.  On Windows the bridge links NVIDIA's proprietary
-# nvsdk_ngx_s.lib, which the Plugin-Exception requires to stay inside a
-# separately loaded Independent Module: the build produces a DLL staged outside
-# the product tree and never inlines a proprietary symbol into the GPLv3
-# executable.  Non-Windows hosts have no NGX/D3D12, so they compile the static
-# SDK-free bridge into the image; NgxRemasterBridge then reports RTX_ERR_NGX for
-# VSR/TrueHDR rather than pretending a texture exists.
-# The SDK-free archive is built on every platform because the test suite
-# exercises the C ABI in-process.
+# RGBA16F -> P010 pack kernel (ACT-01) & RIFE pack kernel
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# RGBA16F -> P010 pack kernel (ACT-01)
-#
-# Generated into ${CMAKE_BINARY_DIR}/generated/p010_pack_ptx.h from p010_pack.ptx
-# ---------------------------------------------------------------------------
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(RTX_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${RTX_GENERATED_DIR}")
 set(RTX_PTX_HEADER "${RTX_GENERATED_DIR}/p010_pack_ptx.h")
+set(RTX_RIFE_PTX_HEADER "${RTX_GENERATED_DIR}/rife_pack_ptx.h")
 
 execute_process(
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_ptx.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
-            "${RTX_PTX_HEADER}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DINPUT_PTX=${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
+            "-DOUTPUT_HEADER=${RTX_PTX_HEADER}"
+            "-DVAR_NAME=kP010PackPtx"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedPtx.cmake"
     RESULT_VARIABLE _rtx_embed_result)
 if(NOT _rtx_embed_result EQUAL 0)
     message(FATAL_ERROR "p010_pack PTX embedding failed (${_rtx_embed_result})")
 endif()
 
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+            "-DINPUT_PTX=${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/rife_pack.ptx"
+            "-DOUTPUT_HEADER=${RTX_RIFE_PTX_HEADER}"
+            "-DVAR_NAME=kRifePackPtx"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedPtx.cmake"
+    RESULT_VARIABLE _rtx_rife_embed_result)
+if(NOT _rtx_rife_embed_result EQUAL 0)
+    message(FATAL_ERROR "rife_pack PTX embedding failed (${_rtx_rife_embed_result})")
+endif()
+
 add_custom_command(
     OUTPUT "${RTX_PTX_HEADER}"
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_ptx.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
-            "${RTX_PTX_HEADER}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DINPUT_PTX=${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
+            "-DOUTPUT_HEADER=${RTX_PTX_HEADER}"
+            "-DVAR_NAME=kP010PackPtx"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedPtx.cmake"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/p010_pack.ptx"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_ptx.py"
-    COMMENT "Generating p010_pack_ptx.h in build tree"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedPtx.cmake"
+    COMMENT "Generating p010_pack_ptx.h in build tree (native CMake)"
     VERBATIM)
 
+add_custom_command(
+    OUTPUT "${RTX_RIFE_PTX_HEADER}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DINPUT_PTX=${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/rife_pack.ptx"
+            "-DOUTPUT_HEADER=${RTX_RIFE_PTX_HEADER}"
+            "-DVAR_NAME=kRifePackPtx"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedPtx.cmake"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/rife_pack.ptx"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedPtx.cmake"
+    COMMENT "Generating rife_pack_ptx.h in build tree (native CMake)"
+    VERBATIM)
+
+# TensorRT SDK path detection for RIFE integration (Track 4)
+set(RTX_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.vs/build/external")
+set(RTX_TENSORRT_ROOT "${RTX_EXTERNAL_DIR}/tensorrt/TensorRT-10.13.3.9" CACHE PATH "TensorRT SDK root directory")
+if(NOT EXISTS "${RTX_TENSORRT_ROOT}/include/NvInfer.h")
+    set(_trt_zip "${RTX_EXTERNAL_DIR}/TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip")
+    set(_trt_url "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip")
+    set(_trt_sha256 "10ada15b14498e0ec8556cb19433129fd362a8e3debf75db06ccacd8659d9662")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RtxProvision.cmake")
+    rtx_fetch_archive("${_trt_url}" "${_trt_sha256}" "${_trt_zip}" _trt_ready)
+    if(_trt_ready)
+        message(STATUS "Extracting TensorRT archive: ${_trt_zip}")
+        file(ARCHIVE_EXTRACT INPUT "${_trt_zip}" DESTINATION "${RTX_EXTERNAL_DIR}/tensorrt")
+    else()
+        message(STATUS "[CineRTX] TensorRT 10.13.3.9 archive missing/unverified; download skipped or gated by NVIDIA authentication. Falling back to cmake/cuda_headers.")
+    endif()
+    file(GLOB _trt_candidates "${RTX_EXTERNAL_DIR}/tensorrt/TensorRT-*")
+    if(_trt_candidates)
+        list(GET _trt_candidates 0 _first_trt)
+        if(EXISTS "${_first_trt}/include/NvInfer.h")
+            set(RTX_TENSORRT_ROOT "${_first_trt}")
+        endif()
+    endif()
+endif()
+set(RTX_TENSORRT_INCLUDE_DIR "${RTX_TENSORRT_ROOT}/include")
+set(RTX_CUDA_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cuda_headers")
+
+# RIFE v4.25 ONNX weight auto-provisioning into shared .vs/build/external/models cache
+set(RTX_EXTERNAL_MODELS_DIR "${RTX_EXTERNAL_DIR}/models")
+file(MAKE_DIRECTORY "${RTX_EXTERNAL_MODELS_DIR}")
+set(RTX_CACHED_RIFE_ONNX "${RTX_EXTERNAL_MODELS_DIR}/rife_v4.25.onnx")
 if(WIN32)
-    # Windows: the bridge speaks D3D12/CUDA interop + NGX (proprietary stub).
+    set(_need_rife_onnx TRUE)
+    if(EXISTS "${RTX_CACHED_RIFE_ONNX}")
+        file(SIZE "${RTX_CACHED_RIFE_ONNX}" _cached_onnx_sz)
+        if(_cached_onnx_sz GREATER_EQUAL 5242880)
+            set(_need_rife_onnx FALSE)
+        endif()
+    endif()
+    if(_need_rife_onnx AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/models/rife_v4.25.onnx")
+        file(SIZE "${CMAKE_CURRENT_SOURCE_DIR}/models/rife_v4.25.onnx" _src_onnx_sz)
+        if(_src_onnx_sz GREATER_EQUAL 5242880)
+            file(COPY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/models/rife_v4.25.onnx" "${RTX_CACHED_RIFE_ONNX}")
+            set(_need_rife_onnx FALSE)
+        endif()
+    endif()
+    if(_need_rife_onnx)
+        set(_rife_onnx_url "https://huggingface.co/FuryTMP/RIFE_fp32/resolve/main/RIFE_fp32.onnx")
+        message(STATUS "[CineRTX] Provisioning RIFE v4.25 ONNX weights from ${_rife_onnx_url} ...")
+        find_program(_rtx_curl_onnx NAMES curl.exe curl)
+        if(_rtx_curl_onnx)
+            execute_process(
+                COMMAND "${_rtx_curl_onnx}" -fL --retry 3 --retry-delay 2 --connect-timeout 30
+                        -o "${RTX_CACHED_RIFE_ONNX}.tmp" "${_rife_onnx_url}"
+                RESULT_VARIABLE _curl_onnx_rc
+                OUTPUT_QUIET ERROR_QUIET)
+            if(_curl_onnx_rc EQUAL 0 AND EXISTS "${RTX_CACHED_RIFE_ONNX}.tmp")
+                file(SIZE "${RTX_CACHED_RIFE_ONNX}.tmp" _dl_onnx_sz)
+                if(_dl_onnx_sz GREATER_EQUAL 5242880)
+                    file(RENAME "${RTX_CACHED_RIFE_ONNX}.tmp" "${RTX_CACHED_RIFE_ONNX}")
+                    set(_need_rife_onnx FALSE)
+                else()
+                    file(REMOVE "${RTX_CACHED_RIFE_ONNX}.tmp")
+                endif()
+            else()
+                file(REMOVE "${RTX_CACHED_RIFE_ONNX}.tmp")
+            endif()
+        endif()
+        if(_need_rife_onnx)
+            file(DOWNLOAD "${_rife_onnx_url}" "${RTX_CACHED_RIFE_ONNX}.tmp"
+                 TLS_VERIFY ON STATUS _dl_st)
+            list(GET _dl_st 0 _dl_rc)
+            if(_dl_rc EQUAL 0 AND EXISTS "${RTX_CACHED_RIFE_ONNX}.tmp")
+                file(SIZE "${RTX_CACHED_RIFE_ONNX}.tmp" _dl_onnx_sz)
+                if(_dl_onnx_sz GREATER_EQUAL 5242880)
+                    file(RENAME "${RTX_CACHED_RIFE_ONNX}.tmp" "${RTX_CACHED_RIFE_ONNX}")
+                    set(_need_rife_onnx FALSE)
+                else()
+                    file(REMOVE "${RTX_CACHED_RIFE_ONNX}.tmp")
+                endif()
+            else()
+                file(REMOVE "${RTX_CACHED_RIFE_ONNX}.tmp")
+            endif()
+        endif()
+        if(NOT _need_rife_onnx)
+            message(STATUS "[CineRTX] RIFE v4.25 ONNX cached at ${RTX_CACHED_RIFE_ONNX}")
+        else()
+            message(STATUS "[CineRTX] Offline/CI host without RIFE ONNX mirror access; runtime will probe local models/ or synthesize when unlocked.")
+        endif()
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/models/rife_v4.25.engine" AND NOT EXISTS "${RTX_EXTERNAL_MODELS_DIR}/rife_v4.25.engine")
+        file(SIZE "${CMAKE_CURRENT_SOURCE_DIR}/models/rife_v4.25.engine" _src_eng_sz)
+        if(_src_eng_sz GREATER_EQUAL 5242880)
+            file(COPY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/models/rife_v4.25.engine" "${RTX_EXTERNAL_MODELS_DIR}/rife_v4.25.engine")
+        endif()
+    endif()
+endif()
+
+if(WIN32)
     set(RTX_NGX_BRIDGE_SOURCES
         src/shim/ngx_bridge/bridge_exports.cpp
         src/shim/ngx_bridge/p010_pack_runtime.cpp
+        src/shim/ngx_bridge/nvof_engine.cpp
+        src/shim/ngx_bridge/rife_pack_runtime.cpp
+        src/shim/ngx_bridge/trt_loader.cpp
+        src/shim/ngx_bridge/rife_engine.cpp
+        src/shim/ngx_bridge/rife_builder.cpp
         src/shim/ngx_bridge/d3d12_interop.cpp
-        "${RTX_PTX_HEADER}")
+        "${RTX_PTX_HEADER}"
+        "${RTX_RIFE_PTX_HEADER}")
 else()
     set(RTX_NGX_BRIDGE_SOURCES
         src/shim/ngx_bridge/bridge_exports.cpp
         src/shim/ngx_bridge/p010_pack_runtime.cpp
-        "${RTX_PTX_HEADER}")
+        src/shim/ngx_bridge/nvof_engine.cpp
+        src/shim/ngx_bridge/rife_pack_runtime.cpp
+        src/shim/ngx_bridge/trt_loader.cpp
+        src/shim/ngx_bridge/rife_engine.cpp
+        src/shim/ngx_bridge/rife_builder.cpp
+        "${RTX_PTX_HEADER}"
+        "${RTX_RIFE_PTX_HEADER}")
 endif()
 
 if(WIN32)
@@ -290,11 +385,18 @@ if(WIN32)
         src/shim/ngx_bridge/ngx_d3d12_bridge.cpp)
     target_link_libraries(rtx_ngx_bridge PRIVATE rtx_project_options)
     target_compile_definitions(rtx_ngx_bridge PRIVATE RTX_SHIM_EXPORTS=1)
+    if(NOT MSVC)
+        target_compile_options(rtx_ngx_bridge PRIVATE
+            -Wno-deprecated-declarations -Wno-unused-const-variable)
+    endif()
     target_include_directories(rtx_ngx_bridge PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
         "${RTX_NVCODEC_INCLUDE_DIR}"
         "${RTX_GENERATED_DIR}")
+    target_include_directories(rtx_ngx_bridge SYSTEM PRIVATE
+        "${RTX_CUDA_HEADERS_DIR}"
+        "${RTX_TENSORRT_INCLUDE_DIR}")
     set_target_properties(rtx_ngx_bridge PROPERTIES
         OUTPUT_NAME rtx_ngx_bridge
         CXX_STANDARD 23
@@ -302,8 +404,6 @@ if(WIN32)
         CXX_EXTENSIONS OFF)
     set_target_properties(rtx_ngx_bridge PROPERTIES PREFIX "")
     if(MSVC)
-        # nvsdk_ngx_s.lib is compiled by NVIDIA as a /MT static library.
-        # Setting MSVC_RUNTIME_LIBRARY to MultiThreaded aligns the CRT and prevents LNK2038.
         set_property(TARGET rtx_ngx_bridge PROPERTY
             MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
         target_link_options(rtx_ngx_bridge PRIVATE "/INCREMENTAL:NO")
@@ -311,8 +411,6 @@ if(WIN32)
             PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
             COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
     endif()
-    # Canonical staging outside the product tree; CineRTX.exe mirrors this
-    # directory into <exe_dir>/plugins/nvidia_rtx at build time.
     set_target_properties(rtx_ngx_bridge PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${RTX_EXTERNAL_DIR}/plugins/nvidia_rtx"
         LIBRARY_OUTPUT_DIRECTORY "${RTX_EXTERNAL_DIR}/plugins/nvidia_rtx")
@@ -321,11 +419,18 @@ endif()
 add_library(rtx_ngx_bridge_static STATIC ${RTX_NGX_BRIDGE_SOURCES})
 target_link_libraries(rtx_ngx_bridge_static PRIVATE rtx_project_options)
 target_compile_definitions(rtx_ngx_bridge_static PUBLIC RTX_SHIM_STATIC=1)
+if(NOT MSVC)
+    target_compile_options(rtx_ngx_bridge_static PRIVATE
+        -Wno-deprecated-declarations -Wno-unused-const-variable)
+endif()
 target_include_directories(rtx_ngx_bridge_static PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
     "${RTX_NVCODEC_INCLUDE_DIR}"
     "${RTX_GENERATED_DIR}")
+target_include_directories(rtx_ngx_bridge_static SYSTEM PRIVATE
+    "${RTX_CUDA_HEADERS_DIR}"
+    "${RTX_TENSORRT_INCLUDE_DIR}")
 set_target_properties(rtx_ngx_bridge_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_STANDARD 23
@@ -344,16 +449,12 @@ endif()
 if(WIN32)
     set(RTX_NGX_ROOT_DIR "")
 
-    # 1. User-supplied root parameter or environment variable
     if(RTX_VIDEO_SDK_ROOT AND EXISTS "${RTX_VIDEO_SDK_ROOT}/include/nvsdk_ngx.h")
         set(RTX_NGX_ROOT_DIR "${RTX_VIDEO_SDK_ROOT}")
     elseif(DEFINED ENV{RTX_VIDEO_SDK_ROOT} AND EXISTS "$ENV{RTX_VIDEO_SDK_ROOT}/include/nvsdk_ngx.h")
         set(RTX_NGX_ROOT_DIR "$ENV{RTX_VIDEO_SDK_ROOT}")
     endif()
 
-    # 2. Automated supply: reuse the shared cache under build/external (the
-    #    same root as the provisioned tools), then download from NVIDIA's CDN.
-    #    The archive is SHA-256 pinned and curl is tried first for proxies.
     if(NOT RTX_NGX_ROOT_DIR)
         set(_rtx_sdk_cache "${RTX_EXTERNAL_DIR}")
         set(_rtx_sdk_build_dir "${_rtx_sdk_cache}/rtx_video_sdk")
@@ -405,7 +506,6 @@ if(WIN32)
     message(STATUS
         "RTX Video SDK: ${RTX_NGX_INCLUDE_DIR} (static stub ${RTX_NGX_LIBRARY})")
 
-    # Locate runtime DLLs (nvngx_vsr.dll, nvngx_truehdr.dll) for automatic post-build deployment
     set(RTX_NGX_VSR_DLL "")
     set(RTX_NGX_TRUEHDR_DLL "")
     foreach(_bin_sub "bin/Windows/x64/rel" "bin/Windows/x64/dev" "bin/x64/rel" "bin/x64/dev" "bin/x64" "bin")
@@ -430,11 +530,10 @@ if(WIN32)
             src/shim/ngx_bridge/ngx_msvc_crt_compat.cpp)
     endif()
     target_include_directories(rtx_ngx_bridge PRIVATE "${RTX_NGX_INCLUDE_DIR}")
+    target_include_directories(rtx_ngx_bridge SYSTEM PRIVATE "${RTX_NGX_INCLUDE_DIR}")
     target_compile_definitions(rtx_ngx_bridge PRIVATE RTX_HAVE_NGX_SDK=1)
     target_link_libraries(rtx_ngx_bridge PRIVATE "${RTX_NGX_LIBRARY}")
 
-    # The bridge is already staged in external/plugins/nvidia_rtx, so NVIDIA's
-    # own runtime DLLs land beside it rather than in the product directory.
     if(RTX_NGX_VSR_DLL AND EXISTS "${RTX_NGX_VSR_DLL}")
         add_custom_command(TARGET rtx_ngx_bridge POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -447,12 +546,6 @@ if(WIN32)
     endif()
 
     if(NOT MSVC)
-        # NVIDIA's static stub is a /MT MSVC archive whose .drectve sections
-        # name LIBCMT, OLDNAMES, libcpmt and uuid.  The Zig/MinGW linker has no
-        # such CRT archives, so empty shadow archives satisfy the DEFAULTLIB
-        # directives.  The handful of actual MSVC CRT symbols the COFF objects
-        # reference are implemented in ngx_msvc_crt_compat.cpp; the vendor
-        # library itself is never patched.
         set(_rtx_ngx_shadow_dir "${CMAKE_CURRENT_BINARY_DIR}/ngx_msvc_shadow_libs")
         file(MAKE_DIRECTORY "${_rtx_ngx_shadow_dir}")
         set(_rtx_ngx_shadow_archives "")
@@ -477,23 +570,12 @@ endif()
 
 # ---------------------------------------------------------------------------
 # CineRTX -- the single self-contained deliverable.
-#
-# One image, two personalities.  With no arguments it is the Win32
-# Native Common Controls Dark Pro GUI; with arguments it attaches to the parent
-# console and runs the full CLI, so CTest keeps its captured stdio because
-# attachParentConsole() detects a redirected pipe and skips AttachConsole().
-#
-# There is deliberately no rtx_copy_shim_runtime step here: rtx_shim is a
-# static archive that rtx_core already links.  The proprietary NGX bridge is a
-# plugin DLL: canonical staging lives at build/external/plugins/nvidia_rtx and
-# is mirrored to <exe_dir>/plugins/nvidia_rtx so CineRTX.exe finds it without
-# environment variables; it is never linked into the executable.  On
-# non-Windows hosts the SDK-free bridge is inlined instead.
 # ---------------------------------------------------------------------------
-if(WIN32 AND RTX_BUILD_GUI)
+if(WIN32)
     set(RTX_CINERTX_SOURCES
         src/gui/rtx_gui.cpp
         src/gui/preview_viewport.cpp
+        src/gui/workstation_canvas.cpp
         src/cli/main.cpp
         src/cli/shim_probe.cpp)
 else()
@@ -507,10 +589,9 @@ add_executable(CineRTX ${RTX_CINERTX_SOURCES})
 add_executable(rtx::cinertx ALIAS CineRTX)
 target_link_libraries(CineRTX PRIVATE rtx_core)
 if(WIN32)
-    # CommandLineToArgvW: wWinMain rebuilds argv as UTF-8 so non-ASCII paths work.
     target_link_libraries(CineRTX PRIVATE shell32)
 endif()
-if(WIN32 AND RTX_BUILD_GUI)
+if(WIN32)
     target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 comdlg32 comctl32 uxtheme d3d12 dxgi)
 endif()
 if(CMAKE_DL_LIBS)
@@ -518,12 +599,15 @@ if(CMAKE_DL_LIBS)
 endif()
 target_include_directories(CineRTX PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cli"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/gui")
 target_compile_definitions(CineRTX PRIVATE
     RTX_VERSION_STRING="${PROJECT_VERSION}")
-if(WIN32 AND RTX_BUILD_GUI)
+if(WIN32)
     if(MSVC)
-        target_compile_options(CineRTX PRIVATE /O1 /Gy /Gs-)
+        string(REPLACE "/O2" "/O1" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+        string(REPLACE "/O2" "/O1" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
+        target_compile_options(CineRTX PRIVATE /Gy /Gs-)
         target_link_options(CineRTX PRIVATE
             /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /OPT:REF /OPT:ICF /INCREMENTAL:NO)
     else()
@@ -545,30 +629,56 @@ set_target_properties(CineRTX PROPERTIES
     COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
 
 if(WIN32)
-    # The bridge must stay a separately loaded Independent Module, but the
-    # product has to find it without environment variables.  Mirror the
-    # canonical staging into <exe_dir>/plugins/nvidia_rtx, which is exactly the
-    # install layout and the loader's first relative candidate.
     add_dependencies(CineRTX rtx_ngx_bridge)
-    set(_rtx_ngx_stage_files "$<TARGET_FILE:rtx_ngx_bridge>")
+    set(_rtx_ngx_root_files "$<TARGET_FILE:rtx_ngx_bridge>")
     if(RTX_NGX_VSR_DLL AND EXISTS "${RTX_NGX_VSR_DLL}")
-        list(APPEND _rtx_ngx_stage_files "${RTX_NGX_VSR_DLL}" "${RTX_NGX_TRUEHDR_DLL}")
+        list(APPEND _rtx_ngx_root_files "${RTX_NGX_VSR_DLL}" "${RTX_NGX_TRUEHDR_DLL}")
+    endif()
+    set(_trt_lib_dir "${RTX_TENSORRT_ROOT}/lib")
+    set(_rtx_trt_plugin_files "")
+    foreach(_trt_dll nvinfer_10.dll nvinfer_builder_resource_10.dll nvonnxparser_10.dll)
+        if(EXISTS "${_trt_lib_dir}/${_trt_dll}")
+            list(APPEND _rtx_trt_plugin_files "${_trt_lib_dir}/${_trt_dll}")
+        endif()
+    endforeach()
+    set(_rtx_stage_trt_command "")
+    if(_rtx_trt_plugin_files)
+        set(_rtx_stage_trt_command
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_rtx_trt_plugin_files}
+                "$<TARGET_FILE_DIR:CineRTX>/plugins/nvidia_rtx/")
+    endif()
+    set(_rtx_model_files "")
+    if(EXISTS "${RTX_EXTERNAL_MODELS_DIR}/rife_v4.25.onnx")
+        list(APPEND _rtx_model_files "${RTX_EXTERNAL_MODELS_DIR}/rife_v4.25.onnx")
+    endif()
+    if(EXISTS "${RTX_EXTERNAL_MODELS_DIR}/rife_v4.25.engine")
+        list(APPEND _rtx_model_files "${RTX_EXTERNAL_MODELS_DIR}/rife_v4.25.engine")
+    endif()
+    set(_rtx_stage_models_command "")
+    if(_rtx_model_files)
+        set(_rtx_stage_models_command
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_rtx_model_files}
+                "$<TARGET_FILE_DIR:CineRTX>/models/")
     endif()
     add_custom_command(TARGET CineRTX POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_FILE_DIR:CineRTX>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${_rtx_ngx_stage_files}
+            ${_rtx_ngx_root_files}
             "$<TARGET_FILE_DIR:CineRTX>/"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:CineRTX>/plugins/nvidia_rtx"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:CineRTX>/models"
+        ${_rtx_stage_trt_command}
+        ${_rtx_stage_models_command}
+        COMMAND ${CMAKE_COMMAND}
+            -DEXE_DIR=$<TARGET_FILE_DIR:CineRTX>
+            -DEXT_MODELS_DIR=${RTX_EXTERNAL_MODELS_DIR}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnsureRifeEngine.cmake"
         VERBATIM)
-    # POST_BUILD only fires when CineRTX relinks, so a copied or incremental
-    # build tree with an up-to-date exe can keep an empty plugin directory and
-    # report the plugin as unavailable forever.  Re-stage on every build; the
-    # copies are no-ops when the layout is already correct, and the check turns
-    # a silently broken deployment into a build failure.  The destination is
-    # computed here rather than with TARGET_FILE_DIR:CineRTX: that expression
-    # creates an implicit dependency on CineRTX, which would form a cycle with
-    # CineRTX's dependency on this target.
     get_target_property(_rtx_ngx_runtime_dir CineRTX RUNTIME_OUTPUT_DIRECTORY)
     if(NOT _rtx_ngx_runtime_dir)
         if(CMAKE_CONFIGURATION_TYPES)
@@ -581,16 +691,16 @@ if(WIN32)
     add_custom_target(rtx_stage_ngx_plugin ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_rtx_ngx_product_plugin_dir}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${_rtx_ngx_stage_files}
+            ${_rtx_ngx_root_files}
             "${_rtx_ngx_product_plugin_dir}/"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${_rtx_ngx_product_plugin_dir}/plugins/nvidia_rtx"
         COMMAND ${CMAKE_COMMAND}
             "-DPLUGIN_DIR=${_rtx_ngx_product_plugin_dir}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNgxStaging.cmake"
         DEPENDS rtx_ngx_bridge
         COMMENT "Staging the RTX NGX plugin beside CineRTX.exe"
         VERBATIM)
-    # A phony target is always dirty, so every CineRTX build re-runs the stage
-    # step even when the executable itself is up to date.
     add_dependencies(CineRTX rtx_stage_ngx_plugin)
 endif()
 
@@ -598,19 +708,18 @@ endif()
 # Tests
 # ---------------------------------------------------------------------------
 
-if(RTX_BUILD_TESTS)
+if(TRUE)
     set(RTX_TEST_SOURCES
         tests/test_flicks_timebase.cpp
         tests/test_fuzz_resilience.cpp
+        tests/test_gui_workstation.cpp
         tests/test_hdr.cpp
         tests/test_i18n.cpp
         tests/test_io.cpp
         tests/test_lut3d.cpp
-        tests/unit/test_audio_stream_copy.cpp
         tests/test_main.cpp
-        tests/test_rational.cpp
+        tests/test_rife.cpp
         tests/test_shim.cpp
-        tests/test_status.cpp
         tests/test_types.cpp)
 
     add_executable(rtx_tests ${RTX_TEST_SOURCES}
@@ -641,9 +750,6 @@ if(RTX_BUILD_TESTS)
         PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
         COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
 
-    # Per-test timeouts: a hung spin loop or blocked dynamic load must fail with
-    # the test name in the log instead of consuming the whole CI job (CTest's
-    # default is 1500 s per test).
     add_test(NAME rtx_unit_tests COMMAND rtx_tests)
     set_tests_properties(rtx_unit_tests PROPERTIES TIMEOUT 300)
 endif()

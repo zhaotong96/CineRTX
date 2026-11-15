@@ -880,6 +880,10 @@ public:
                                         ? static_cast<int>(info.frame_rate.den)
                                         : 1};
         stream_->avg_frame_rate = frame_rate;
+        // Phase 9 (RC-6): r_frame_rate is the container-level real frame rate
+        // players and probes actually trust; leaving it unset made 120fps
+        // transcodes report the source fps.
+        stream_->r_frame_rate = frame_rate;
         stream_->time_base =
             AVRational{info.time_base.num > 0 ? static_cast<int>(info.time_base.num) : 1,
                        info.time_base.den > 0 ? static_cast<int>(info.time_base.den) : 90000};

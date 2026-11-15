@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// Static localisation tables.  Everything here is constexpr-initialised and
+// Static localisation tables. Everything here is constexpr-initialised and
 // lands in .rdata: no static constructor runs, no heap is touched, and the
 // accessor is a single indexed load.
 
@@ -11,18 +11,13 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
+#include <string>
 #include <string_view>
 
 namespace rtx {
 namespace {
 
-// ---------------------------------------------------------------------------
-// .rdata tables: [language][StrId]
-//
-// The two static_asserts below are the whole safety net.  If someone adds an
-// enumerator and forgets a translation, the build stops here instead of the GUI
-// rendering an empty label.
-// ---------------------------------------------------------------------------
 constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCount] = {
     // English
     {
@@ -91,6 +86,59 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"self-test PASS",                                              // SelfTestPass
         L"self-test FAIL",                                              // SelfTestFail
         L"Hardware probe OK",                                           // StatusProbeOk
+
+        // Stage 2 SSOT additions: WebUI & shared parameter labels
+        L"WebUI - JSON state-driven - fully decoupled from the backend",// WuiSubtitle
+        L"Transcode parameters",                                        // WuiParamsTitle
+        L"Target frame rate (FRUC interpolation)",                      // WuiParamFps
+        L"RIFE TensorRT engine path",                                   // WuiParamRifeEngine
+        L"HDR10+ dynamic metadata (ST 2094-40)",                        // WuiParamHdr10plus
+        L"Auto-fill output file name",                                  // WuiAutoOutput
+        L"3D LUT (.cube, applied in pack kernel)",                      // WuiParamLut
+        L"GPU device index",                                            // WuiParamGpu
+        L"Frame limit (0 = whole stream)",                              // WuiParamFrames
+        L"Engine",                                                      // WuiEngine
+        L"Hardware probe (--probe --json)",                             // WuiProbeTitle
+        L"Run probe",                                                   // WuiProbeRun
+        L"Job report",                                                  // WuiReportTitle
+        L"Engine log",                                                  // WuiLogTitle
+        L"Show",                                                        // WuiShowLog
+        L"Go",                                                          // WuiFsGo
+        L"Up",                                                          // WuiFsUp
+        L"Select current",                                              // WuiFsSelect
+        L"State document: state.json - frontend/backend communicate exclusively in JSON (HTTP + SSE)", // WuiFoot
+        L"Probe unavailable",                                           // WuiProbeUnavailable
+        L"Request failed",                                              // WuiReqFailed
+
+        // Stage 2 SSOT additions: unified dropdown option labels
+        L"AV1 10-bit (Default)",                                        // OptCodecAv1
+        L"HEVC Main10 (H.265)",                                         // OptCodecHevc
+        L"H.264 High (8-bit SDR - Deprecated)",                         // OptCodecH264
+        L"P1 (Fastest)",                                                // OptPresetP1
+        L"P2 (Faster)",                                                 // OptPresetP2
+        L"P3 (Fast)",                                                   // OptPresetP3
+        L"P4 (Medium)",                                                 // OptPresetP4
+        L"P5 (Balanced / Default)",                                     // OptPresetP5
+        L"P6 (Better Quality)",                                         // OptPresetP6
+        L"P7 (Highest Quality)",                                        // OptPresetP7
+        L"CBR (Constant Bitrate)",                                      // OptRcCbr
+        L"VBR (Variable Bitrate)",                                      // OptRcVbr
+        L"Constant QP",                                                 // OptRcQp
+        L"4K UHD (3840x2160 / 2160x3840 Auto)",                         // OptRes4k
+        L"2K QHD (2560x1440)",                                          // OptRes2k
+        L"FHD (1920x1080)",                                             // OptResFhd
+        L"Native (Source Resolution)",                                  // OptResNative
+        L"Auto Direct (9:16 Portrait / 16:9 Landscape)",                // OptGeomAuto
+        L"Pillarbox (3840x2160 Center Pad)",                            // OptGeomPillar
+        L"Level 1 (Basic)",                                             // OptVsrQ1
+        L"Level 2 (Standard)",                                          // OptVsrQ2
+        L"Level 3 (High)",                                              // OptVsrQ3
+        L"Level 4 (Ultra Quality - Default)",                           // OptVsrQ4
+        L"Original FPS (No FRUC)",                                      // OptFpsOriginal
+        L"60 FPS (NVOFA Optical Flow - Default)",                       // OptFps60Nvofa
+        L"120 FPS (NVOFA Optical Flow)",                                // OptFps120Nvofa
+        L"60 FPS (RIFE Deep Learning - TensorRT)",                      // OptFps60Rife
+        L"120 FPS (RIFE Deep Learning - TensorRT)",                     // OptFps120Rife
     },
     // Simplified Chinese
     {
@@ -158,6 +206,59 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"自检通过",                                                     // SelfTestPass
         L"自检失败",                                                     // SelfTestFail
         L"硬件探测正常",                                                 // StatusProbeOk
+
+        // Stage 2 SSOT additions: WebUI & shared parameter labels
+        L"WebUI · JSON 状态驱动 · 与后端彻底解耦",                       // WuiSubtitle
+        L"转码参数",                                                     // WuiParamsTitle
+        L"目标帧率 (FRUC 补帧)",                                         // WuiParamFps
+        L"RIFE TensorRT 引擎路径",                                       // WuiParamRifeEngine
+        L"HDR10+ 动态元数据 (ST 2094-40)",                               // WuiParamHdr10plus
+        L"自动补全输出文件名",                                           // WuiAutoOutput
+        L"3D LUT (.cube, pack 内核内应用)",                              // WuiParamLut
+        L"GPU 设备序号",                                                 // WuiParamGpu
+        L"帧数上限 (0 = 全流)",                                          // WuiParamFrames
+        L"后端引擎",                                                     // WuiEngine
+        L"硬件探针 (--probe --json)",                                    // WuiProbeTitle
+        L"运行探针",                                                     // WuiProbeRun
+        L"任务报告",                                                     // WuiReportTitle
+        L"引擎日志",                                                     // WuiLogTitle
+        L"显示",                                                         // WuiShowLog
+        L"跳转",                                                         // WuiFsGo
+        L"上级",                                                         // WuiFsUp
+        L"选择当前",                                                     // WuiFsSelect
+        L"状态文档: state.json · 前后端仅以 JSON 通信 (HTTP + SSE)",     // WuiFoot
+        L"探针不可用",                                                   // WuiProbeUnavailable
+        L"请求失败",                                                     // WuiReqFailed
+
+        // Stage 2 SSOT additions: unified dropdown option labels
+        L"AV1 10-bit (默认推荐)",                                        // OptCodecAv1
+        L"HEVC Main10 (H.265)",                                          // OptCodecHevc
+        L"H.264 High (8-bit SDR · 已废弃)",                              // OptCodecH264
+        L"P1 (最快)",                                                    // OptPresetP1
+        L"P2 (更快)",                                                    // OptPresetP2
+        L"P3 (快)",                                                      // OptPresetP3
+        L"P4 (中等)",                                                    // OptPresetP4
+        L"P5 (平衡默认)",                                                // OptPresetP5
+        L"P6 (更高画质)",                                                // OptPresetP6
+        L"P7 (最高画质)",                                                // OptPresetP7
+        L"CBR (恒定码率)",                                               // OptRcCbr
+        L"VBR (动态码率)",                                               // OptRcVbr
+        L"Constant QP (固定量化)",                                       // OptRcQp
+        L"4K UHD (3840x2160 / 2160x3840 自适应)",                        // OptRes4k
+        L"2K QHD (2560x1440)",                                           // OptRes2k
+        L"FHD (1920x1080)",                                              // OptResFhd
+        L"保持原画分辨率 (Native)",                                      // OptResNative
+        L"自动竖屏检测旋转 (9:16 / 16:9 智能适配)",                      // OptGeomAuto
+        L"横屏填充黑边居中 (Pillarbox 3840x2160)",                       // OptGeomPillar
+        L"Level 1 (Basic)",                                              // OptVsrQ1
+        L"Level 2 (Standard)",                                           // OptVsrQ2
+        L"Level 3 (High)",                                               // OptVsrQ3
+        L"Level 4 (极致超分 - 默认)",                                    // OptVsrQ4
+        L"保持原帧率 (不补帧)",                                          // OptFpsOriginal
+        L"60 FPS (NVOFA 硬件光流 - 默认)",                               // OptFps60Nvofa
+        L"120 FPS (NVOFA 硬件光流)",                                     // OptFps120Nvofa
+        L"60 FPS (RIFE 深度学习 - TensorRT)",                            // OptFps60Rife
+        L"120 FPS (RIFE 深度学习 - TensorRT)",                           // OptFps120Rife
     },
 };
 
@@ -226,9 +327,59 @@ constexpr const char* kStrIdNames[kStrIdCount] = {
     "SelfTestPass",
     "SelfTestFail",
     "StatusProbeOk",
+
+    "WuiSubtitle",
+    "WuiParamsTitle",
+    "WuiParamFps",
+    "WuiParamRifeEngine",
+    "WuiParamHdr10plus",
+    "WuiAutoOutput",
+    "WuiParamLut",
+    "WuiParamGpu",
+    "WuiParamFrames",
+    "WuiEngine",
+    "WuiProbeTitle",
+    "WuiProbeRun",
+    "WuiReportTitle",
+    "WuiLogTitle",
+    "WuiShowLog",
+    "WuiFsGo",
+    "WuiFsUp",
+    "WuiFsSelect",
+    "WuiFoot",
+    "WuiProbeUnavailable",
+    "WuiReqFailed",
+
+    "OptCodecAv1",
+    "OptCodecHevc",
+    "OptCodecH264",
+    "OptPresetP1",
+    "OptPresetP2",
+    "OptPresetP3",
+    "OptPresetP4",
+    "OptPresetP5",
+    "OptPresetP6",
+    "OptPresetP7",
+    "OptRcCbr",
+    "OptRcVbr",
+    "OptRcQp",
+    "OptRes4k",
+    "OptRes2k",
+    "OptResFhd",
+    "OptResNative",
+    "OptGeomAuto",
+    "OptGeomPillar",
+    "OptVsrQ1",
+    "OptVsrQ2",
+    "OptVsrQ3",
+    "OptVsrQ4",
+    "OptFpsOriginal",
+    "OptFps60Nvofa",
+    "OptFps120Nvofa",
+    "OptFps60Rife",
+    "OptFps120Rife",
 };
 
-// 1:1 alignment between the enumerators and both language tables.
 static_assert(sizeof(kTableW[0]) / sizeof(kTableW[0][0]) == kStrIdCount,
               "i18n English table size mismatch");
 static_assert(sizeof(kTableW[1]) / sizeof(kTableW[1][0]) == kStrIdCount,
@@ -238,9 +389,6 @@ static_assert(sizeof(kStrIdNames) / sizeof(kStrIdNames[0]) == kStrIdCount,
 
 std::atomic<Language> g_language{Language::Zh};
 
-// Minimal UTF-16 (Windows) / UTF-32 (POSIX) to UTF-8 encoder.  A local copy is
-// preferable to a dependency: the CLI must not link ICU and the GUI already
-// owns its own conversion helpers.
 void appendCodePoint(std::string& out, uint32_t code_point) {
     if (code_point <= 0x7F) {
         out.push_back(static_cast<char>(code_point));
@@ -279,6 +427,32 @@ std::string toUtf8(const wchar_t* text) {
             }
         }
         appendCodePoint(out, code_point);
+    }
+    return out;
+}
+
+std::string escapeJsonUtf8(std::string_view input) {
+    std::string out;
+    out.reserve(input.size() + 8);
+    for (const char raw : input) {
+        const unsigned char c = static_cast<unsigned char>(raw);
+        if (c == '"') {
+            out += "\\\"";
+        } else if (c == '\\') {
+            out += "\\\\";
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\r') {
+            out += "\\r";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else if (c < 0x20) {
+            char buf[8] = {};
+            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            out += buf;
+        } else {
+            out.push_back(raw);
+        }
     }
     return out;
 }
@@ -346,6 +520,15 @@ const wchar_t* trW(StrId id) noexcept {
 
 std::string tr(StrId id) { return toUtf8(trW(id)); }
 
+std::string trForLanguage(Language language, StrId id) {
+    const size_t index = static_cast<size_t>(id);
+    const size_t lang_idx = static_cast<size_t>(language);
+    if (index >= kStrIdCount || lang_idx >= static_cast<size_t>(Language::Count)) {
+        return {};
+    }
+    return toUtf8(kTableW[lang_idx][index]);
+}
+
 const char* strIdName(StrId id) noexcept {
     const size_t index = static_cast<size_t>(id);
     return index < kStrIdCount ? kStrIdNames[index] : "Unknown";
@@ -370,6 +553,27 @@ StrId strIdForError(ErrorCode code) noexcept {
         default:
             return StrId::StatusFailed;
     }
+}
+
+std::string exportI18nJson() {
+    std::string out = "{\n";
+    const Language langs[2] = {Language::En, Language::Zh};
+    for (size_t l = 0; l < 2; ++l) {
+        out += "    \"";
+        out += languageTag(langs[l]);
+        out += "\": {\n";
+        for (size_t i = 0; i < kStrIdCount; ++i) {
+            const StrId id = static_cast<StrId>(i);
+            out += "      \"";
+            out += strIdName(id);
+            out += "\": \"";
+            out += escapeJsonUtf8(trForLanguage(langs[l], id));
+            out += (i + 1 < kStrIdCount) ? "\",\n" : "\"\n";
+        }
+        out += (l == 0) ? "    },\n" : "    }\n";
+    }
+    out += "  }";
+    return out;
 }
 
 }  // namespace rtx

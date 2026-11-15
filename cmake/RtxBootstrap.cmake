@@ -47,7 +47,7 @@ if(NOT _rtx_ninja_program)
         "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip"
         "f550fec705b6d6ff58f2db3c374c2277a37691678d6aba463adcbb129108467a"
         ninja.exe
-        "${CMAKE_CURRENT_LIST_DIR}/../build/external"
+        "${CMAKE_CURRENT_LIST_DIR}/../.vs/build/external"
         _rtx_ninja_program)
 endif()
 

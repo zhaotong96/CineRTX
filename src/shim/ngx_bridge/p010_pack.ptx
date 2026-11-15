@@ -37866,8 +37866,8 @@ $L__BB3_373:
 	bra.uni 	$L__BB3_378;
 
 }
-	.file	1 "C:\\PUBLIC\\CineRTX\\p010_pack.cu"
-	.file	2 "C:\\PUBLIC\\CineRTX\\__nv_nvrtc_builtin_header.h"
+	.file	1 "p010_pack.cu"
+	.file	2 "__nv_nvrtc_builtin_header.h"
 	.section	.debug_str
 	{
 $L__info_string0:

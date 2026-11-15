@@ -45,6 +45,9 @@ public:
 
     // Repositions the child window inside the parent's client area.
     void setBounds(int x, int y, int w, int h) noexcept;
+    // Stage 2 (Track B): resizes the FLIP_DISCARD swap chain to match a new
+    // viewport size (called once on WM_EXITSIZEMOVE, never during drag).
+    void resizeSwapChain(int width, int height) noexcept;
     [[nodiscard]] float splitRatio() const noexcept { return split_ratio_; }
     void setSplitRatio(float ratio) noexcept { split_ratio_ = ratio; }
 

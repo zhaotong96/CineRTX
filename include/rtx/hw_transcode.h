@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// Stage-1 NVIDIA transcode pipeline: libavformat demux -> NVDEC -> NVENC ->
-// libavformat mux, with decoded frames staying in shim-owned device memory.
-// The raw NV12/P010 artefact path exercises the same NVDEC/NVENC sessions but
-// explicitly accounts for its host staging traffic.
+// Unified NVIDIA remaster transcode pipeline: libavformat demux -> NVDEC ->
+// Dual-Path FRUC (NVOFA / TensorRT RIFE) -> NGX VSR + TrueHDR -> P010 Pack v2
+// -> NVENC 10-bit (AV1 / HEVC Main10) -> libavformat mux, with all frames
+// remaining in device memory (zero host pixel copies).
 
 #pragma once
 
@@ -21,8 +21,8 @@
 
 namespace rtx {
 
-// Snapshot handed to the optional progress callback after every decoded frame.
-// It is called from the transcoding thread; consumers must not block.
+// Snapshot handed to the optional progress callback after every decoded/encoded frame.
+// Invoked from the transcoding thread; consumers must not block.
 struct HwTranscodeProgress {
     int64_t frames_decoded = 0;
     int64_t frames_encoded = 0;
@@ -34,19 +34,13 @@ struct HwTranscodeOptions {
     std::filesystem::path input_path;
     std::filesystem::path output_path;
 
-    // Raw NV12 input geometry.  Container mode reads geometry from the demuxer.
-    int width = 0;
-    int height = 0;
     int frame_limit = 0;  // 0 = consume the whole stream
 
-    VideoCodec codec = VideoCodec::AV1;
-    int bit_depth = 0;  // 0 = preserve source depth
-    int bitrate_kbps = 0;
-    int preset = 5;
-    int rate_control = 0;  // 0 = CBR, 1 = VBR, 2 = const-QP
-    int qp = 0;
-    Rational fps{0, 1};
-    bool hdr = true;
+    VideoCodec codec = VideoCodec::AV1;  // AV1 10-bit (default) or HEVC Main10
+    int bitrate_kbps = 0;                // 0 = auto
+    int preset = 5;                      // 1..7 (NVENC P1..P7, default P5)
+    int rate_control = 0;                // 0 = CBR, 1 = VBR, 2 = const-QP
+    int qp = 24;                         // 0..51 (unified default 24 across CLI/GUI/WebUI)
     bool copy_audio = true;
     // Phase 7 (Task 7-B2): emit SMPTE ST 2094-40 (HDR10+) dynamic metadata
     // per frame (AV1 OBU_METADATA / HEVC prefix SEI).
@@ -57,8 +51,8 @@ struct HwTranscodeOptions {
 
     // Product remaster geometry. Decoded NV12/P010 frames always traverse
     // the NGX bridge (preprocess -> VSR -> TrueHDR -> pack v2) before NVENC.
-    int target_width = 3840;   // 4K UHD default
-    int target_height = 2160;  // 4K UHD default
+    int target_width = 3840;   // 4K UHD default (0 = native source resolution)
+    int target_height = 2160;  // 4K UHD default (0 = native source resolution)
     bool vsr_enabled = true;
     int vsr_quality = 4;    // 1..4, NGX VSR quality level (default 4 Ultra)
     int peak_nits = 1000;   // 400..4000, TrueHDR peak luminance in cd/m^2
@@ -72,11 +66,13 @@ struct HwTranscodeOptions {
     // Frame-rate up-conversion (FRUC) options (defaults to 60fps hardware optical flow).
     bool fruc_enabled = true;
     Rational target_fps{60, 1};  // Default 60 FPS target
+    std::filesystem::path rife_engine_path;  // Route B: TensorRT RIFE (.engine)
 
     bool verbose = false;
 
-    // Polled once per frame by the container path.  A set flag aborts the
-    // transcode with ErrorCode::State and a "cancelled" detail.
+    // Polled once per frame by the container path. A set flag aborts the
+    // transcode cleanly (flushing already encoded frames and writing the
+    // container trailer) and returns ErrorCode::State ("transcode cancelled").
     const std::atomic<bool>* cancel = nullptr;
     // Phase 7 realtime monitoring: the GUI publishes the A/B split position
     // (0..1) through this atomic; the transcode loop samples it per frame.
@@ -91,7 +87,7 @@ struct HwTranscodeOptions {
 struct HwTranscodeReport {
     std::string backend = "nvidia";
     std::string device;
-    std::string path;  // "container" or "raw-artifact"
+    std::string path;  // "vsr-remaster"
 
     std::string input_container;
     std::string output_container;
@@ -101,7 +97,7 @@ struct HwTranscodeReport {
     int input_height = 0;
     int output_width = 0;
     int output_height = 0;
-    int output_bit_depth = 8;
+    int output_bit_depth = 10;
 
     int64_t packets_read = 0;
     int64_t packets_written = 0;
@@ -117,13 +113,8 @@ struct HwTranscodeReport {
 
     bool zero_copy_main_loop = false;
     double elapsed_ms = 0.0;
-    // Wall time of the demux -> decode -> remaster -> encode loop only,
-    // excluding demuxer open, NGX/bridge creation and NVENC session setup.
-    // Zero when the path does not measure it separately.
     double main_loop_ms = 0.0;
 
-    // VSR-remaster stage accounting, averaged over report.frames_encoded
-    // (max_* is the worst single frame).  All zero on the non-remaster paths.
     double remaster_preprocess_ms = 0.0;
     double remaster_ngx_ms = 0.0;
     double remaster_pack_kernel_ms = 0.0;
@@ -131,33 +122,21 @@ struct HwTranscodeReport {
     double remaster_pack_kernel_max_ms = 0.0;
     uint64_t remaster_pack_launches = 0;
     int vsr_quality = 0;
-    // Phase 7: real GPU-reduced luminance statistics over the whole stream
-    // (nits).  Zero when the run produced no frame statistics.
     int measured_max_cll_nits = 0;
     int measured_max_fall_nits = 0;
 
     // Phase 8: dual-path FRUC statistics
     int64_t frames_interpolated = 0;
     int64_t fruc_scene_cuts = 0;
+    int64_t fruc_failures = 0;
     std::string fruc_backend = "off";
 
-    // Emits a machine-readable record for the Gate 1 audit script.
+    // Emits a machine-readable JSON record.
     std::string toJson() const;
 };
 
-// The only product transcode: NVDEC NV12/P010 -> rtx_ngx_bridge remaster
-// (VSR + TrueHDR + pack v2, all device memory) -> NVENC HEVC Main10 with HDR10
-// VUI/SEI. Both GUI and CLI call this function; it reports path =
-// "vsr-remaster" with zero host pixel copies.
 Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& options);
 
-// Phase 7 (Task 7-C2, verdict §4.3 iron rule 3): timeline scrubbing.  Seeks
-// the input to the key frame at or before `seek_pts_ms` (milliseconds into
-// the stream), decodes exactly one frame, remasters it through the bridge
-// with the A/B preview path enabled and publishes the 960x540 R10G10B10A2
-// frame through options.preview.  No output file is produced.
 Result<void> runScrubPreview(const HwTranscodeOptions& options, int64_t seek_pts_ms);
-
-
 
 }  // namespace rtx
