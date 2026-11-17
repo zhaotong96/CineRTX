@@ -140,13 +140,27 @@ enum class StrId : uint32_t {
     OptFps60Rife,
     OptFps120Rife,
 
+    // Phase 10 SSOT additions (CQ / CRF / CPU Codecs / Pipeline Order / Queue)
+    OptRcCq,
+    OptRcCrf,
+    OptCodecAv1Cpu,
+    OptCodecHevcCpu,
+    ParamPipelineOrder,
+    OptPipeVsrFirst,
+    OptPipeFgFirst,
+    BtnQueueAdd,
+    BtnQueueRemove,
+    BtnQueueUp,
+    BtnQueueDown,
+    BtnQueueSkip,
+
     Count
 };
 
 using TextId = StrId;  // historical alias, kept for call sites
 
 inline constexpr size_t kStrIdCount = static_cast<size_t>(StrId::Count);
-static_assert(kStrIdCount == 113, "the i18n SSOT table is specified as 113 strongly-typed entries");
+static_assert(kStrIdCount == 125, "the i18n SSOT table is specified as 113 strongly-typed entries");
 
 Language currentLanguage() noexcept;
 void setLanguage(Language language) noexcept;

@@ -265,34 +265,55 @@ struct RtxEncoder {
         }
 
         NV_ENC_RC_PARAMS& rc = out->rcParams;
+        const int32_t q_val = std::clamp(config.qp > 0 ? config.qp : 22, 0, 51);
         switch (config.rate_control) {
-            case 1:
+            case RTX_RC_CQ: {
                 rc.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+                rc.targetQuality = static_cast<uint8_t>(std::clamp(q_val, 1, 51));
+                rc.targetQualityLSB = 0;
+                rc.averageBitRate = 0u;
+                const uint32_t cap_bps = config.bitrate_kbps > 0
+                    ? static_cast<uint32_t>(config.bitrate_kbps) * 1000u
+                    : 120000000u;
+                rc.maxBitRate = cap_bps;
+                rc.vbvBufferSize = cap_bps;
                 break;
-            case 2:
+            }
+            case RTX_RC_CONSTQP: {
                 rc.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+                rc.constQP.qpIntra  = static_cast<uint32_t>(std::max(0, q_val - 2));
+                rc.constQP.qpInterP = static_cast<uint32_t>(q_val);
+                rc.constQP.qpInterB = static_cast<uint32_t>(std::min(51, q_val + 2));
                 break;
-            default:
+            }
+            case RTX_RC_VBR: {
+                rc.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+                rc.averageBitRate = bitrate;
+                rc.maxBitRate = static_cast<uint32_t>(bitrate * 1.5);
+                rc.vbvBufferSize = bitrate * 2u;
+                break;
+            }
+            case RTX_RC_CBR:
+            default: {
                 rc.rateControlMode = NV_ENC_PARAMS_RC_CBR;
+                rc.averageBitRate = bitrate;
+                rc.maxBitRate = bitrate;
+                rc.vbvBufferSize = bitrate * 2u;
                 break;
-        }
-        rc.averageBitRate = bitrate;
-        rc.maxBitRate = config.rate_control == 1 ? static_cast<uint32_t>(bitrate * 1.5) : bitrate;
-        rc.vbvBufferSize = bitrate * 2u;
-        if (config.rate_control == 2) {
-            const int32_t qp = std::clamp(config.qp > 0 ? config.qp : 24, 0, 51);
-            rc.constQP.qpIntra = static_cast<uint32_t>(qp);
-            rc.constQP.qpInterP = static_cast<uint32_t>(qp);
-            rc.constQP.qpInterB = static_cast<uint32_t>(qp);
+            }
         }
         rc.enableMinQP = 0;
         rc.enableMaxQP = 0;
         rc.enableInitialRCQP = 0;
-        rc.enableAQ = 0;
-        rc.enableTemporalAQ = 0;
-        rc.enableLookahead = 0;
-        rc.zeroReorderDelay = 1;
-
+        if (config.rate_control != RTX_RC_CONSTQP && config.spatial_aq != 0) {
+            rc.enableAQ = 1u;
+            rc.aqStrength = static_cast<uint32_t>(std::clamp(config.aq_strength > 0 ? config.aq_strength : 8, 1, 15));
+        } else {
+            rc.enableAQ = 0u;
+        }
+        rc.enableTemporalAQ = 0u;
+        rc.enableLookahead = 0u;
+        rc.zeroReorderDelay = 1u;
         const bool hdr = config.hdr.enabled != 0;
         // The shim carries H.265 colour code points.  Use them for both HDR
         // and SDR sessions so the VUI matches the container flags copied from
@@ -483,6 +504,9 @@ struct RtxEncoder {
         picture.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
         picture.inputTimeStamp = static_cast<uint64_t>(frame.pts);
         picture.frameIdx = frame_index++;
+        if (frame.keyframe != 0) {
+            picture.encodePicFlags |= NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+        }
 #if defined(_WIN32)
         if (async_registered) {
             picture.completionEvent = completion_event;

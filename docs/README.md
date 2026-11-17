@@ -55,18 +55,40 @@
 | **30** | [`phase9/CineRTX_Phase9.1_终审通过暨全栈收官战略封板裁决书.md`](phase9/CineRTX_Phase9.1_终审通过暨全栈收官战略封板裁决书.md) | 领域专家组正式签署通过 Phase 9.1 终审验收并批准 CineRTX 全栈收官战略封板裁决书 |
 | **31** | [`phase9/CineRTX_Phase9.1_开源推送前终检修正与GitHub发布执行指引.md`](phase9/CineRTX_Phase9.1_开源推送前终检修正与GitHub发布执行指引.md) | 开源推送前 CI 阻断项清理实录、云端 TensorRT 头文件供给、Git 提交与 GitHub Release 执行指引 |
 | **32** | [`phase9/CineRTX_Phase9.1_推送前仓库卫生完善与终审封板专家委托书.md`](phase9/CineRTX_Phase9.1_推送前仓库卫生完善与终审封板专家委托书.md) | 用户发版前审查提出的四大诉求专项委托（Optical Flow 驱动确证、tools 脚本绝灭与 CMake 替代、tests 瘦身与最终发版大典） |
-| **33** | [`phase9/CineRTX_Phase9.1_推送前仓库卫生完善与CMake全原生闭环专家裁决暨SuperPower施工规范.md`](phase9/CineRTX_Phase9.1_推送前仓库卫生完善与CMake全原生闭环专家裁决暨SuperPower施工规范.md) | **CMake 全原生闭环裁决规范 (006)**：消灭 `tools/` 脚本、收敛 `tests/` 10 套 C++26 套件与零 Python 闭环施工规范。 |
-| **34** | [`phase9/CineRTX_Phase9.1_专家直通代建完成暨Git索引同步与封板推送指引.md`](phase9/CineRTX_Phase9.1_专家直通代建完成暨Git索引同步与封板推送指引.md) | **专家直通代建指引 (006B)**：专家直通代建落地清单、`Optical_Flow_SDK_5.0.7` 深度解析与 Git 索引同步指引。 |
-| **35** | [`phase9/CineRTX_Phase9.1_全栈正式发布与开源交付大典.md`](phase9/CineRTX_Phase9.1_全栈正式发布与开源交付大典.md) | **正式发布与开源交付大典 (007)**：Phase 9.1 终审封板大典、全链路验收矩阵与 `v0.1.0` 正式开源交付宣告。 |
+| 33 | `phase9/CineRTX_Phase9.1_推送前仓库卫生完善与CMake全原生闭环专家裁决暨SuperPower施工规范.md` | **CMake 全原生闭环裁决规范 (006)**：消灭 `tools/` 脚本、收敛 `tests/` 10 套 C++26 套件与零 Python 闭环施工规范。 |
+| 34 | `phase9/CineRTX_Phase9.1_专家直通代建完成暨Git索引同步与封板推送指引.md` | **专家直通代建指引 (006B)**：专家直通代建落地清单、`Optical_Flow_SDK_5.0.7` 深度解析与 Git 索引同步指引。 |
+| 35 | `phase9/CineRTX_Phase9.1_全栈正式发布与开源交付大典.md` | **正式发布与开源交付大典 (007)**：Phase 9.1 终审封板大典、全链路验收矩阵与 `v0.2.0` 正式开源交付宣告。 |
+
+---
+
+## 三（续）、 Phase 10（v0.2.0）全栈架构提纯与核心算法演进施工规范 (`docs/phase10/`，13 篇 SuperPower 规范、施工单与委托书)
+
+| 序号 | 路径 | 权威职责 |
+| :--- | :--- | :--- |
+| **36** | [`phase10/01_CineRTX_Phase10_架构提纯与核心算法演进SuperPower总纲.md`](phase10/01_CineRTX_Phase10_架构提纯与核心算法演进SuperPower总纲.md) | **Phase 10 架构演进总纲 (001)**：六大核心任务根因取证、因果推演、四轨道物理隔离矩阵与 Gate 10.1~10.6 总门禁 |
+| **37** | [`phase10/02_CineRTX_Phase10_施工单_Track_10A_代码卫生与零附属DLL提纯.md`](phase10/02_CineRTX_Phase10_施工单_Track_10A_代码卫生与零附属DLL提纯.md) | **Track 10A 施工单**：拔除 `RTX_BUILD_TESTS` 残留、裁剪 `p010_pack.ptx` 86% 死核膨胀、静态合并 `rtx_ngx_bridge` 消灭附属 DLL 与重复工具函数 |
+| **38** | [`phase10/03_CineRTX_Phase10_施工单_Track_10B_全模态编码引擎_CQ_QP_与CPU_CRF.md`](phase10/03_CineRTX_Phase10_施工单_Track_10B_全模态编码引擎_CQ_QP_与CPU_CRF.md) | **Track 10B 施工单**：NVENC `CQ`（感知恒定质量 + Spatial AQ）、阶梯 `QP` 与静态集成 `libsvtav1`/`libx265` 的 10-bit 纯 CPU `CRF` 编码器 |
+| **39** | [`phase10/04_CineRTX_Phase10_施工单_Track_10C_ShotGroup镜头分组防果冻与VSR前置补帧拓扑.md`](phase10/04_CineRTX_Phase10_施工单_Track_10C_ShotGroup镜头分组防果冻与VSR前置补帧拓扑.md) | **Track 10C 施工单**：$8\times 8$ 分块突变 + 自适应基线切镜检测、类 GOP `ShotGroupSegmenter` 防果冻隔离、VSR Reset 与 `vsr-first`（先超分后补帧）拓扑 |
+| **40** | [`phase10/05_CineRTX_Phase10_施工单_Track_10D_异构多文件动态任务队列与三端重构.md`](phase10/05_CineRTX_Phase10_施工单_Track_10D_异构多文件动态任务队列与三端重构.md) | **Track 10D 施工单**：`rtx::EncoderJobQueue` 多文件异构参数动态任务队列、运行期实时增删改排与 Win32/WebUI/CLI 三端重构 |
+| **41** | [`phase10/06_CineRTX_Phase10_领域专家技术评审与验收委托函.md`](phase10/06_CineRTX_Phase10_领域专家技术评审与验收委托函.md) | **专家技术评审委托函**：委托领域专家对零附属 DLL、CQ/QP/CRF、ShotGroup、JobQueue 展开 Peer Review |
+| **42** | [`phase10/07_CineRTX_Phase10_专家驳回裁决暨全链路接线闭环SuperPower返工规范.md`](phase10/07_CineRTX_Phase10_专家驳回裁决暨全链路接线闭环SuperPower返工规范.md) | **Phase 10 驳回返工规范 (RW-P10-01~04)**：实证拦截孤岛式未接线脚手架，下达 PTX 重编、SSOT/CPU-CRF/ShotGroup/VSR-First/JobQueue 全链路接线指令 |
+| **43** | [`phase10/08_CineRTX_Phase10_WebUI_v2重构评审与三端对齐SuperPower规范.md`](phase10/08_CineRTX_Phase10_WebUI_v2重构评审与三端对齐SuperPower规范.md) | **WebUI v2 重构评审总规范 (WUI-P10-01~05)**：肯定视觉与纯原生架构跃迁，拦截 `CQ/CRF/pipelineOrder` 缺失、`syncProfileToQueue` 状态越权与浏览器端 `queuePump` 断链风险 |
+| **44** | [`phase10/09_CineRTX_Phase10_施工单_Track_10W1_SSOT参数契约与全模态编码选项.md`](phase10/09_CineRTX_Phase10_施工单_Track_10W1_SSOT参数契约与全模态编码选项.md) | **Track 10W-1 施工单**：WebUI 20 项 SSOT 参数契约、全模态 `av1_cpu`/`hevc_cpu` 选项、`cq`/`crf`/`qp` 联动与预设映射 |
+| **45** | [`phase10/10_CineRTX_Phase10_施工单_Track_10W2_解除面板锁死与状态隔离.md`](phase10/10_CineRTX_Phase10_施工单_Track_10W2_解除面板锁死与状态隔离.md) | **Track 10W-2 施工单**：拔除 `data-lock` 运行期全局锁死、双模式检查器与消除跨任务越权篡改 |
+| **46** | [`phase10/11_CineRTX_Phase10_施工单_Track_10W3_服务端常驻多文件异构任务队列.md`](phase10/11_CineRTX_Phase10_施工单_Track_10W3_服务端常驻多文件异构任务队列.md) | **Track 10W-3 施工单**：`server.py` 常驻多文件异步队列引擎、彻底拔除 `setTimeout queuePump` 与多选导入 |
+| **47** | [`phase10/12_CineRTX_Phase10_施工单_Track_10W4_视口交互遮挡修复与双语样式闭环.md`](phase10/12_CineRTX_Phase10_施工单_Track_10W4_视口交互遮挡修复与双语样式闭环.md) | **Track 10W-4 施工单**：Player A/B 指针捕获拖拽、视口占位层隐藏、NLE 播放头时间同步与双语 CSS 语法闭环 |
+| **48** | [`phase10/13_CineRTX_Phase10_WebUI_v2重构与施工单08-12终审验收报告.md`](phase10/13_CineRTX_Phase10_WebUI_v2重构与施工单08-12终审验收报告.md) | **WebUI v2 终审验收报告 (013)**：领域专家终审门禁核验（评分 96/100，Gate WUI-10.1~10.5 全部通过） |
+| **49** | [`phase10/14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md`](phase10/14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md) | **Phase 10 全栈收官委托书 (014)**：呈报领域专家组裁决 Phase 10 全栈成果、批准授予 `v0.2.0` 正式版本标签 |
+
 
 ## 四、 演进归档与待办台账
 
 | 序号 | 文档 | 核心内容 |
 | :---: | :--- | :--- |
-| **36** | [`archive/Phase1_to_Phase7_Evolution_Digest.md`](archive/Phase1_to_Phase7_Evolution_Digest.md) | Phase 1–7 单一权威演进归档：各阶段目标/存活遗产/废除设计黑名单/硬件踩坑全记录（替代原 51 篇阶段文档与 11 篇 TODO 分册） |
-| **37** | [`TODO/README.md`](TODO/README.md) | 历史待办全量闭环台账与 v0.3+ 远期展望（奥卡姆剃刀军规） |
-| **38** | [`../webui/README.md`](../webui/README.md) | 浏览器端 WebUI（1 html + 1 js + 1 css + 1 json 状态持久化层，前后端仅以 JSON 通信 HTTP+SSE；`server.py` 为零依赖 JSON 桥） |
+| **33** | [`archive/Phase1_to_Phase7_Evolution_Digest.md`](archive/Phase1_to_Phase7_Evolution_Digest.md) | Phase 1–7 单一权威演进归档：各阶段目标/存活遗产/废除设计黑名单/硬件踩坑全记录（替代原 51 篇阶段文档与 11 篇 TODO 分册） |
+| **34** | [`TODO/README.md`](TODO/README.md) | 历史待办全量闭环台账与 v0.3+ 远期展望（奥卡姆剃刀军规） |
+| **35** | [`../webui/README.md`](../webui/README.md) | 浏览器端 WebUI（1 html + 1 js + 1 css + 1 json 状态持久化层，前后端仅以 JSON 通信 HTTP+SSE；`server.py` 为零依赖 JSON 桥） |
 
 ---
 
-> **归档说明**：Phase 1–7 全部阶段过程文档、交接文档、GUI 演进档案与 `docs/TODO/` 历史分册已于 2026-11-14 阶段三收官时提炼入本索引第 36 项的演进归档后物理清理；Phase 9.1 全项终审复验报告、呈报委托书、专家战略封板裁决书、GitHub 开源发布指引及第 33～35 项 CMake 全原生闭环施工规范与发布大典已完备归档入本索引第 28～35 项。全仓单测基线确立为 74 项。
+> **归档说明**：Phase 1–7 全部阶段过程文档、交接文档、GUI 演进档案与 `docs/TODO/` 历史分册已于 2026-11-14 阶段三收官时提炼入本索引第 32 项的演进归档后物理清理；Phase 9.1 全项终审复验报告、呈报委托书、专家战略封板裁决书及 GitHub 开源发布指引已完备归档入本索引第 28～31 项。全仓单测基线确立为 75 项。

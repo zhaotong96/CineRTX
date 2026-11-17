@@ -33,6 +33,15 @@ set "SYS32=%SystemRoot%\System32"
 REM Guarantee System32 is reachable for child processes even with empty PATH.
 set "PATH=!SYS32!;%SystemRoot%;!PATH!"
 
+where.exe cl.exe >nul 2>nul
+if errorlevel 1 (
+    for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do (
+        if exist "%%i\VC\Auxiliary\Build\vcvarsall.bat" (
+            call "%%i\VC\Auxiliary\Build\vcvarsall.bat" x64
+        )
+    )
+)
+
 if not exist "!DLDIR!"   mkdir "!DLDIR!"
 if not exist "!TOOLDIR!" mkdir "!TOOLDIR!"
 

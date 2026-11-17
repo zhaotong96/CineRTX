@@ -29,6 +29,11 @@ else()
 endif()
 
 file(READ "${INPUT_PTX}" _ptx_text)
+# Clamp PTX ISA header to .version 7.5 / .target sm_75 so drivers prior to CUDA 13.0 R580
+# never reject the module with CUDA_ERROR_UNSUPPORTED_PTX_VERSION (222).
+string(REGEX REPLACE "\\.version[ \t]+[0-9]+\\.[0-9]+" ".version 7.5" _ptx_text "${_ptx_text}")
+string(REGEX REPLACE "\\.target[ \t]+sm_[0-9]+" ".target sm_75" _ptx_text "${_ptx_text}")
+
 get_filename_component(_out_dir "${OUTPUT_HEADER}" DIRECTORY)
 if(_out_dir)
     file(MAKE_DIRECTORY "${_out_dir}")

@@ -16,7 +16,7 @@
 using namespace rtx;
 
 RTX_TEST(i18n_table_bounds) {
-    RTX_CHECK_EQ(static_cast<size_t>(StrId::Count), static_cast<size_t>(113));
+    RTX_CHECK_EQ(static_cast<size_t>(StrId::Count), static_cast<size_t>(125));
     RTX_CHECK_EQ(static_cast<size_t>(Language::Count), static_cast<size_t>(2));
 
     const Language saved = currentLanguage();
@@ -86,21 +86,37 @@ RTX_TEST(i18n_switch_latency) {
 }
 
 RTX_TEST(param_schema_ssot_contract) {
+    RTX_CHECK_EQ(kParamSchema.size(), static_cast<size_t>(20));
+
     TranscodeProfile profile{};
     profile.input = "clip.mp4";
     const auto valid = validateAndNormalizeProfile(profile, /*require_io_paths=*/true);
     RTX_REQUIRE(valid.has_value());
     RTX_CHECK_EQ(profile.output, std::string("clip_remaster_av1.mp4"));
-    RTX_CHECK_EQ(profile.qp, 24);
+    RTX_CHECK_EQ(profile.rate_control, std::string("cq"));
+    RTX_CHECK_EQ(profile.qp, 22);
     RTX_CHECK_EQ(profile.preset, 5);
     RTX_CHECK_EQ(profile.vsr_quality, 4);
     RTX_CHECK_EQ(profile.peak_nits, 1000);
     RTX_CHECK_EQ(profile.fps_mode, std::string("60-nvofa"));
+    RTX_CHECK_EQ(profile.pipeline_order, std::string("vsr-first"));
 
     // Changing codec to hevc with auto_output=true updates auto-generated output suffix.
     profile.codec = "hevc";
     RTX_REQUIRE(validateAndNormalizeProfile(profile, true).has_value());
     RTX_CHECK_EQ(profile.output, std::string("clip_remaster_hevc.mp4"));
+
+    // CPU codecs
+    profile.codec = "av1_cpu";
+    profile.rate_control = "cq"; // Should map to crf
+    RTX_REQUIRE(validateAndNormalizeProfile(profile, true).has_value());
+    RTX_CHECK_EQ(profile.rate_control, std::string("crf"));
+    RTX_CHECK_EQ(profile.output, std::string("clip_remaster_av1_cpu.mp4"));
+
+    profile.codec = "hevc_cpu";
+    profile.rate_control = "crf";
+    RTX_REQUIRE(validateAndNormalizeProfile(profile, true).has_value());
+    RTX_CHECK_EQ(profile.output, std::string("clip_remaster_hevc_cpu.mp4"));
 
     // Deprecated 8-bit SDR H.264 output is rejected by the 10-bit HDR10 pipeline.
     profile.codec = "h264";
@@ -109,10 +125,11 @@ RTX_TEST(param_schema_ssot_contract) {
     // JSON parsing and schema export round-trip.
     const std::string schema_json = exportSchemaJson();
     RTX_CHECK(schema_json.find("\"defaults\":") != std::string::npos);
-    RTX_CHECK(schema_json.find("\"qp\": 24") != std::string::npos);
+    RTX_CHECK(schema_json.find("\"qp\": 22") != std::string::npos);
+    RTX_CHECK(schema_json.find("\"pipelineOrder\": \"vsr-first\"") != std::string::npos);
 
     auto parsed = parseProfileFromJson(
-        "{\"profile\":{\"input\":\"a.mp4\",\"codec\":\"hevc\",\"preset\":6,\"peakNits\":1500,\"fpsMode\":\"60-rife\"}}");
+        "{\"profile\":{\"input\":\"a.mp4\",\"codec\":\"hevc\",\"preset\":6,\"peakNits\":1500,\"fpsMode\":\"60-rife\",\"pipelineOrder\":\"fg-first\"}}");
     RTX_REQUIRE(parsed.has_value());
     RTX_REQUIRE(validateAndNormalizeProfile(parsed.value(), true).has_value());
     const HwTranscodeOptions hw = profileToHwOptions(parsed.value());
@@ -120,4 +137,5 @@ RTX_TEST(param_schema_ssot_contract) {
     RTX_CHECK_EQ(hw.preset, 6);
     RTX_CHECK_EQ(hw.peak_nits, 1500);
     RTX_CHECK(!hw.rife_engine_path.empty());
+    RTX_CHECK_EQ(hw.vsr_before_fg, false);
 }

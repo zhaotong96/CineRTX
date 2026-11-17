@@ -298,97 +298,6 @@ extern "C" __global__ void rtx_yuv_to_rgb10(
 }
 
 
-extern "C" __global__ void rtx_rgba16f_to_p010_bt2020nc(
-    cudaSurfaceObject_t input, unsigned short* __restrict__ y_plane,
-    unsigned short* __restrict__ uv_plane, int width, int height, int y_pitch_samples,
-    int uv_pitch_samples, int input_is_pq) {
-    const int x0 = (blockIdx.x * blockDim.x + threadIdx.x) * 2;
-    const int y0 = (blockIdx.y * blockDim.y + threadIdx.y) * 2;
-    if (x0 >= width || y0 >= height) {
-        return;
-    }
-
-    // The public entry point only accepts even geometry, so the whole 2x2
-    // block is in bounds.  Read the four luma pixels once; the chroma filter
-    // additionally reads the surrounding ring.
-    const float3 p00 = readRgb(input, x0, y0, width, height, input_is_pq);
-    const float3 p10 = readRgb(input, x0 + 1, y0, width, height, input_is_pq);
-    const float3 p01 = readRgb(input, x0, y0 + 1, width, height, input_is_pq);
-    const float3 p11 = readRgb(input, x0 + 1, y0 + 1, width, height, input_is_pq);
-
-    int y00 = 0;
-    int y10 = 0;
-    int y01 = 0;
-    int y11 = 0;
-    int u10 = 0;
-    int v10 = 0;
-
-    const float d00 = ignDither(x0, y0);
-    const float d10 = ignDither(x0 + 1, y0);
-    const float d01 = ignDither(x0, y0 + 1);
-    const float d11 = ignDither(x0 + 1, y0 + 1);
-
-    // Dither is applied on the normalised signal before the limited-range
-    // scale, which keeps the perturbation at half a 10-bit code value.
-    const float yn00 = kKrBt2020 * p00.x + kKgBt2020 * p00.y + kKbBt2020 * p00.z;
-    const float yn10 = kKrBt2020 * p10.x + kKgBt2020 * p10.y + kKbBt2020 * p10.z;
-    const float yn01 = kKrBt2020 * p01.x + kKgBt2020 * p01.y + kKbBt2020 * p01.z;
-    const float yn11 = kKrBt2020 * p11.x + kKgBt2020 * p11.y + kKbBt2020 * p11.z;
-    y00 = max(64, min(940, __float2int_rn(yn00 * 876.0f + 64.0f + d00)));
-    y10 = max(64, min(940, __float2int_rn(yn10 * 876.0f + 64.0f + d10)));
-    y01 = max(64, min(940, __float2int_rn(yn01 * 876.0f + 64.0f + d01)));
-    y11 = max(64, min(940, __float2int_rn(yn11 * 876.0f + 64.0f + d11)));
-
-    y_plane[static_cast<size_t>(y0) * y_pitch_samples + x0] =
-        static_cast<unsigned short>(y00 << 6);
-    y_plane[static_cast<size_t>(y0) * y_pitch_samples + x0 + 1] =
-        static_cast<unsigned short>(y10 << 6);
-    y_plane[static_cast<size_t>(y0 + 1) * y_pitch_samples + x0] =
-        static_cast<unsigned short>(y01 << 6);
-    y_plane[static_cast<size_t>(y0 + 1) * y_pitch_samples + x0 + 1] =
-        static_cast<unsigned short>(y11 << 6);
-
-    // Separable [1,2,1]/4 x [1,2,1]/4 low-pass centred exactly on p00 (the
-    // top-left luma sample).  The equal-weight 2x2 box filter used previously
-    // sat at (0.5, 0.5), i.e. a 0.25 chroma-pixel phase error against the
-    // topleft VUI signal.
-    const float3 ring[9] = {
-        readRgb(input, x0 - 1, y0 - 1, width, height, input_is_pq),
-        readRgb(input, x0, y0 - 1, width, height, input_is_pq),
-        readRgb(input, x0 + 1, y0 - 1, width, height, input_is_pq),
-        readRgb(input, x0 - 1, y0, width, height, input_is_pq),
-        p00,
-        p10,
-        readRgb(input, x0 - 1, y0 + 1, width, height, input_is_pq),
-        p01,
-        p11,
-    };
-    const float w[9] = {0.0625f, 0.125f, 0.0625f, 0.125f, 0.25f,
-                        0.125f,  0.0625f, 0.125f, 0.0625f};
-
-    float r_avg = 0.0f;
-    float g_avg = 0.0f;
-    float b_avg = 0.0f;
-#pragma unroll
-    for (int i = 0; i < 9; ++i) {
-        r_avg += w[i] * ring[i].x;
-        g_avg += w[i] * ring[i].y;
-        b_avg += w[i] * ring[i].z;
-    }
-    const float y_avg = kKrBt2020 * r_avg + kKgBt2020 * g_avg + kKbBt2020 * b_avg;
-    const float cb = (b_avg - y_avg) / kBuBt2020;
-    const float cr = (r_avg - y_avg) / kRvBt2020;
-    const float chroma_dither = 0.5f * ignDither(x0 >> 1, y0 >> 1);
-    u10 = max(64, min(960, __float2int_rn(cb * 896.0f + 512.0f + chroma_dither)));
-    v10 = max(64, min(960, __float2int_rn(cr * 896.0f + 512.0f + chroma_dither)));
-
-    // One coalesced 32-bit store: low half = U, high half = V (little endian).
-    const size_t uv_word = (static_cast<size_t>(y0 >> 1) * uv_pitch_samples + x0) / 2;
-    reinterpret_cast<unsigned int*>(uv_plane)[uv_word] =
-        static_cast<unsigned int>(u10 << 6) |
-        (static_cast<unsigned int>(v10 << 6) << 16);
-}
-
 // ---------------------------------------------------------------------------
 // pack v2 (P0-1.3): TrueHDR FP16 output -> P010.
 //
@@ -583,275 +492,154 @@ extern "C" __global__ void rtx_rgba16f_to_p010_bt2020nc_v2(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 9 (Task 9-A1): Linux headless fused remaster kernel.
-//
-// rtx_cuda_remaster_fused_p010 reads the decoded NV12/P010 planes directly
-// and writes the 4K P010 planes in ONE launch, skipping the D3D12 RGBA16F
-// middleman (66.3 MB round trip) entirely:
-//   1. bicubic (Catmull-Rom, 4 taps) spatio-temporal-stable upscale, with a
-//      contrast-adaptive-sharpening (CAS) pass whose strength follows
-//      vsr_quality (1..4);
-//   2. parameterised ITU-R BT.2446 Method C SDR (BT.709) -> HDR10 (BT.2020
-//      PQ) inverse tone mapping, modulated by the previous frame's y_norm;
-//   3. FP16 3D LUT hardware trilinear lookup;
-//   4. PQ encode + 2x2 macroblock chroma downsample + P010 pack.
-// ---------------------------------------------------------------------------
-
-__device__ __forceinline__ float bt709Eotf(float v) {
-    // BT.709 OETF inverse (gamma 2.4 piecewise, per BT.1886 reference display).
-    const float a = 0.09929682680944f;
-    const float threshold = 0.081242858298635f;
-    const float linear = v < threshold ? v / 4.5f : powf((v + a) / 1.099f, 2.4f);
-    return fmaxf(linear, 0.0f);
+extern "C" __global__ void rtx_rgba16f_to_p010_bt2020nc(
+    cudaSurfaceObject_t input, unsigned short* __restrict__ y_plane,
+    unsigned short* __restrict__ uv_plane, int width, int height,
+    int y_pitch_samples, int uv_pitch_samples, int input_is_pq) {
+    rtx_rgba16f_to_p010_bt2020nc_v2(input, y_plane, uv_plane, width, height,
+                                    y_pitch_samples, uv_pitch_samples, input_is_pq,
+                                    /*input_is_scrgb=*/0, /*linear_scale_nits=*/80.0f,
+                                    /*lut_tex=*/0, /*lut_dim=*/0, /*stats_devptr=*/nullptr,
+                                    /*preview_ptr=*/0ull, /*preview_width=*/0, /*preview_height=*/0,
+                                    /*preview_pitch_px=*/0, /*split_x_norm=*/0.0f, /*src_surface=*/0);
 }
 
-__device__ __forceinline__ float catmullRom(float p0, float p1, float p2, float p3, float t) {
-    return p1 + 0.5f * t * (p2 - p0 + t * (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3 +
-                                          t * (3.0f * (p1 - p2) + p3 - p0)));
+
+// ---------------------------------------------------------------------------
+// NVOFA bidirectional motion-compensated warp kernels (Phase 10 Track 10A/10C)
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ float sampleNv12Y(const unsigned char* base, int pitch, int w, int h, float x, float y) {
+    const int ix = max(0, min(w - 1, static_cast<int>(x + 0.5f)));
+    const int iy = max(0, min(h - 1, static_cast<int>(y + 0.5f)));
+    return static_cast<float>(base[iy * pitch + ix]);
 }
 
-extern "C" __global__ void rtx_cuda_remaster_fused_p010(
-    const unsigned short* __restrict__ src_y, const unsigned short* __restrict__ src_uv,
-    int src_y_pitch_bytes, int src_uv_pitch_bytes, int src_format, int src_full_range,
-    int src_matrix, unsigned short* __restrict__ dst_y, unsigned short* __restrict__ dst_uv,
-    int dst_y_pitch_samples, int dst_uv_pitch_samples, int src_width, int src_height,
-    int dst_width, int dst_height, cudaTextureObject_t lut_tex, int lut_dim,
-    int vsr_quality, int enable_itm, float max_luminance, float y_norm_prev,
-    unsigned int* stats_devptr) {
-    const int x0 = (blockIdx.x * blockDim.x + threadIdx.x) * 2;
-    const int y0 = (blockIdx.y * blockDim.y + threadIdx.y) * 2;
-    // Deferred bounds check: every lane must reach the fused warp reduction
-    // below so a partial edge block never diverges the shuffle mask.
-    const bool in_bounds = (x0 < dst_width && y0 < dst_height);
+extern "C" __global__ void rtx_nvof_warp_nv12(
+    const unsigned char* __restrict__ prev_nv12,
+    const unsigned char* __restrict__ curr_nv12,
+    const short2* __restrict__ fwd_flow,
+    const short2* __restrict__ bwd_flow,
+    const unsigned char* __restrict__ cost_buf,
+    int pitch, int width, int height,
+    int grid_w, int grid_h,
+    float alpha,
+    unsigned char* __restrict__ out_nv12,
+    int flow_stride_bytes, int cost_stride_bytes) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
 
-    const float scale_x = static_cast<float>(src_width) / static_cast<float>(dst_width);
-    const float scale_y = static_cast<float>(src_height) / static_cast<float>(dst_height);
-    const bool p010_in = (src_format == 2);
-
-    auto readY = [&](int sx, int sy) -> float {
-        const int cx = max(0, min(sx, src_width - 1));
-        const int cy = max(0, min(sy, src_height - 1));
-        if (p010_in) {
-            const unsigned short v = src_y[static_cast<size_t>(cy) * (src_y_pitch_bytes >> 1) + cx];
-            return static_cast<float>(v >> 6);
-        }
-        const unsigned char* y8 = reinterpret_cast<const unsigned char*>(src_y);
-        return static_cast<float>(y8[static_cast<size_t>(cy) * src_y_pitch_bytes + cx]);
-    };
-    auto readUV = [&](int sx, int sy) -> float2 {
-        const int cx = max(0, min(sx & ~1, src_width - 2));
-        const int cy = max(0, min(sy >> 1, (src_height >> 1) - 1));
-        if (p010_in) {
-            const size_t base = static_cast<size_t>(cy) * (src_uv_pitch_bytes >> 1) + cx;
-            return make_float2(static_cast<float>(src_uv[base] >> 6),
-                               static_cast<float>(src_uv[base + 1] >> 6));
-        }
-        const unsigned char* uv8 = reinterpret_cast<const unsigned char*>(src_uv);
-        const size_t base = static_cast<size_t>(cy) * src_uv_pitch_bytes + cx;
-        return make_float2(static_cast<float>(uv8[base]), static_cast<float>(uv8[base + 1]));
-    };
-
-    // Quality 1..4 -> CAS amplitude (stronger sharpening at higher quality).
-    const float cas_amp = 0.6f + 0.35f * static_cast<float>(max(1, min(4, vsr_quality)) - 1);
-
-    float3 rgb_out[4];
-    float luma_nits[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float3 lut_block_acc = make_float3(0.0f, 0.0f, 0.0f);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        rgb_out[i] = make_float3(0.0f, 0.0f, 0.0f);
-    }
-    if (in_bounds) {
-#pragma unroll
-    for (int dy = 0; dy < 2; ++dy) {
-#pragma unroll
-        for (int dx = 0; dx < 2; ++dx) {
-            const float fx = (static_cast<float>(x0 + dx) + 0.5f) * scale_x - 0.5f;
-            const float fy = (static_cast<float>(y0 + dy) + 0.5f) * scale_y - 0.5f;
-            const int sx = static_cast<int>(floorf(fx));
-            const int sy = static_cast<int>(floorf(fy));
-            const float tx = fx - static_cast<float>(sx);
-            const float ty = fy - static_cast<float>(sy);
-
-            // 4x4 Catmull-Rom bicubic luma sampling.
-            float rows[4];
-#pragma unroll
-            for (int r = 0; r < 4; ++r) {
-                const float yv0 = readY(sx - 1, sy + r - 1);
-                const float yv1 = readY(sx, sy + r - 1);
-                const float yv2 = readY(sx + 1, sy + r - 1);
-                const float yv3 = readY(sx + 2, sy + r - 1);
-                rows[r] = catmullRom(yv0, yv1, yv2, yv3, tx);
-            }
-            float yv = catmullRom(rows[0], rows[1], rows[2], rows[3], ty);
-
-            // CAS: sample the 3x3 neighbourhood min/max around the centre.
-            const float c1 = rows[1];
-            float mn = c1;
-            float mx = c1;
-#pragma unroll
-            for (int r = 0; r < 4; ++r) {
-                mn = fminf(mn, rows[r]);
-                mx = fmaxf(mx, rows[r]);
-            }
-            yv = clamp01(yv);
-            // CAS sharpening: blend the bicubic result toward the min/max
-            // envelope (single register pass, no extra global reads).
-            const float pulse = clamp01((yv - mn) / fmaxf(mx - mn, 1e-6f));
-            const float gain = clamp01(pulse * (1.0f - pulse) * cas_amp * 1.5f);
-            yv = clamp01(yv + (yv - 0.5f * (mn + mx)) * gain);
-
-            // Chroma (nearest for the chroma phase; the 2x2 output block sits
-            // inside one chroma macroblock after 4:2:0 downsampling anyway).
-            const float2 uv = readUV(sx, sy);
-            float up;
-            float vp;
-            float yp;
-            if (p010_in) {
-                if (src_full_range) {
-                    yp = yv / 1023.0f;
-                    up = (uv.x - 512.0f) / 1023.0f;
-                    vp = (uv.y - 512.0f) / 1023.0f;
-                } else {
-                    yp = (yv - 64.0f) / 876.0f;
-                    up = (uv.x - 512.0f) / 896.0f;
-                    vp = (uv.y - 512.0f) / 896.0f;
-                }
+    float fx0 = 0.0f, fy0 = 0.0f;
+    float fx1 = 0.0f, fy1 = 0.0f;
+    if (fwd_flow != nullptr && grid_w > 0 && grid_h > 0) {
+        const int gx = min(grid_w - 1, x >> 2);
+        const int gy = min(grid_h - 1, y >> 2);
+        const int c_stride = cost_stride_bytes > 0 ? cost_stride_bytes : grid_w;
+        const bool occluded = (cost_buf != nullptr) &&
+                              (cost_buf[gy * c_stride + gx] > 140u);
+        if (!occluded) {
+            const int f_stride_bytes = flow_stride_bytes > 0 ? flow_stride_bytes : (grid_w * 4);
+            const short2 fv = *reinterpret_cast<const short2*>(
+                reinterpret_cast<const unsigned char*>(fwd_flow) + gy * f_stride_bytes + gx * 4);
+            // S10.5 fixed point -> pixels
+            const float vx = static_cast<float>(fv.x) * (1.0f / 32.0f);
+            const float vy = static_cast<float>(fv.y) * (1.0f / 32.0f);
+            fx0 = -alpha * vx;
+            fy0 = -alpha * vy;
+            if (bwd_flow != nullptr) {
+                const short2 bv = *reinterpret_cast<const short2*>(
+                    reinterpret_cast<const unsigned char*>(bwd_flow) + gy * f_stride_bytes + gx * 4);
+                fx1 = -(1.0f - alpha) * (static_cast<float>(bv.x) * (1.0f / 32.0f));
+                fy1 = -(1.0f - alpha) * (static_cast<float>(bv.y) * (1.0f / 32.0f));
             } else {
-                if (src_full_range) {
-                    yp = yv / 255.0f;
-                    up = (uv.x - 128.0f) / 255.0f;
-                    vp = (uv.y - 128.0f) / 255.0f;
-                } else {
-                    yp = (yv - 16.0f) / 219.0f;
-                    up = (uv.x - 128.0f) / 224.0f;
-                    vp = (uv.y - 128.0f) / 224.0f;
-                }
+                fx1 = (1.0f - alpha) * vx;
+                fy1 = (1.0f - alpha) * vy;
             }
-
-            // Y'CbCr -> R'G'B' in the source matrix.
-            float r;
-            float g;
-            float b;
-            if (src_matrix == 1) {        // BT.2020 NCL
-                r = yp + 1.4746f * vp;
-                g = yp - 0.16455f * up - 0.57135f * vp;
-                b = yp + 1.8814f * up;
-            } else if (src_matrix == 2) { // BT.601
-                r = yp + 1.402f * vp;
-                g = yp - 0.344136f * up - 0.714136f * vp;
-                b = yp + 1.772f * up;
-            } else {                      // BT.709
-                r = yp + 1.5748f * vp;
-                g = yp - 0.1873f * up - 0.4681f * vp;
-                b = yp + 1.8556f * up;
-            }
-
-            // BT.709 EOTF -> linear light for the tone mapping stage.
-            float rl = bt709Eotf(clamp01(r));
-            float gl = bt709Eotf(clamp01(g));
-            float bl = bt709Eotf(clamp01(b));
-
-            if (enable_itm != 0) {
-                // ITU-R BT.2446 Method C (parameterised): SDR luma [0, 1]
-                // linear -> HDR highlight expansion modulated by the peak
-                // luminance and the previous frame's adaptive y_norm.
-                const float y_sdr = kKrBt2020 * rl + kKgBt2020 * gl + kKbBt2020 * bl;
-                const float shadow_gamma = 1.15f - 0.15f * clamp01(y_norm_prev);
-                const float alpha = clamp01((y_sdr - 0.5f) / 0.4f);
-                const float alpha_smooth = alpha * alpha * (3.0f - 2.0f * alpha);
-                const float knee_expand = 1.0f - powf(1.0f - clamp01(y_sdr), 1.8f);
-                const float shaped = powf(y_sdr, shadow_gamma) * (1.0f - alpha_smooth) +
-                                     alpha_smooth * knee_expand;
-                const float gain = clamp01(shaped) * fmaxf(max_luminance, 100.0f) /
-                                   fmaxf(y_sdr, 1e-4f) / 80.0f;
-                const float sdr_gain = clamp01(gain);
-                rl *= sdr_gain;
-                gl *= sdr_gain;
-                bl *= sdr_gain;
-            } else {
-                // SDR passthrough keeps the 80-nit scRGB scale.
-                rl *= 80.0f;
-                gl *= 80.0f;
-                bl *= 80.0f;
-            }
-
-            // BT.709 -> BT.2020 primaries (linear light), then PQ encode.
-            const float3 wide = bt709ToBt2020(rl, gl, bl);
-            const float nits = (kKrBt2020 * wide.x + kKgBt2020 * wide.y + kKbBt2020 * wide.z);
-            luma_nits[dy * 2 + dx] = nits;
-            // Per-block single LUT fetch (see the pack v2 note above): the
-            // 2x2 block shares one graded colour on the PQ-average.
-            lut_block_acc.x += pqEncode(wide.x);
-            lut_block_acc.y += pqEncode(wide.y);
-            lut_block_acc.z += pqEncode(wide.z);
         }
     }
+
+    const float p0 = sampleNv12Y(prev_nv12, pitch, width, height, static_cast<float>(x) + fx0, static_cast<float>(y) + fy0);
+    const float p1 = sampleNv12Y(curr_nv12, pitch, width, height, static_cast<float>(x) + fx1, static_cast<float>(y) + fy1);
+    const float blended = (1.0f - alpha) * p0 + alpha * p1;
+    out_nv12[y * pitch + x] = static_cast<unsigned char>(max(0.0f, min(255.0f, blended + 0.5f)));
+
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        const int uv_offset = height * pitch + (y >> 1) * pitch + x;
+        const int cw = width >> 1;
+        const int ch = height >> 1;
+        const int cx = max(0, min(cw - 1, static_cast<int>((static_cast<float>(x) + fx0) * 0.5f + 0.5f)));
+        const int cy = max(0, min(ch - 1, static_cast<int>((static_cast<float>(y) + fy0) * 0.5f + 0.5f)));
+        const int dx = max(0, min(cw - 1, static_cast<int>((static_cast<float>(x) + fx1) * 0.5f + 0.5f)));
+        const int dy = max(0, min(ch - 1, static_cast<int>((static_cast<float>(y) + fy1) * 0.5f + 0.5f)));
+        const int off0 = height * pitch + cy * pitch + cx * 2;
+        const int off1 = height * pitch + dy * pitch + dx * 2;
+        const float u = (1.0f - alpha) * prev_nv12[off0] + alpha * curr_nv12[off1];
+        const float v = (1.0f - alpha) * prev_nv12[off0 + 1] + alpha * curr_nv12[off1 + 1];
+        out_nv12[uv_offset]     = static_cast<unsigned char>(max(0.0f, min(255.0f, u + 0.5f)));
+        out_nv12[uv_offset + 1] = static_cast<unsigned char>(max(0.0f, min(255.0f, v + 0.5f)));
+    }
+}
+
+extern "C" __global__ void rtx_nvof_warp_p010(
+    const unsigned short* __restrict__ prev_y,
+    const unsigned short* __restrict__ prev_uv,
+    const unsigned short* __restrict__ curr_y,
+    const unsigned short* __restrict__ curr_uv,
+    const short2* __restrict__ fwd_flow,
+    const short2* __restrict__ bwd_flow,
+    int y_pitch_samples, int uv_pitch_samples,
+    int width, int height,
+    int flow_width, int flow_height, int flow_stride_elems,
+    float alpha,
+    unsigned short* __restrict__ out_y,
+    unsigned short* __restrict__ out_uv) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    float fx = 0.0f, fy = 0.0f;
+    float bx = 0.0f, by = 0.0f;
+    if (fwd_flow != nullptr && bwd_flow != nullptr && flow_width > 0 && flow_height > 0) {
+        const float sx = static_cast<float>(flow_width) / static_cast<float>(width);
+        const float sy = static_cast<float>(flow_height) / static_cast<float>(height);
+        const int gx = max(0, min(flow_width - 1, static_cast<int>(x * sx)));
+        const int gy = max(0, min(flow_height - 1, static_cast<int>(y * sy)));
+        const int fidx = gy * (flow_stride_elems > 0 ? flow_stride_elems : flow_width) + gx;
+        const short2 fv = fwd_flow[fidx];
+        const short2 bv = bwd_flow[fidx];
+        const float inv_scale_x = static_cast<float>(width) / static_cast<float>(flow_width * 4);
+        const float inv_scale_y = static_cast<float>(height) / static_cast<float>(flow_height * 4);
+        fx = static_cast<float>(fv.x) * (1.0f / 32.0f) * inv_scale_x;
+        fy = static_cast<float>(fv.y) * (1.0f / 32.0f) * inv_scale_y;
+        bx = static_cast<float>(bv.x) * (1.0f / 32.0f) * inv_scale_x;
+        by = static_cast<float>(bv.y) * (1.0f / 32.0f) * inv_scale_y;
     }
 
-    // One graded colour per 2x2 block (block-average PQ, single tex3D fetch).
-    const float3 lut_block = applyLut3D(lut_tex, lut_dim,
-                                        make_float3(0.25f * lut_block_acc.x,
-                                                    0.25f * lut_block_acc.y,
-                                                    0.25f * lut_block_acc.z));
-    rgb_out[0] = lut_block;
-    rgb_out[1] = lut_block;
-    rgb_out[2] = lut_block;
-    rgb_out[3] = lut_block;
+    const int x0 = max(0, min(width - 1, static_cast<int>(static_cast<float>(x) - alpha * fx + 0.5f)));
+    const int y0 = max(0, min(height - 1, static_cast<int>(static_cast<float>(y) - alpha * fy + 0.5f)));
+    const int x1 = max(0, min(width - 1, static_cast<int>(static_cast<float>(x) - (1.0f - alpha) * bx + 0.5f)));
+    const int y1 = max(0, min(height - 1, static_cast<int>(static_cast<float>(y) - (1.0f - alpha) * by + 0.5f)));
 
-    reduceFrameStats(luma_nits[0] + luma_nits[1] + luma_nits[2] + luma_nits[3],
-                     fmaxf(fmaxf(luma_nits[0], luma_nits[1]),
-                           fmaxf(luma_nits[2], luma_nits[3])),
-                     (luma_nits[0] >= kHighlightNits ? 1 : 0) +
-                         (luma_nits[1] >= kHighlightNits ? 1 : 0) +
-                         (luma_nits[2] >= kHighlightNits ? 1 : 0) +
-                         (luma_nits[3] >= kHighlightNits ? 1 : 0),
-                     stats_devptr);
-    if (!in_bounds) {
-        return;
+    const float lum = (1.0f - alpha) * static_cast<float>(prev_y[y0 * y_pitch_samples + x0] >> 6) +
+                      alpha * static_cast<float>(curr_y[y1 * y_pitch_samples + x1] >> 6);
+    const unsigned int qy = min(1023u, static_cast<unsigned int>(max(0.0f, lum + 0.5f)));
+    out_y[y * y_pitch_samples + x] = static_cast<unsigned short>(qy << 6);
+
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        const int cw = width >> 1;
+        const int ch = height >> 1;
+        const int cx0 = max(0, min(cw - 1, x0 >> 1));
+        const int cy0 = max(0, min(ch - 1, y0 >> 1));
+        const int cx1 = max(0, min(cw - 1, x1 >> 1));
+        const int cy1 = max(0, min(ch - 1, y1 >> 1));
+        const float u = (1.0f - alpha) * static_cast<float>(prev_uv[cy0 * uv_pitch_samples + cx0 * 2] >> 6) +
+                        alpha * static_cast<float>(curr_uv[cy1 * uv_pitch_samples + cx1 * 2] >> 6);
+        const float v = (1.0f - alpha) * static_cast<float>(prev_uv[cy0 * uv_pitch_samples + cx0 * 2 + 1] >> 6) +
+                        alpha * static_cast<float>(curr_uv[cy1 * uv_pitch_samples + cx1 * 2 + 1] >> 6);
+        const unsigned int qu = min(1023u, static_cast<unsigned int>(max(0.0f, u + 0.5f)));
+        const unsigned int qv = min(1023u, static_cast<unsigned int>(max(0.0f, v + 0.5f)));
+        out_uv[(y >> 1) * uv_pitch_samples + x]     = static_cast<unsigned short>(qu << 6);
+        out_uv[(y >> 1) * uv_pitch_samples + x + 1] = static_cast<unsigned short>(qv << 6);
     }
-
-    const float d00 = ignDither(x0, y0);
-    const float d10 = ignDither(x0 + 1, y0);
-    const float d01 = ignDither(x0, y0 + 1);
-    const float d11 = ignDither(x0 + 1, y0 + 1);
-    const float3 p00 = rgb_out[0];
-    const float3 p10 = rgb_out[1];
-    const float3 p01 = rgb_out[2];
-    const float3 p11 = rgb_out[3];
-
-    const float yn00 = kKrBt2020 * p00.x + kKgBt2020 * p00.y + kKbBt2020 * p00.z;
-    const float yn10 = kKrBt2020 * p10.x + kKgBt2020 * p10.y + kKbBt2020 * p10.z;
-    const float yn01 = kKrBt2020 * p01.x + kKgBt2020 * p01.y + kKbBt2020 * p01.z;
-    const float yn11 = kKrBt2020 * p11.x + kKgBt2020 * p11.y + kKbBt2020 * p11.z;
-    const int y00 = max(64, min(940, __float2int_rn(yn00 * 876.0f + 64.0f + d00)));
-    const int y10 = max(64, min(940, __float2int_rn(yn10 * 876.0f + 64.0f + d10)));
-    const int y01 = max(64, min(940, __float2int_rn(yn01 * 876.0f + 64.0f + d01)));
-    const int y11 = max(64, min(940, __float2int_rn(yn11 * 876.0f + 64.0f + d11)));
-
-    dst_y[static_cast<size_t>(y0) * dst_y_pitch_samples + x0] =
-        static_cast<unsigned short>(y00 << 6);
-    dst_y[static_cast<size_t>(y0) * dst_y_pitch_samples + x0 + 1] =
-        static_cast<unsigned short>(y10 << 6);
-    dst_y[static_cast<size_t>(y0 + 1) * dst_y_pitch_samples + x0] =
-        static_cast<unsigned short>(y01 << 6);
-    dst_y[static_cast<size_t>(y0 + 1) * dst_y_pitch_samples + x0 + 1] =
-        static_cast<unsigned short>(y11 << 6);
-
-    // Chroma: 2x2 box downsample of the 4:4:4 PQ RGB.
-    const float r_avg = 0.25f * (p00.x + p10.x + p01.x + p11.x);
-    const float g_avg = 0.25f * (p00.y + p10.y + p01.y + p11.y);
-    const float b_avg = 0.25f * (p00.z + p10.z + p01.z + p11.z);
-    const float y_avg = kKrBt2020 * r_avg + kKgBt2020 * g_avg + kKbBt2020 * b_avg;
-    const float cb = (b_avg - y_avg) / kBuBt2020;
-    const float cr = (r_avg - y_avg) / kRvBt2020;
-    const float chroma_dither = 0.5f * ignDither(x0 >> 1, y0 >> 1);
-    const int u10 = max(64, min(960, __float2int_rn(cb * 896.0f + 512.0f + chroma_dither)));
-    const int v10 = max(64, min(960, __float2int_rn(cr * 896.0f + 512.0f + chroma_dither)));
-
-    const size_t uv_word = (static_cast<size_t>(y0 >> 1) * dst_uv_pitch_samples + x0) / 2;
-    reinterpret_cast<unsigned int*>(dst_uv)[uv_word] =
-        static_cast<unsigned int>(u10 << 6) |
-        (static_cast<unsigned int>(v10 << 6) << 16);
 }

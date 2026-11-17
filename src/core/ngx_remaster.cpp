@@ -78,38 +78,9 @@ std::string bridgeFileName() {
 #endif
 }
 
-std::vector<std::string> candidatePaths() {
-    std::vector<std::string> paths;
-    const std::string directory = executableDirectory();
-    if (!directory.empty()) {
-        const std::filesystem::path root(directory);
-        // Canonical deployment and install layout: the bridge and NVIDIA's
-        // feature DLLs live together under <app>/plugins/nvidia_rtx.
-        paths.push_back((root / bridgeFileName()).string());
-        paths.push_back((root / "plugins" / "nvidia_rtx" / bridgeFileName()).string());
-    }
-    return paths;
-}
-
 }  // namespace
 
 NgxRemasterBridge::~NgxRemasterBridge() { close(); }
-
-template <typename Fn>
-bool NgxRemasterBridge::resolve(Fn& function, const char* name, std::string* error) {
-#if defined(_WIN32)
-    function = reinterpret_cast<Fn>(GetProcAddress(reinterpret_cast<HMODULE>(handle_), name));
-#else
-    function = reinterpret_cast<Fn>(dlsym(handle_, name));
-#endif
-    if (function == nullptr) {
-        if (error != nullptr) {
-            *error = std::string("rtx_ngx_bridge is missing the symbol ") + name;
-        }
-        return false;
-    }
-    return true;
-}
 
 #if defined(RTX_EMBEDDED_NGX_BRIDGE)
 bool NgxRemasterBridge::bindEmbedded(std::string* error) {
@@ -154,120 +125,14 @@ bool NgxRemasterBridge::open(std::string* error) {
         return true;
     }
     close();
-    const std::vector<std::string> candidates = candidatePaths();
-    if (candidates.empty()) {
 #if defined(RTX_EMBEDDED_NGX_BRIDGE)
-        if (bindEmbedded(error)) {
-            return true;
-        }
-#endif
-        error_ = "cannot determine the executable directory; set RTX_NGX_BRIDGE_PATH";
-        if (error != nullptr) {
-            *error = error_;
-        }
-        return false;
-    }
-
-    std::string last_error;
-    std::string searched;
-    for (const std::string& candidate : candidates) {
-        searched += (searched.empty() ? "" : ", ") + candidate;
-#if defined(_WIN32)
-        const std::wstring wide = widen(candidate);
-        if (wide.empty()) {
-            last_error = "invalid UTF-8 bridge path: " + candidate;
-            continue;
-        }
-        HMODULE module = LoadLibraryExW(
-            wide.c_str(), nullptr,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (module == nullptr) {
-            last_error = "LoadLibraryExW failed for " + candidate + " (error " +
-                         std::to_string(GetLastError()) + ")";
-            continue;
-        }
-        handle_ = reinterpret_cast<void*>(module);
+    return bindEmbedded(error);
 #else
-        handle_ = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (handle_ == nullptr) {
-            const char* message = dlerror();
-            last_error = candidate + ": " + (message != nullptr ? message : "dlopen failed");
-            continue;
-        }
-#endif
-        path_ = candidate;
-
-        // A stale override or an old sidecar must not shadow a working copy
-        // later in the search order: gate every candidate on the ABI version
-        // and the full remaster symbol set, then keep searching on failure.
-        std::string message;
-        uint32_t(RTX_SHIM_CALL * abi_version)() = nullptr;
-        if (!resolve(abi_version, "rtx_ngx_bridge_abi_version", &message)) {
-            // A bridge without the version export predates the remaster
-            // contract; treat it as ABI 1 and refuse rather than guess.
-            last_error = candidate +
-                         ": does not export rtx_ngx_bridge_abi_version; it predates the "
-                         "remaster contract (rebuild the bridge)";
-            close();
-            continue;
-        }
-        if (abi_version() < RTX_NGX_BRIDGE_ABI_VERSION) {
-            last_error = candidate + ": ABI version " + std::to_string(abi_version()) +
-                         " is older than the remaster contract " +
-                         std::to_string(RTX_NGX_BRIDGE_ABI_VERSION);
-            close();
-            continue;
-        }
-
-        const bool complete =
-            resolve(query_caps_, "rtx_ngx_bridge_query_caps", &message) &&
-            resolve(create_, "rtx_ngx_bridge_create", &message) &&
-            resolve(destroy_, "rtx_ngx_bridge_destroy", &message) &&
-            resolve(remaster_, "rtx_ngx_bridge_remaster", &message) &&
-            resolve(get_remaster_stats_, "rtx_ngx_bridge_get_remaster_stats", &message) &&
-            resolve(last_error_, "rtx_ngx_bridge_last_error", &message);
-        if (!complete) {
-            last_error = candidate + ": " + message;
-            close();
-            continue;
-        }
-
-        // Phase 7 (ABI v3) extensions resolve optionally: an older sidecar
-        // keeps the base remaster contract working, the callers handle a null
-        // pointer with RTX_ERR_DLL_MISSING.
-        (void)resolve(set_lut3d_, "rtx_ngx_bridge_set_lut3d", nullptr);
-        (void)resolve(preview_buffer_, "rtx_ngx_bridge_preview_buffer", nullptr);
-        (void)resolve(download_preview_, "rtx_ngx_bridge_download_preview", nullptr);
-        (void)resolve(upload_frame_, "rtx_ngx_bridge_upload_frame", nullptr);
-        (void)resolve(interpolate_nv12_, "rtx_ngx_bridge_interpolate_nv12", nullptr);
-        (void)resolve(get_interp_buffer_, "rtx_ngx_bridge_get_interp_buffer", nullptr);
-        (void)resolve(init_rife_, "rtx_ngx_bridge_init_rife", nullptr);
-        (void)resolve(interpolate_rife_, "rtx_ngx_bridge_interpolate_rife", nullptr);
-        (void)resolve(build_rife_engine_, "rtx_ngx_bridge_build_rife_engine", nullptr);
-        (void)resolve(destroy_rife_, "rtx_ngx_bridge_destroy_rife", nullptr);
-
-        error_.clear();
-        if (error != nullptr) {
-            error->clear();
-        }
-        return true;
-    }
-
-    // The single-EXE build inlines the bridge, so a missing sidecar is not a
-    // failure: the same C ABI is already in this image.
-#if defined(RTX_EMBEDDED_NGX_BRIDGE)
-    if (bindEmbedded(error)) {
-        return true;
-    }
-#endif
-    error_ = last_error.empty() ? "rtx_ngx_bridge not found" : last_error;
-    if (!searched.empty()) {
-        error_ += " (searched: " + searched + ")";
-    }
     if (error != nullptr) {
-        *error = error_;
+        *error = "rtx_ngx_bridge dynamic loading is deprecated; build with RTX_EMBEDDED_NGX_BRIDGE=1";
     }
     return false;
+#endif
 }
 
 void NgxRemasterBridge::close() {

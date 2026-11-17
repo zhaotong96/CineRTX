@@ -70,6 +70,9 @@ RtxResult launchRifePostprocess(const RifePostprocessLaunch& launch, void* strea
  * kernels backing the kHALF engine I/O chain. Grid (count+255)/256, block 256. */
 RtxResult launchFp32ToFp16(uint64_t src_fp32, uint64_t dst_fp16, uint32_t count, void* stream);
 RtxResult launchFp16ToFp32(uint64_t src_fp16, uint64_t dst_fp32, uint32_t count, void* stream);
+RtxResult launchEvalBlockSad8x8(uint64_t prev_y, uint64_t curr_y, uint32_t pitch,
+                               uint32_t width, uint32_t height,
+                               uint64_t d_block_sad_64, void* stream);
 const char* rifePackLastError();
 
 }  // namespace rtx_ngx

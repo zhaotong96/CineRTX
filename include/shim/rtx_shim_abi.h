@@ -122,6 +122,7 @@ typedef struct RtxFrameDesc {
     /* Identifies the shim-owned VRAM slot.  Pass it to
      * rtx_shim_decoder_release_frame() once the encoder has consumed the frame. */
     uint64_t slot_index;
+    int32_t keyframe; /* 1 = force IDR keyframe on shot boundary */
 } RtxFrameDesc;
 
 typedef struct RtxHdrMetadata {
@@ -132,6 +133,14 @@ typedef struct RtxHdrMetadata {
     int32_t primaries, transfer, matrix, range;
     uint32_t target_nits;
 } RtxHdrMetadata;
+
+typedef enum RtxRateControl {
+    RTX_RC_CBR = 0,
+    RTX_RC_VBR = 1,
+    RTX_RC_CONSTQP = 2,
+    RTX_RC_CQ = 3,
+    RTX_RC_CRF = 4
+} RtxRateControl;
 
 typedef struct RtxEncoderConfig {
     int32_t codec; /* 0 = HEVC, 1 = AV1, 2 = H.264 */
@@ -145,8 +154,10 @@ typedef struct RtxEncoderConfig {
     RtxHdrMetadata hdr;
     int32_t input_format; /* RtxPixelFormat: RTX_PIXEL_NV12 or RTX_PIXEL_P010 */
     int32_t gop_length;   /* 0 = encoder default */
-    int32_t rate_control; /* 0 = CBR, 1 = VBR, 2 = const-QP */
-    int32_t qp;           /* used when rate_control == 2 */
+    int32_t rate_control; /* RtxRateControl (0..4) */
+    int32_t qp;           /* Unified quality (0..51 for QP/CQ/CRF, default 22) */
+    int32_t spatial_aq;   /* 1 = enable Spatial AQ (default 1), 0 = disable */
+    int32_t aq_strength;  /* 1..15 (default 8) */
     /* Phase 8 (Task 8-A1): explicit multi-GPU binding.  0 = default GPU. */
     int32_t device_index;
 } RtxEncoderConfig;

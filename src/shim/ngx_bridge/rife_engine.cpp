@@ -8,6 +8,7 @@
 #include "trt_loader.h"
 #include "rife_pack_runtime.h"
 #include "ngx_bridge_abi.h"
+#include "rtx/shot_segmenter.h"
 
 #include <algorithm>
 #include <cmath>
@@ -169,6 +170,8 @@ struct RifeEngine::Impl {
     uint64_t d_img1_tensor = 0;
     uint64_t d_timestep_tensor = 0;
     uint64_t d_sad_sum = 0;
+    uint64_t d_block_sad = 0;
+    rtx::ShotGroupSegmenter segmenter;
 
     size_t input_bytes = 0;
     size_t output_bytes = 0;
@@ -237,6 +240,7 @@ struct RifeEngine::Impl {
         if (d_img1_tensor) { g_cuda.mem_free(d_img1_tensor); d_img1_tensor = 0; }
         if (d_timestep_tensor) { g_cuda.mem_free(d_timestep_tensor); d_timestep_tensor = 0; }
         if (d_sad_sum) { g_cuda.mem_free(d_sad_sum); d_sad_sum = 0; }
+        if (d_block_sad) { g_cuda.mem_free(d_block_sad); d_block_sad = 0; }
         input_bytes = 0;
         output_bytes = 0;
         resetFramePairCacheState();
@@ -657,6 +661,10 @@ bool RifeEngine::loadEngine(const char* engine_path, uint32_t width, uint32_t he
         if (error) *error = "Failed to allocate SAD device accumulator (uint64_t)";
         return false;
     }
+    if (g_cuda.mem_alloc(&impl_->d_block_sad, 64 * sizeof(uint32_t)) != 0) {
+        if (error) *error = "Failed to allocate 8x8 block SAD device buffer";
+        return false;
+    }
 
     // Phase 9 (RC-4): mandatory alpha-sensitivity probe for SingleTensor7Ch
     // engines. Rejects any model whose output ignores the ch6 timestep channel
@@ -982,8 +990,16 @@ int32_t RifeEngine::interpolate(
             return prep_res;
         }
 
-        // Scene cut detection: synchronize and read 64-bit SAD once per pair.
-        if (impl_->d_sad_sum && g_cuda.stream_sync && g_cuda.memcpy_dtoh) {
+        // Scene cut detection: evaluate 8x8 block SAD and run ShotGroupSegmenter
+        if (impl_->d_block_sad && g_cuda.memset_d32_async && g_cuda.stream_sync && g_cuda.memcpy_dtoh) {
+            g_cuda.memset_d32_async(impl_->d_block_sad, 0, 64, stream);
+            launchEvalBlockSad8x8(prev_nv12, curr_nv12, pitch, width_, height_, impl_->d_block_sad, stream);
+            g_cuda.stream_sync(stream);
+            std::array<uint32_t, 64> block_sad{};
+            g_cuda.memcpy_dtoh(block_sad.data(), impl_->d_block_sad, sizeof(block_sad));
+            const auto decision = impl_->segmenter.evaluate(block_sad, width_, height_, 255);
+            effective_scene_cut = (decision.is_scene_cut || (scene_cut && *scene_cut != 0)) ? 1 : 0;
+        } else if (impl_->d_sad_sum && g_cuda.stream_sync && g_cuda.memcpy_dtoh) {
             g_cuda.stream_sync(stream);
             uint64_t host_sad = 0;
             g_cuda.memcpy_dtoh(&host_sad, impl_->d_sad_sum, sizeof(uint64_t));

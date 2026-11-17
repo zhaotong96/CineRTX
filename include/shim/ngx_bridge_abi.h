@@ -62,30 +62,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_query_caps(RtxNgxBridgeCaps*
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_create(const RtxNgxBridgeConfig* config,
                                                            RtxNgxBridge** bridge);
 RTX_SHIM_API void RTX_SHIM_CALL rtx_ngx_bridge_destroy(RtxNgxBridge* bridge);
-
-/* Returns the shared textures that the CUDA side must import.  Handles are
- * Win32 HANDLE values; the caller must keep them alive for the bridge lifetime. */
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_textures(
-    RtxNgxBridge* bridge, RtxNgxTextureDesc* input_desc, RtxNgxTextureDesc* output_desc,
-    uint64_t* input_shared_handle, uint64_t* output_shared_handle);
-
-/* Runs VSR followed by TrueHDR on the headless D3D12 queue.  The CUDA side has
- * already written the input texture and signalled `input_fence_value`; the
- * bridge signals `input_fence_value + 1` when the output texture is ready. */
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_process(RtxNgxBridge* bridge,
-                                                            uint64_t input_fence_value);
-
-/* Append-only ABI extension (v2 contract): exposes the shared ID3D12Fence as a
- * Win32 handle and the timeline value it has already consumed, so the CUDA side
- * can import it as an external semaphore and choose input_fence_value =
- * timeline + 1.  Without this getter the process() fence contract above could
- * not be honoured by a caller. */
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_fence(RtxNgxBridge* bridge,
-                                                              uint64_t* fence_handle,
-                                                              uint64_t* timeline_value);
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_flush(RtxNgxBridge* bridge);
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_reset(RtxNgxBridge* bridge,
-                                                          int32_t width, int32_t height);
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_ngx_bridge_last_error(RtxNgxBridge* bridge);
 
 /* ------------------------------------------------------------------------- */
@@ -117,14 +93,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_available(void);RTX_SHIM_API R
     const RtxNgxPackSurfaces* surfaces, const RtxNgxPackConfig* config, uint64_t cuda_stream);
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_ngx_pack_last_error(void);
 
-/* Headless D3D12 <-> CUDA round trip.  Allocates a shared RGBA16F texture,
- * writes a gradient through D3D12, reads it through the imported CUsurfObject,
- * writes it back from CUDA and verifies the D3D12 readback.  Returns RTX_OK and
- * fills `detail` when every sample matches. */
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_selftest(int32_t width, int32_t height,
-                                                             char* detail,
-                                                             size_t detail_capacity);
-
 /* ------------------------------------------------------------------------- */
 /* Frame statistics for the content-adaptive TrueHDR law (expert B-2.2).      */
 /*                                                                           */
@@ -141,9 +109,6 @@ typedef struct RtxNgxFrameStats {
     int32_t scene_cut;  /* 1 when scene_detect reported a cut on this frame */
     int32_t reserved[6];
 } RtxNgxFrameStats;
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_set_frame_stats(RtxNgxBridge* bridge,
-                                                                   const RtxNgxFrameStats* stats);
 
 /* ------------------------------------------------------------------------- */
 /* Production GPU-only remaster entry (P0-1, append-only ABI extension).     */
@@ -173,6 +138,7 @@ typedef struct RtxNgxRemasterInput {
                                   * (rtx_ngx_bridge_preview_buffer), 0 = skip */
     uint32_t preview_pitch;      /* bytes per preview row */
     float split_x_norm;          /* 0.0..1.0 A/B split (<0 disables split) */
+    int32_t reset_temporal;      /* 0 = maintain history, 1 = reset temporal history (scene cut) */
 } RtxNgxRemasterInput;
 
 typedef struct RtxNgxRemasterOutput {

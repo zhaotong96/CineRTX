@@ -210,3 +210,101 @@ extern "C" __global__ void rife_fp16_to_fp32(
     if (idx >= count) return;
     dst[idx] = __half2float(src[idx]);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 10 (Track 10C): 8x8 Grid Block-SAD & Guided 4K P010 Synthesis
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void rtx_eval_block_sad_8x8(
+    const unsigned char* __restrict__ prev_y,
+    const unsigned char* __restrict__ curr_y,
+    int pitch, int width, int height,
+    unsigned int* __restrict__ block_sad_64) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int diff = 0;
+    if (x < width && y < height) {
+        const int idx = y * pitch + x;
+        const int d = static_cast<int>(curr_y[idx]) - static_cast<int>(prev_y[idx]);
+        diff = static_cast<unsigned int>(d < 0 ? -d : d);
+        const int bx = min(7, (x * 8) / width);
+        const int by = min(7, (y * 8) / height);
+        atomicAdd(&block_sad_64[by * 8 + bx], diff);
+    }
+}
+
+__device__ __forceinline__ float sampleP010Y(const unsigned short* plane, int pitch_samples, int w, int h, int x, int y) {
+    const int cx = max(0, min(w - 1, x));
+    const int cy = max(0, min(h - 1, y));
+    return static_cast<float>(plane[cy * pitch_samples + cx] >> 6);
+}
+
+extern "C" __global__ void rtx_p010_guided_interp(
+    const unsigned short* __restrict__ prev_p010_y,
+    const unsigned short* __restrict__ prev_p010_uv,
+    const unsigned short* __restrict__ curr_p010_y,
+    const unsigned short* __restrict__ curr_p010_uv,
+    const float* __restrict__ rife_mid_rgb_nchw,
+    int p010_y_pitch_samples, int p010_uv_pitch_samples,
+    int p010_w, int p010_h,
+    int guide_w, int guide_h,
+    float alpha,
+    unsigned short* __restrict__ out_p010_y,
+    unsigned short* __restrict__ out_p010_uv) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= p010_w || y >= p010_h) return;
+
+    const float p0 = sampleP010Y(prev_p010_y, p010_y_pitch_samples, p010_w, p010_h, x, y);
+    const float p1 = sampleP010Y(curr_p010_y, p010_y_pitch_samples, p010_w, p010_h, x, y);
+
+    // Local 3x3 low-pass on 4K anchors to extract VSR high-frequency detail band
+    const float lp0 = 0.25f * (
+        sampleP010Y(prev_p010_y, p010_y_pitch_samples, p010_w, p010_h, x - 1, y) +
+        sampleP010Y(prev_p010_y, p010_y_pitch_samples, p010_w, p010_h, x + 1, y) +
+        sampleP010Y(prev_p010_y, p010_y_pitch_samples, p010_w, p010_h, x, y - 1) +
+        sampleP010Y(prev_p010_y, p010_y_pitch_samples, p010_w, p010_h, x, y + 1));
+    const float lp1 = 0.25f * (
+        sampleP010Y(curr_p010_y, p010_y_pitch_samples, p010_w, p010_h, x - 1, y) +
+        sampleP010Y(curr_p010_y, p010_y_pitch_samples, p010_w, p010_h, x + 1, y) +
+        sampleP010Y(curr_p010_y, p010_y_pitch_samples, p010_w, p010_h, x, y - 1) +
+        sampleP010Y(curr_p010_y, p010_y_pitch_samples, p010_w, p010_h, x, y + 1));
+
+    const float hi0 = p0 - lp0;
+    const float hi1 = p1 - lp1;
+    const float motion = fabsf(p1 - p0);
+    const float detail_weight = fmaxf(0.0f, 1.0f - motion * (1.0f / 128.0f));
+
+    float base_y = (1.0f - alpha) * p0 + alpha * p1;
+    if (rife_mid_rgb_nchw != nullptr && guide_w > 0 && guide_h > 0) {
+        const float gx = (static_cast<float>(x) + 0.5f) * static_cast<float>(guide_w) / static_cast<float>(p010_w) - 0.5f;
+        const float gy = (static_cast<float>(y) + 0.5f) * static_cast<float>(guide_h) / static_cast<float>(p010_h) - 0.5f;
+        const int ix = max(0, min(guide_w - 1, static_cast<int>(gx + 0.5f)));
+        const int iy = max(0, min(guide_h - 1, static_cast<int>(gy + 0.5f)));
+        const int plane = guide_w * guide_h;
+        const int gidx = iy * guide_w + ix;
+        const float r = rife_mid_rgb_nchw[gidx];
+        const float g = rife_mid_rgb_nchw[plane + gidx];
+        const float b = rife_mid_rgb_nchw[2 * plane + gidx];
+        const float guide_y = (0.2627f * r + 0.6780f * g + 0.0593f * b) * 1023.0f;
+        base_y = 0.5f * base_y + 0.5f * guide_y;
+    }
+
+    const float final_y = base_y + detail_weight * ((1.0f - alpha) * hi0 + alpha * hi1);
+    const unsigned int qy = min(1023u, static_cast<unsigned int>(max(0.0f, final_y + 0.5f)));
+    out_p010_y[y * p010_y_pitch_samples + x] = static_cast<unsigned short>(qy << 6);
+
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        const int cx = x >> 1;
+        const int cy = y >> 1;
+        const int cidx = cy * p010_uv_pitch_samples + cx * 2;
+        const float u0 = static_cast<float>(prev_p010_uv[cidx] >> 6);
+        const float v0 = static_cast<float>(prev_p010_uv[cidx + 1] >> 6);
+        const float u1 = static_cast<float>(curr_p010_uv[cidx] >> 6);
+        const float v1 = static_cast<float>(curr_p010_uv[cidx + 1] >> 6);
+        const unsigned int qu = min(1023u, static_cast<unsigned int>(max(0.0f, (1.0f - alpha) * u0 + alpha * u1 + 0.5f)));
+        const unsigned int qv = min(1023u, static_cast<unsigned int>(max(0.0f, (1.0f - alpha) * v0 + alpha * v1 + 0.5f)));
+        out_p010_uv[cidx]     = static_cast<unsigned short>(qu << 6);
+        out_p010_uv[cidx + 1] = static_cast<unsigned short>(qv << 6);
+    }
+}

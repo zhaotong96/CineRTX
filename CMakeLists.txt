@@ -125,6 +125,7 @@ endif()
 set(RTX_CORE_SOURCES
     src/core/geometry.cpp
     src/core/hw_transcode.cpp
+    src/core/hw_transcode_stages.cpp
     src/core/i18n.cpp
     src/core/logger.cpp
     src/core/lut3d.cpp
@@ -135,10 +136,13 @@ set(RTX_CORE_SOURCES
     src/core/rational.cpp
     src/core/sei_synthesizer.cpp
     src/core/status.cpp
+    src/core/shot_segmenter.cpp
+    src/core/job_queue.cpp
     src/io/ffmpeg_io.cpp
     src/io/memory_avio.cpp
     src/io/msvc_compat_mt.cpp
-    src/io/bitstream.cpp)
+    src/io/bitstream.cpp
+    src/io/cpu_video_encoder.cpp)
 
 add_library(rtx_core STATIC ${RTX_CORE_SOURCES})
 add_library(rtx::core ALIAS rtx_core)
@@ -379,44 +383,9 @@ else()
         "${RTX_RIFE_PTX_HEADER}")
 endif()
 
-if(WIN32)
-    add_library(rtx_ngx_bridge SHARED
-        ${RTX_NGX_BRIDGE_SOURCES}
-        src/shim/ngx_bridge/ngx_d3d12_bridge.cpp)
-    target_link_libraries(rtx_ngx_bridge PRIVATE rtx_project_options)
-    target_compile_definitions(rtx_ngx_bridge PRIVATE RTX_SHIM_EXPORTS=1)
-    if(NOT MSVC)
-        target_compile_options(rtx_ngx_bridge PRIVATE
-            -Wno-deprecated-declarations -Wno-unused-const-variable)
-    endif()
-    target_include_directories(rtx_ngx_bridge PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
-        "${RTX_NVCODEC_INCLUDE_DIR}"
-        "${RTX_GENERATED_DIR}")
-    target_include_directories(rtx_ngx_bridge SYSTEM PRIVATE
-        "${RTX_CUDA_HEADERS_DIR}"
-        "${RTX_TENSORRT_INCLUDE_DIR}")
-    set_target_properties(rtx_ngx_bridge PROPERTIES
-        OUTPUT_NAME rtx_ngx_bridge
-        CXX_STANDARD 23
-        CXX_STANDARD_REQUIRED ON
-        CXX_EXTENSIONS OFF)
-    set_target_properties(rtx_ngx_bridge PROPERTIES PREFIX "")
-    if(MSVC)
-        set_property(TARGET rtx_ngx_bridge PROPERTY
-            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-        target_link_options(rtx_ngx_bridge PRIVATE "/INCREMENTAL:NO")
-        set_target_properties(rtx_ngx_bridge PROPERTIES
-            PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
-            COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
-    endif()
-    set_target_properties(rtx_ngx_bridge PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${RTX_EXTERNAL_DIR}/plugins/nvidia_rtx"
-        LIBRARY_OUTPUT_DIRECTORY "${RTX_EXTERNAL_DIR}/plugins/nvidia_rtx")
-endif()
 
-add_library(rtx_ngx_bridge_static STATIC ${RTX_NGX_BRIDGE_SOURCES})
+add_library(rtx_ngx_bridge_static STATIC ${RTX_NGX_BRIDGE_SOURCES}
+    $<$<PLATFORM_ID:Windows>:src/shim/ngx_bridge/ngx_d3d12_bridge.cpp>)
 target_link_libraries(rtx_ngx_bridge_static PRIVATE rtx_project_options)
 target_compile_definitions(rtx_ngx_bridge_static PUBLIC RTX_SHIM_STATIC=1)
 if(NOT MSVC)
@@ -424,6 +393,7 @@ if(NOT MSVC)
         -Wno-deprecated-declarations -Wno-unused-const-variable)
 endif()
 target_include_directories(rtx_ngx_bridge_static PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
     "${RTX_NVCODEC_INCLUDE_DIR}"
@@ -438,7 +408,9 @@ set_target_properties(rtx_ngx_bridge_static PROPERTIES
     CXX_EXTENSIONS OFF)
 
 if(WIN32)
-    add_library(rtx::ngx_bridge ALIAS rtx_ngx_bridge)
+    add_library(rtx::ngx_bridge ALIAS rtx_ngx_bridge_static)
+    target_link_libraries(rtx_core PUBLIC rtx_ngx_bridge_static)
+    target_compile_definitions(rtx_core PUBLIC RTX_EMBEDDED_NGX_BRIDGE=1)
 else()
     add_library(rtx::ngx_bridge ALIAS rtx_ngx_bridge_static)
     target_link_libraries(rtx_core PUBLIC rtx_ngx_bridge_static)
@@ -526,24 +498,14 @@ if(WIN32)
     endif()
 
     if(NOT MSVC)
-        target_sources(rtx_ngx_bridge PRIVATE
+        target_sources(rtx_ngx_bridge_static PRIVATE
             src/shim/ngx_bridge/ngx_msvc_crt_compat.cpp)
     endif()
-    target_include_directories(rtx_ngx_bridge PRIVATE "${RTX_NGX_INCLUDE_DIR}")
-    target_include_directories(rtx_ngx_bridge SYSTEM PRIVATE "${RTX_NGX_INCLUDE_DIR}")
-    target_compile_definitions(rtx_ngx_bridge PRIVATE RTX_HAVE_NGX_SDK=1)
-    target_link_libraries(rtx_ngx_bridge PRIVATE "${RTX_NGX_LIBRARY}")
+    target_include_directories(rtx_ngx_bridge_static PRIVATE "${RTX_NGX_INCLUDE_DIR}")
+    target_include_directories(rtx_ngx_bridge_static SYSTEM PRIVATE "${RTX_NGX_INCLUDE_DIR}")
+    target_compile_definitions(rtx_ngx_bridge_static PRIVATE RTX_HAVE_NGX_SDK=1)
+    target_link_libraries(rtx_ngx_bridge_static PRIVATE "${RTX_NGX_LIBRARY}")
 
-    if(RTX_NGX_VSR_DLL AND EXISTS "${RTX_NGX_VSR_DLL}")
-        add_custom_command(TARGET rtx_ngx_bridge POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${RTX_NGX_VSR_DLL}"
-                "$<TARGET_FILE_DIR:rtx_ngx_bridge>/"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${RTX_NGX_TRUEHDR_DLL}"
-                "$<TARGET_FILE_DIR:rtx_ngx_bridge>/"
-            VERBATIM)
-    endif()
 
     if(NOT MSVC)
         set(_rtx_ngx_shadow_dir "${CMAKE_CURRENT_BINARY_DIR}/ngx_msvc_shadow_libs")
@@ -563,8 +525,8 @@ if(WIN32)
             list(APPEND _rtx_ngx_shadow_archives "${_archive}")
         endforeach()
         add_custom_target(rtx_ngx_shadow_archives DEPENDS ${_rtx_ngx_shadow_archives})
-        add_dependencies(rtx_ngx_bridge rtx_ngx_shadow_archives)
-        target_link_directories(rtx_ngx_bridge PRIVATE "${_rtx_ngx_shadow_dir}")
+        add_dependencies(rtx_ngx_bridge_static rtx_ngx_shadow_archives)
+        target_link_directories(rtx_ngx_bridge_static PRIVATE "${_rtx_ngx_shadow_dir}")
     endif()
 endif()
 
@@ -629,8 +591,7 @@ set_target_properties(CineRTX PROPERTIES
     COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
 
 if(WIN32)
-    add_dependencies(CineRTX rtx_ngx_bridge)
-    set(_rtx_ngx_root_files "$<TARGET_FILE:rtx_ngx_bridge>")
+    set(_rtx_ngx_root_files "")
     if(RTX_NGX_VSR_DLL AND EXISTS "${RTX_NGX_VSR_DLL}")
         list(APPEND _rtx_ngx_root_files "${RTX_NGX_VSR_DLL}" "${RTX_NGX_TRUEHDR_DLL}")
     endif()
@@ -698,7 +659,6 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND}
             "-DPLUGIN_DIR=${_rtx_ngx_product_plugin_dir}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNgxStaging.cmake"
-        DEPENDS rtx_ngx_bridge
         COMMENT "Staging the RTX NGX plugin beside CineRTX.exe"
         VERBATIM)
     add_dependencies(CineRTX rtx_stage_ngx_plugin)
@@ -760,7 +720,6 @@ endif()
 
 install(TARGETS CineRTX RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 if(WIN32)
-    install(TARGETS rtx_ngx_bridge RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 if(RTX_NGX_VSR_DLL AND EXISTS "${RTX_NGX_VSR_DLL}")
     install(FILES "${RTX_NGX_VSR_DLL}" "${RTX_NGX_TRUEHDR_DLL}"

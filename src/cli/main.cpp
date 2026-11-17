@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -24,6 +25,7 @@
 #include "rtx/rational.h"
 #include "rtx/runtime_env.h"
 #include "rtx/status.h"
+#include "rtx/string_utils.h"
 #include "rtx/types.h"
 #include "shim/ngx_bridge_abi.h"
 #include "shim/rtx_shim_abi.h"
@@ -88,11 +90,11 @@ void printHelp() {
               << "Options:\n"
               << "  --input PATH                 Container input (MP4/MKV)\n"
               << "  --output PATH                Container output (default: <stem>_remaster_<codec>.mp4)\n"
-              << "  --codec av1|hevc             10-bit HDR10 output video codec (default: av1)\n"
+              << "  --codec av1|hevc|av1_cpu|hevc_cpu 10-bit HDR10 output video codec (default: av1)\n"
               << "  --bitrate KBPS               Encoder target bitrate (0 = auto)\n"
               << "  --preset 1..7                NVENC P1..P7 preset (default 5)\n"
-              << "  --rate-control cbr|vbr|qp    NVENC rate control (default cbr)\n"
-              << "  --qp N                       Constant QP when --rate-control qp (default 24, 0..51)\n"
+              << "  --rate-control cq|vbr|cbr|qp|crf Rate control mode (default cq)\n"
+              << "  --qp N                       Constant QP/CQ/CRF target (default 22, 0..51)\n"
               << "  --resolution 4k|2k|fhd|native Output resolution preset (default: 4k)\n"
               << "  --target-width PX            Explicit output width override (default 3840)\n"
               << "  --target-height PX           Explicit output height override (default 2160)\n"
@@ -195,6 +197,10 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             }
         } else if (argument == "--rate-control") {
             if (!requireValue(argc, argv, i, options.profile.rate_control)) {
+                return false;
+            }
+        } else if (argument == "--pipeline-order") {
+            if (!requireValue(argc, argv, i, options.profile.pipeline_order)) {
                 return false;
             }
         } else if (argument == "--resolution") {
@@ -463,30 +469,6 @@ int runHardwareMode(const Options& options) {
 int runSessionStdio() {
     setConsoleLogEnabled(false);
 
-    std::string payload_line;
-    if (!std::getline(std::cin, payload_line)) {
-        std::cout << "{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"empty stdin payload\"}\n"
-                  << std::flush;
-        return 2;
-    }
-
-    Result<TranscodeProfile> parsed = parseProfileFromJson(payload_line);
-    if (!parsed.has_value()) {
-        std::cout << std::format(
-            "{{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"{}\"}}\n",
-            cli::escapeJson(parsed.error().toString())) << std::flush;
-        return 2;
-    }
-
-    TranscodeProfile profile = std::move(parsed.value());
-    Result<void> valid = validateAndNormalizeProfile(profile, /*require_io_paths=*/true);
-    if (!valid.has_value()) {
-        std::cout << std::format(
-            "{{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"{}\"}}\n",
-            cli::escapeJson(valid.error().toString())) << std::flush;
-        return 2;
-    }
-
     std::mutex out_mutex;
     setLogCallback([&out_mutex](LogLevel level, std::string_view msg) {
         std::lock_guard<std::mutex> lock(out_mutex);
@@ -495,60 +477,113 @@ int runSessionStdio() {
             logLevelName(level), cli::escapeJson(std::string(msg))) << std::flush;
     });
 
+    std::mutex in_mutex;
+    std::condition_variable in_cv;
+    std::vector<std::string> job_lines;
     std::atomic<bool> cancel_flag{false};
-    std::atomic<bool> job_finished{false};
+    std::atomic<bool> stdin_eof{false};
 
-    std::thread stdin_watcher([&cancel_flag, &job_finished]() {
-        std::string cmd;
-        while (!job_finished.load(std::memory_order_acquire) && std::getline(std::cin, cmd)) {
-            if (cmd.find("cancel") != std::string::npos || cmd.find("stop") != std::string::npos) {
+    std::thread stdin_reader([&]() {
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            std::string trimmed = std::string(rtx::str::trimAscii(line));
+            if (trimmed.empty()) continue;
+            if (trimmed == "cancel" || trimmed == "stop" ||
+                (trimmed.find("\"action\"") != std::string::npos && trimmed.find("cancel") != std::string::npos)) {
                 cancel_flag.store(true, std::memory_order_release);
                 logInfo("Received cooperative cancel signal over session-stdio");
-                break;
+                continue;
             }
+            {
+                std::lock_guard<std::mutex> lk(in_mutex);
+                job_lines.push_back(std::move(trimmed));
+            }
+            in_cv.notify_all();
         }
+        stdin_eof.store(true, std::memory_order_release);
+        in_cv.notify_all();
     });
-    stdin_watcher.detach();
+    stdin_reader.detach();
 
-    HwTranscodeOptions hw = profileToHwOptions(profile);
-    hw.cancel = &cancel_flag;
-
-    auto last_emit = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-    hw.progress = [&](const HwTranscodeProgress& p) {
-        const auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(now - last_emit).count() < 0.20 &&
-            (p.total_frames == 0 || p.frames_encoded < p.total_frames)) {
-            return;
+    int last_exit_code = 0;
+    for (;;) {
+        std::string payload_line;
+        {
+            std::unique_lock<std::mutex> lk(in_mutex);
+            in_cv.wait(lk, [&] { return !job_lines.empty() || stdin_eof.load(std::memory_order_acquire); });
+            if (job_lines.empty()) break;
+            payload_line = std::move(job_lines.front());
+            job_lines.erase(job_lines.begin());
         }
-        last_emit = now;
-        const double pct = p.total_frames > 0
-                               ? std::min(100.0, static_cast<double>(p.frames_encoded) * 100.0 / p.total_frames)
-                               : 0.0;
-        const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
+        if (payload_line == "quit" || payload_line == "exit") break;
+
+        Result<TranscodeProfile> parsed = parseProfileFromJson(payload_line);
+        if (!parsed.has_value()) {
+            std::lock_guard<std::mutex> lock(out_mutex);
+            std::cout << std::format(
+                "{{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"{}\"}}\n",
+                cli::escapeJson(parsed.error().toString())) << std::flush;
+            last_exit_code = 2;
+            continue;
+        }
+
+        TranscodeProfile profile = std::move(parsed.value());
+        Result<void> valid = validateAndNormalizeProfile(profile, /*require_io_paths=*/true);
+        if (!valid.has_value()) {
+            std::lock_guard<std::mutex> lock(out_mutex);
+            std::cout << std::format(
+                "{{\"type\":\"report\",\"status\":\"failed\",\"exitCode\":2,\"error\":\"{}\"}}\n",
+                cli::escapeJson(valid.error().toString())) << std::flush;
+            last_exit_code = 2;
+            continue;
+        }
+
+        cancel_flag.store(false, std::memory_order_release);
+        HwTranscodeOptions hw = profileToHwOptions(profile);
+        hw.cancel = &cancel_flag;
+
+        auto last_emit = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+        hw.progress = [&](const HwTranscodeProgress& p) {
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - last_emit).count() < 0.20 &&
+                (p.total_frames == 0 || p.frames_encoded < p.total_frames)) {
+                return;
+            }
+            last_emit = now;
+            const double pct = p.total_frames > 0
+                                   ? std::min(100.0, static_cast<double>(p.frames_encoded) * 100.0 / p.total_frames)
+                                   : 0.0;
+            const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
+            std::lock_guard<std::mutex> lock(out_mutex);
+            std::cout << std::format(
+                "{{\"type\":\"progress\",\"pct\":{:.1f},\"frames\":{},\"total\":{},\"fps\":{:.1f}}}\n",
+                pct, p.frames_encoded, p.total_frames, fps) << std::flush;
+        };
+
+        Result<HwTranscodeReport> result = runNvidiaRemasterTranscode(hw);
+
         std::lock_guard<std::mutex> lock(out_mutex);
-        std::cout << std::format(
-            "{{\"type\":\"progress\",\"pct\":{:.1f},\"frames\":{},\"total\":{},\"fps\":{:.1f}}}\n",
-            pct, p.frames_encoded, p.total_frames, fps) << std::flush;
-    };
-
-    Result<HwTranscodeReport> result = runNvidiaRemasterTranscode(hw);
-    job_finished.store(true, std::memory_order_release);
-    setLogCallback(nullptr);
-
-    std::lock_guard<std::mutex> lock(out_mutex);
-    if (result.has_value()) {
-        std::cout << std::format(
-            "{{\"type\":\"report\",\"status\":\"done\",\"exitCode\":0,\"report\":{}}}\n",
-            result.value().toJson()) << std::flush;
-        return 0;
+        if (result.has_value()) {
+            std::string report_json = result.value().toJson();
+            std::replace(report_json.begin(), report_json.end(), '\n', ' ');
+            std::replace(report_json.begin(), report_json.end(), '\r', ' ');
+            std::cout << std::format(
+                "{{\"type\":\"report\",\"status\":\"done\",\"exitCode\":0,\"report\":{}}}\n",
+                report_json) << std::flush;
+            last_exit_code = 0;
+        } else {
+            const bool was_cancelled = cancel_flag.load(std::memory_order_acquire);
+            const char* status_str = was_cancelled ? "cancelled" : "failed";
+            const int exit_code = was_cancelled ? 130 : 1;
+            std::cout << std::format(
+                "{{\"type\":\"report\",\"status\":\"{}\",\"exitCode\":{},\"error\":\"{}\"}}\n",
+                status_str, exit_code, cli::escapeJson(result.error().toString())) << std::flush;
+            last_exit_code = exit_code;
+        }
     }
-    const bool was_cancelled = cancel_flag.load(std::memory_order_acquire);
-    const char* status_str = was_cancelled ? "cancelled" : "failed";
-    const int exit_code = was_cancelled ? 130 : 1;
-    std::cout << std::format(
-        "{{\"type\":\"report\",\"status\":\"{}\",\"exitCode\":{},\"error\":\"{}\"}}\n",
-        status_str, exit_code, cli::escapeJson(result.error().toString())) << std::flush;
-    return exit_code;
+
+    setLogCallback(nullptr);
+    return last_exit_code;
 }
 
 int runBuildRifeEngine(const Options& options) {
