@@ -26,6 +26,8 @@
 #endif
 
 #include "rtx/hw_transcode.h"
+#include "rtx/job_queue.h"
+#include "rtx/string_utils.h"
 #include "rtx/i18n.h"
 #include "rtx/logger.h"
 #include "rtx/param_schema.h"
@@ -73,10 +75,11 @@ using namespace rtx::gui;
 
 // Control ids live in workstation_canvas.h (rtx::gui::ControlId).
 
-constexpr UINT WM_APP_PROGRESS    = WM_APP + 10;
-constexpr UINT WM_APP_DONE        = WM_APP + 11;
-constexpr UINT WM_APP_PREVIEW     = WM_APP + 12;
-constexpr UINT WM_APP_TOGGLE_LANG = WM_APP + 20;
+constexpr UINT WM_APP_PROGRESS      = WM_APP + 10;
+constexpr UINT WM_APP_DONE          = WM_APP + 11;
+constexpr UINT WM_APP_PREVIEW       = WM_APP + 12;
+constexpr UINT WM_APP_QUEUE_UPDATED = WM_APP + 13;
+constexpr UINT WM_APP_TOGGLE_LANG   = WM_APP + 20;
 // WM_APP_SPLIT_DRAG comes from src/gui/preview_viewport.h.
 // WM_APP_TIMELINE_SEEK comes from src/gui/workstation_canvas.h.
 
@@ -88,43 +91,40 @@ constexpr int kPreviewHeight = 540;
 constexpr int kBaselineSrcWidth = 1920;
 constexpr int kBaselineSrcHeight = 1080;
 
-std::atomic<bool> g_cancelRequested{false};
-std::atomic<float> g_splitRatio{0.5f};
-std::thread g_workerThread;
-std::thread g_scrubThread;
-std::atomic<bool> g_previewBusy{false};
+struct WorkstationApp {
+    std::atomic<bool> cancelRequested{false};
+    std::atomic<float> splitRatio{0.5f};
+    std::thread workerThread;
+    std::thread scrubThread;
+    std::atomic<bool> previewBusy{false};
 
-// "3+1" workstation state.
-rtx::gui::WorkspaceMode g_workspace = rtx::gui::WorkspaceMode::Encoder;
-bool g_fullscreen = false;
-bool g_inResizeDrag = false;
-// RW-4: quick-play playback loop (timer id 3 advances the transport).
-bool g_isPlaying = false;
-DWORD g_prevStyle = 0;
-WINDOWPLACEMENT g_prevPlacement{};
-std::wstring g_quickPlayFile;
-int g_srcWidth = kBaselineSrcWidth;
-int g_srcHeight = kBaselineSrcHeight;
+    rtx::gui::WorkspaceMode workspace = rtx::gui::WorkspaceMode::Encoder;
+    bool fullscreen = false;
+    bool inResizeDrag = false;
+    bool isPlaying = false;
+    DWORD prevStyle = 0;
+    WINDOWPLACEMENT prevPlacement{};
+    std::wstring quickPlayFile;
+    int srcWidth = kBaselineSrcWidth;
+    int srcHeight = kBaselineSrcHeight;
 
-// Phase 7 batch queue.
-std::vector<std::wstring> g_batchQueue;
-size_t g_batchIndex = 0;
-std::mutex g_batchMutex;
+    rtx::EncoderJobQueue jobQueue{};
 
-// Phase 7 realtime preview staging.
-std::mutex g_previewMutex;
-std::vector<uint8_t> g_previewHost;
-uint32_t g_previewPitch = 0;
-bool g_previewDirty = false;
-bool g_previewEnabled = true;
-std::wstring g_lastErrorMessage;
+    std::mutex previewMutex;
+    std::vector<uint8_t> previewHost;
+    uint32_t previewPitch = 0;
+    bool previewDirty = false;
+    bool previewEnabled = true;
+    std::wstring lastErrorMessage;
 
-HBRUSH g_hbrBg = nullptr;
-HBRUSH g_hbrCtrl = nullptr;
-HFONT  g_hFont = nullptr;
-HFONT  g_hFontBold = nullptr;
+    HBRUSH hbrBg = nullptr;
+    HBRUSH hbrCtrl = nullptr;
+    HFONT hFont = nullptr;
+    HFONT hFontBold = nullptr;
+    std::optional<rtx::gui::PreviewViewport> previewViewport;
+};
 
-std::optional<rtx::gui::PreviewViewport> g_previewViewport;
+WorkstationApp g_app;
 
 // ---------------------------------------------------------------------------
 // Workspace layout: every control gets its rectangle from ONE function, per
@@ -145,14 +145,14 @@ void applyWorkspaceLayout(HWND hwnd) {
     const int dpi = GetDpiForWindow(hwnd);
     const auto u = [dpi](int v) { return MulDiv(v, dpi, 96); };
 
-    const bool fullscreen = g_fullscreen;
+    const bool fullscreen = g_app.fullscreen;
     const int topbarH = u(52);
     const int bodyTop = topbarH + 2;
     const int bodyH = height - bodyTop;
 
-    const bool isEncoder = (g_workspace == rtx::gui::WorkspaceMode::Encoder);
-    const bool isPlayer = (g_workspace == rtx::gui::WorkspaceMode::Player);
-    const bool isNle = (g_workspace == rtx::gui::WorkspaceMode::Nle);
+    const bool isEncoder = (g_app.workspace == rtx::gui::WorkspaceMode::Encoder);
+    const bool isPlayer = (g_app.workspace == rtx::gui::WorkspaceMode::Player);
+    const bool isNle = (g_app.workspace == rtx::gui::WorkspaceMode::Nle);
     const bool showInspector = (isEncoder || isNle) && !fullscreen;
     const bool showEncoderRail = isEncoder && !fullscreen;
     const bool showPlayer = isPlayer && !fullscreen;
@@ -171,8 +171,8 @@ void applyWorkspaceLayout(HWND hwnd) {
     ShowWindow(GetDlgItem(hwnd, IDC_BTN_LANG), fullscreen ? SW_HIDE : SW_SHOW);
 
     if (fullscreen) {
-        if (g_previewViewport.has_value()) {
-            g_previewViewport->setBounds(0, 0, width, height);
+        if (g_app.previewViewport.has_value()) {
+            g_app.previewViewport->setBounds(0, 0, width, height);
         }
         if (isPlayer) {
             MoveWindow(GetDlgItem(hwnd, IDC_TRK_SCRUB), u(8), height - u(40), width - u(16), u(26), TRUE);
@@ -222,15 +222,15 @@ void applyWorkspaceLayout(HWND hwnd) {
         const int centerX = railW;
         const int centerW = width - railW - u(380);
         const int vpH = bodyH - u(120);
-        if (g_previewViewport.has_value()) {
-            g_previewViewport->setBounds(centerX, bodyTop, std::max(u(120), centerW), std::max(u(80), vpH));
+        if (g_app.previewViewport.has_value()) {
+            g_app.previewViewport->setBounds(centerX, bodyTop, std::max(u(120), centerW), std::max(u(80), vpH));
         }
         MoveWindow(GetDlgItem(hwnd, IDC_TRK_SCRUB), centerX, bodyTop + vpH + u(8),
                    std::max(u(120), centerW), u(26), TRUE);
     } else if (isPlayer) {
         const int vpH = bodyH - u(110);
-        if (g_previewViewport.has_value()) {
-            g_previewViewport->setBounds(0, bodyTop, width, std::max(u(80), vpH));
+        if (g_app.previewViewport.has_value()) {
+            g_app.previewViewport->setBounds(0, bodyTop, width, std::max(u(80), vpH));
         }
         MoveWindow(GetDlgItem(hwnd, IDC_TRK_SCRUB), u(8), bodyTop + vpH + u(8), width - u(16), u(26), TRUE);
         const int btnY = bodyTop + vpH + u(40);
@@ -248,8 +248,8 @@ void applyWorkspaceLayout(HWND hwnd) {
         const int monitorH = bodyH - timelineH - u(40);
         MoveWindow(GetDlgItem(hwnd, IDC_LST_BIN), u(8), bodyTop + u(8), binW - u(16),
                    bodyH - timelineH - u(24), TRUE);
-        if (g_previewViewport.has_value()) {
-            g_previewViewport->setBounds(monitorX, bodyTop, std::max(u(120), monitorW),
+        if (g_app.previewViewport.has_value()) {
+            g_app.previewViewport->setBounds(monitorX, bodyTop, std::max(u(120), monitorW),
                                          std::max(u(80), monitorH));
         }
         const int toolY = bodyTop + monitorH + u(8);
@@ -326,10 +326,10 @@ void updateTabStates(HWND hwnd) {
 void commitViewportVsrScale(HWND hwnd);
 
 void setWorkspace(HWND hwnd, rtx::gui::WorkspaceMode mode) {
-    if (g_workspace == mode && !g_fullscreen) {
+    if (g_app.workspace == mode && !g_app.fullscreen) {
         return;
     }
-    g_workspace = mode;
+    g_app.workspace = mode;
     rtx::gui::setActiveWorkspace(mode);
     applyWorkspaceLayout(hwnd);
     updateTabStates(hwnd);
@@ -342,14 +342,14 @@ void setWorkspace(HWND hwnd, rtx::gui::WorkspaceMode mode) {
 // Borderless fullscreen quick-play (the "+1" workstation form).
 // ---------------------------------------------------------------------------
 void setBorderlessFullscreen(HWND hwnd, bool fullscreen) {
-    if (fullscreen == g_fullscreen) {
+    if (fullscreen == g_app.fullscreen) {
         return;
     }
-    g_fullscreen = fullscreen;
+    g_app.fullscreen = fullscreen;
     if (fullscreen) {
-        g_prevStyle = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
-        g_prevPlacement.length = sizeof(WINDOWPLACEMENT);
-        GetWindowPlacement(hwnd, &g_prevPlacement);
+        g_app.prevStyle = static_cast<DWORD>(GetWindowLongW(hwnd, GWL_STYLE));
+        g_app.prevPlacement.length = sizeof(WINDOWPLACEMENT);
+        GetWindowPlacement(hwnd, &g_app.prevPlacement);
         SetWindowLongW(hwnd, GWL_STYLE, static_cast<LONG>(WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN));
         const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{};
@@ -361,8 +361,8 @@ void setBorderlessFullscreen(HWND hwnd, bool fullscreen) {
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
         rtx::logInfo("borderless fullscreen entered (quick-play)");
     } else {
-        SetWindowLongW(hwnd, GWL_STYLE, static_cast<LONG>(g_prevStyle));
-        SetWindowPlacement(hwnd, &g_prevPlacement);
+        SetWindowLongW(hwnd, GWL_STYLE, static_cast<LONG>(g_app.prevStyle));
+        SetWindowPlacement(hwnd, &g_app.prevPlacement);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         rtx::logInfo("borderless fullscreen exited");
@@ -377,17 +377,17 @@ void setBorderlessFullscreen(HWND hwnd, bool fullscreen) {
 // (WM_EXITSIZEMOVE).  Drag (WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE) never recomputes.
 // ---------------------------------------------------------------------------
 void commitViewportVsrScale(HWND hwnd) {
-    if (!g_previewViewport.has_value()) {
+    if (!g_app.previewViewport.has_value()) {
         return;
     }
     RECT vp{};
-    if (!GetClientRect(g_previewViewport->hwnd(), &vp) || vp.right <= 0 || vp.bottom <= 0) {
+    if (!GetClientRect(g_app.previewViewport->hwnd(), &vp) || vp.right <= 0 || vp.bottom <= 0) {
         return;
     }
     const rtx::gui::DynamicVsrTarget target =
-        rtx::gui::computeViewportVsrTarget(g_srcWidth, g_srcHeight, vp.right, vp.bottom);
+        rtx::gui::computeViewportVsrTarget(g_app.srcWidth, g_app.srcHeight, vp.right, vp.bottom);
     rtx::gui::storeActiveVsrTarget(target);
-    g_previewViewport->resizeSwapChain(vp.right, vp.bottom);
+    g_app.previewViewport->resizeSwapChain(vp.right, vp.bottom);
     const std::wstring scaleStr = rtx::gui::formatVsrScale(static_cast<float>(target.scale));
     wchar_t osd[160];
     if (target.vsr_active) {
@@ -408,8 +408,8 @@ void commitViewportVsrScale(HWND hwnd) {
 void applyProbedMedia(HWND hwnd, const std::filesystem::path& path) {
     const rtx::gui::ProbedMedia media = rtx::gui::probeMediaFile(path);
     if (media.ok) {
-        g_srcWidth = media.width;
-        g_srcHeight = media.height;
+        g_app.srcWidth = media.width;
+        g_app.srcHeight = media.height;
         auto& timeline = rtx::gui::sharedNleTimeline();
         timeline.duration_ms = media.duration_ms;
         SendMessageW(GetDlgItem(hwnd, IDC_TRK_SCRUB), TBM_SETRANGEMAX, TRUE,
@@ -439,102 +439,81 @@ bool collectOptions(HWND hwnd, rtx::HwTranscodeOptions& out) {
     // guiProfile().output (Bug 2 fix lives entirely in the schema).
     SetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, utf8ToWide(guiProfile().output).c_str());
     out = rtx::profileToHwOptions(guiProfile());
-    g_splitRatio.store(0.5f, std::memory_order_relaxed);
-    out.split_ratio = &g_splitRatio;
-    if (g_previewEnabled) {
+    g_app.splitRatio.store(0.5f, std::memory_order_relaxed);
+    out.split_ratio = &g_app.splitRatio;
+    if (g_app.previewEnabled) {
         out.preview = [](const void* data, std::uint32_t pitch) {
-            std::lock_guard<std::mutex> lock(g_previewMutex);
+            std::lock_guard<std::mutex> lock(g_app.previewMutex);
             const size_t bytes = static_cast<size_t>(pitch) * kPreviewHeight;
-            g_previewHost.assign(static_cast<const uint8_t*>(data),
+            g_app.previewHost.assign(static_cast<const uint8_t*>(data),
                                  static_cast<const uint8_t*>(data) + bytes);
-            g_previewPitch = pitch;
-            g_previewDirty = true;
+            g_app.previewPitch = pitch;
+            g_app.previewDirty = true;
         };
     }
-    out.cancel = &g_cancelRequested;
+    out.cancel = &g_app.cancelRequested;
     return true;
 }
+
+void refreshQueueListbox(HWND hwnd);
 
 void onStartTranscode(HWND hwnd) {
     if (guiIsTranscoding()) return;
 
+    guiProfile() = collectProfileFromUi(hwnd);
     wchar_t inPath[MAX_PATH] = {};
     GetDlgItemTextW(hwnd, IDC_EDT_INPUT, inPath, MAX_PATH);
 
-    {
-        std::lock_guard<std::mutex> lock(g_batchMutex);
-        if (g_batchQueue.empty() && inPath[0] != L'\0') {
-            g_batchQueue.push_back(inPath);
-        }
-        g_batchIndex = 0;
-        if (g_batchQueue.empty() || !std::filesystem::exists(g_batchQueue.front())) {
-            MessageBoxW(hwnd, rtx::trW(rtx::StrId::StatusDropFileOnly),
-                        rtx::trW(rtx::StrId::AppTitle), MB_ICONWARNING);
-            return;
+    auto snapshots = g_app.jobQueue.snapshot();
+    bool hasPending = false;
+    for (const auto& job : snapshots) {
+        if (job.status == rtx::JobStatus::Pending) {
+            hasPending = true;
+            rtx::TranscodeProfile updated = guiProfile();
+            if (!job.inputs.empty()) {
+                updated.input = wideToUtf8(job.inputs.front().wstring());
+            }
+            if (updated.output.empty() || updated.auto_output) {
+                updated.output = rtx::deriveOutputPath(updated.input, updated.codec, {}, true);
+            }
+            (void)g_app.jobQueue.updatePendingJob(job.job_id, updated);
         }
     }
 
-    rtx::HwTranscodeOptions opt;
-    if (!collectOptions(hwnd, opt)) {
+    if (!hasPending && inPath[0] != L'\0' && std::filesystem::exists(inPath)) {
+        rtx::TranscodeProfile profile = guiProfile();
+        profile.input = wideToUtf8(inPath);
+        if (profile.output.empty()) {
+            profile.output = rtx::deriveOutputPath(profile.input, profile.codec, {}, true);
+        }
+        (void)g_app.jobQueue.enqueueJob({std::filesystem::path(inPath)}, profile,
+                                        std::filesystem::path(inPath).parent_path());
+        hasPending = true;
+    }
+
+    refreshQueueListbox(hwnd);
+    snapshots = g_app.jobQueue.snapshot();
+
+    if (!hasPending) {
+        MessageBoxW(hwnd, rtx::trW(rtx::StrId::StatusDropFileOnly),
+                    rtx::trW(rtx::StrId::AppTitle), MB_ICONWARNING);
         return;
     }
-    g_cancelRequested.store(false, std::memory_order_relaxed);
+
+    g_app.cancelRequested.store(false, std::memory_order_relaxed);
     setGuiTranscoding(true);
     syncControlStates(hwnd);
     SendMessageW(GetDlgItem(hwnd, IDC_PROGRESS), PBM_SETPOS, 0, 0);
     SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusWorking));
-    rtx::logInfo("transcode start: " + wideToUtf8(g_batchQueue.front()) + " -> " + guiProfile().output +
-                 " codec=" + guiProfile().codec + " peak_nits=" + std::to_string(guiProfile().peak_nits));
+    rtx::logInfo("job queue start: " + std::to_string(snapshots.size()) + " job(s)");
 
-    opt.progress = [hwnd](const rtx::HwTranscodeProgress& p) {
-        int pct = 0;
-        if (p.total_frames > 0) {
-            pct = static_cast<int>(static_cast<double>(p.frames_encoded) * 1000.0 / p.total_frames);
-        }
-        int fps10 = static_cast<int>((p.elapsed_ms > 0 ? (p.frames_encoded * 10000.0 / p.elapsed_ms) : 0.0));
-        PostMessageW(hwnd, WM_APP_PROGRESS, static_cast<WPARAM>(pct), static_cast<LPARAM>(fps10));
-    };
-
-    if (g_workerThread.joinable()) {
-        g_workerThread.join();
-    }
-
-    g_workerThread = std::thread([hwnd, opt]() {
-        std::vector<std::wstring> queue;
-        {
-            std::lock_guard<std::mutex> lock(g_batchMutex);
-            queue = g_batchQueue;
-        }
-        for (size_t index = 0; index < queue.size(); ++index) {
-            if (g_cancelRequested.load(std::memory_order_relaxed)) {
-                break;
-            }
-            rtx::HwTranscodeOptions job = opt;
-            job.input_path = queue[index];
-            // SSOT batch naming: every queued job derives its output through
-            // rtx::deriveOutputPath (no suffix concatenation anywhere).
-            job.output_path = utf8ToWide(rtx::deriveOutputPath(
-                wideToUtf8(job.input_path.wstring()), guiProfile().codec, {}, true));
-            auto result = rtx::runNvidiaRemasterTranscode(job);
-            const bool ok = result.has_value();
-            PostMessageW(hwnd, WM_APP_PROGRESS, ok ? 1000 : 0, 0);
-            if (!ok && g_cancelRequested.load(std::memory_order_relaxed)) {
-                break;
-            }
-            if (!ok) {
-                g_lastErrorMessage = utf8ToWide(result.error().toString());
-                rtx::logError("transcode failed: " + wideToUtf8(g_lastErrorMessage));
-                PostMessageW(hwnd, WM_APP_DONE, 0, 0);
-                return;
-            }
-        }
-        PostMessageW(hwnd, WM_APP_DONE, 1, 0);
-    });
+    g_app.jobQueue.startWorker();
 }
 
 void onStopTranscode(HWND hwnd) {
     if (!guiIsTranscoding()) return;
-    g_cancelRequested.store(true, std::memory_order_release);
+    g_app.cancelRequested.store(true, std::memory_order_release);
+    g_app.jobQueue.skipCurrentJob();
     SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusStopping));
 }
 
@@ -616,42 +595,42 @@ void onQueueAdd(HWND hwnd) {
         return;
     }
     const std::wstring dir(files);
-    std::lock_guard<std::mutex> lock(g_batchMutex);
+    std::vector<std::filesystem::path> inputs;
     wchar_t* cursor = files + dir.size() + 1;
     if (*cursor == L'\0') {
-        g_batchQueue.push_back(dir);  // single selection: full path in the first token
+        inputs.push_back(std::filesystem::path(dir));
     } else {
         while (*cursor != L'\0') {
-            g_batchQueue.emplace_back((std::filesystem::path(dir) / cursor).wstring());
+            inputs.push_back(std::filesystem::path(dir) / cursor);
             cursor += wcslen(cursor) + 1;
         }
     }
-    SendDlgItemMessageW(hwnd, IDC_LST_QUEUE, LB_RESETCONTENT, 0, 0);
-    for (const std::wstring& item : g_batchQueue) {
-        SendDlgItemMessageW(hwnd, IDC_LST_QUEUE, LB_ADDSTRING, 0,
-                            reinterpret_cast<LPARAM>(item.c_str()));
-    }
-    rtx::logInfo("batch queue now holds " + std::to_string(g_batchQueue.size()) + " job(s)");
-    // RW-2 entry point 3/5: probe the front job for real geometry + duration.
-    if (!g_batchQueue.empty()) {
-        applyProbedMedia(hwnd, std::filesystem::path(g_batchQueue.front()));
+    if (!inputs.empty()) {
+        guiProfile() = collectProfileFromUi(hwnd);
+        rtx::TranscodeProfile profile = guiProfile();
+        profile.input = wideToUtf8(inputs.front().wstring());
+        if (profile.output.empty()) {
+            profile.output = rtx::deriveOutputPath(profile.input, profile.codec, {}, true);
+        }
+        (void)g_app.jobQueue.enqueueJob(inputs, profile, inputs.front().parent_path());
+        refreshQueueListbox(hwnd);
+        applyProbedMedia(hwnd, inputs.front());
     }
 }
 
 void onQueueRemove(HWND hwnd) {
     const LRESULT sel = SendDlgItemMessageW(hwnd, IDC_LST_QUEUE, LB_GETCURSEL, 0, 0);
     if (sel < 0) return;
-    std::lock_guard<std::mutex> lock(g_batchMutex);
-    if (static_cast<size_t>(sel) < g_batchQueue.size()) {
-        g_batchQueue.erase(g_batchQueue.begin() + sel);
+    const auto snapshots = g_app.jobQueue.snapshot();
+    if (static_cast<size_t>(sel) < snapshots.size()) {
+        (void)g_app.jobQueue.removeJob(snapshots[static_cast<size_t>(sel)].job_id);
+        refreshQueueListbox(hwnd);
     }
-    SendDlgItemMessageW(hwnd, IDC_LST_QUEUE, LB_DELETESTRING, static_cast<WPARAM>(sel), 0);
 }
 
 void onQueueClear(HWND hwnd) {
-    std::lock_guard<std::mutex> lock(g_batchMutex);
-    g_batchQueue.clear();
-    SendDlgItemMessageW(hwnd, IDC_LST_QUEUE, LB_RESETCONTENT, 0, 0);
+    g_app.jobQueue.clearCompleted();
+    refreshQueueListbox(hwnd);
 }
 
 // ---------------------------------------------------------------------------
@@ -675,45 +654,60 @@ void runScrubPreviewAsync(HWND hwnd) {
             ? (static_cast<int64_t>(pos) - range_min) * duration_ms / (range_max - range_min)
             : 0;
 
-    if (g_scrubThread.joinable()) {
+    if (g_app.scrubThread.joinable()) {
         return;  // one scrub at a time; the slider re-fires on release
     }
-    g_previewBusy.store(true, std::memory_order_relaxed);
-    g_scrubThread = std::thread([hwnd, inPathW = std::wstring(inPath), seek_ms]() {
+    g_app.previewBusy.store(true, std::memory_order_relaxed);
+    g_app.scrubThread = std::thread([hwnd, inPathW = std::wstring(inPath), seek_ms]() {
         rtx::HwTranscodeOptions opt;
         if (!collectOptions(hwnd, opt)) {
-            g_previewBusy.store(false, std::memory_order_relaxed);
+            g_app.previewBusy.store(false, std::memory_order_relaxed);
             return;
         }
         opt.input_path = inPathW;
         opt.preview = [](const void* data, std::uint32_t pitch) {
-            std::lock_guard<std::mutex> lock(g_previewMutex);
+            std::lock_guard<std::mutex> lock(g_app.previewMutex);
             const size_t bytes = static_cast<size_t>(pitch) * kPreviewHeight;
-            g_previewHost.assign(static_cast<const uint8_t*>(data),
+            g_app.previewHost.assign(static_cast<const uint8_t*>(data),
                                  static_cast<const uint8_t*>(data) + bytes);
-            g_previewPitch = pitch;
-            g_previewDirty = true;
+            g_app.previewPitch = pitch;
+            g_app.previewDirty = true;
         };
         auto result = rtx::runScrubPreview(opt, seek_ms);
         (void)result;
-        g_previewBusy.store(false, std::memory_order_relaxed);
+        g_app.previewBusy.store(false, std::memory_order_relaxed);
     });
 }
 
 // RW-4: playback/pause toggle shared by IDC_BTN_PLAYER_PLAY and VK_SPACE.
 void togglePlayback(HWND hwnd) {
-    g_isPlaying = !g_isPlaying;
-    rtx::gui::setGuiPlaying(g_isPlaying);
+    g_app.isPlaying = !g_app.isPlaying;
+    rtx::gui::setGuiPlaying(g_app.isPlaying);
     InvalidateRect(GetDlgItem(hwnd, IDC_BTN_PLAYER_PLAY), nullptr, FALSE);
-    rtx::logInfo(std::string("playback -> ") + (g_isPlaying ? "playing" : "paused"));
+    rtx::logInfo(std::string("playback -> ") + (g_app.isPlaying ? "playing" : "paused"));
 }
 
 void refreshQueueListbox(HWND hwnd) {
     SendDlgItemMessageW(hwnd, IDC_LST_QUEUE, LB_RESETCONTENT, 0, 0);
-    std::lock_guard<std::mutex> lock(g_batchMutex);
-    for (const std::wstring& item : g_batchQueue) {
+    const auto snapshots = g_app.jobQueue.snapshot();
+    for (const auto& job : snapshots) {
+        std::wstring statusTag = L"[Pending] ";
+        if (job.status == rtx::JobStatus::Running) {
+            statusTag = L"[Running " + std::to_wstring(static_cast<int>(job.total_job_pct)) + L"%] ";
+        } else if (job.status == rtx::JobStatus::Completed) {
+            statusTag = L"[Done] ";
+        } else if (job.status == rtx::JobStatus::Failed) {
+            statusTag = L"[Failed] ";
+        } else if (job.status == rtx::JobStatus::Cancelled) {
+            statusTag = L"[Cancelled] ";
+        }
+
+        std::wstring label = statusTag + (job.inputs.empty() ? L"" : job.inputs.front().wstring()) +
+                             L" [" + utf8ToWide(job.profile.codec) + L"/" +
+                             utf8ToWide(job.profile.rate_control) + L"/QP" +
+                             std::to_wstring(job.profile.qp) + L"]";
         SendDlgItemMessageW(hwnd, IDC_LST_QUEUE, LB_ADDSTRING, 0,
-                            reinterpret_cast<LPARAM>(item.c_str()));
+                            reinterpret_cast<LPARAM>(label.c_str()));
     }
 }
 
@@ -723,28 +717,28 @@ void refreshQueueListbox(HWND hwnd) {
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            g_hbrBg = CreateSolidBrush(rtx::gui::kClrPanel);
-            g_hbrCtrl = CreateSolidBrush(rtx::gui::kClrCtrl);
+            g_app.hbrBg = CreateSolidBrush(rtx::gui::kClrPanel);
+            g_app.hbrCtrl = CreateSolidBrush(rtx::gui::kClrCtrl);
 
-            g_hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            g_app.hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-            g_hFontBold = CreateFontW(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            g_app.hFontBold = CreateFontW(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
             BOOL dark = TRUE;
             DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
-            rtx::gui::createWorkstationControls(hwnd, g_hFont, g_hFontBold);
+            rtx::gui::createWorkstationControls(hwnd, g_app.hFont, g_app.hFontBold);
 
             // Realtime A/B monitoring viewport (created last to z-order above).
             auto viewport = rtx::gui::PreviewViewport::create(hwnd, kPreviewWidth, kPreviewHeight);
             if (viewport.has_value()) {
-                g_previewViewport.emplace(std::move(viewport.value()));
-                g_previewEnabled = true;
+                g_app.previewViewport.emplace(std::move(viewport.value()));
+                g_app.previewEnabled = true;
             } else {
-                g_previewEnabled = false;
+                g_app.previewEnabled = false;
             }
 
             DragAcceptFiles(hwnd, TRUE);
@@ -754,7 +748,16 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             refreshUiLanguage(hwnd);
             syncControlStates(hwnd);
             applyWorkspaceLayout(hwnd);
-            // RW-4: playback transport clock (gated on g_isPlaying).
+            g_app.jobQueue.setEventCallback([hwnd](const rtx::JobQueueEvent& evt) {
+                if (evt.kind == rtx::JobQueueEvent::Kind::JobProgress) {
+                    int permille = std::clamp(static_cast<int>(evt.snapshot.total_job_pct * 10.0), 0, 1000);
+                    int fps10 = static_cast<int>(evt.snapshot.current_fps * 10.0);
+                    PostMessageW(hwnd, WM_APP_PROGRESS, static_cast<WPARAM>(permille), static_cast<LPARAM>(fps10));
+                } else {
+                    PostMessageW(hwnd, WM_APP_QUEUE_UPDATED, static_cast<WPARAM>(evt.kind), static_cast<LPARAM>(evt.job_id));
+                }
+            });
+            // RW-4: playback transport clock (gated on g_app.isPlaying).
             SetTimer(hwnd, 3, 66, nullptr);
             return 0;
         }
@@ -763,17 +766,17 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             applyWorkspaceLayout(hwnd);
             // RW-3 timing (4b): a maximize/restore that never went through the
             // drag loop must still recompute the dynamic VSR target.
-            if (!g_inResizeDrag && (wParam == SIZE_MAXIMIZED || wParam == SIZE_RESTORED)) {
+            if (!g_app.inResizeDrag && (wParam == SIZE_MAXIMIZED || wParam == SIZE_RESTORED)) {
                 commitViewportVsrScale(hwnd);
             }
             return 0;
 
         case WM_ENTERSIZEMOVE:
-            g_inResizeDrag = true;
+            g_app.inResizeDrag = true;
             return 0;
 
         case WM_EXITSIZEMOVE:
-            g_inResizeDrag = false;
+            g_app.inResizeDrag = false;
             commitViewportVsrScale(hwnd);  // dynamic VSR recompute on mouse release only
             return 0;
 
@@ -796,10 +799,12 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
             DragFinish(hDrop);
-            {
-                std::lock_guard<std::mutex> lock(g_batchMutex);
-                g_batchQueue = paths;
-                g_batchIndex = 0;
+            guiProfile() = collectProfileFromUi(hwnd);
+            for (const auto& p : paths) {
+                rtx::TranscodeProfile profile = guiProfile();
+                profile.input = wideToUtf8(p);
+                profile.output = rtx::deriveOutputPath(profile.input, profile.codec, {}, true);
+                (void)g_app.jobQueue.enqueueJob({std::filesystem::path(p)}, profile, std::filesystem::path(p).parent_path());
             }
             refreshQueueListbox(hwnd);
             if (!paths.empty()) {
@@ -813,7 +818,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (!paths.empty()) {
                 applyProbedMedia(hwnd, std::filesystem::path(paths.front()));
             }
-            if (g_workspace != rtx::gui::WorkspaceMode::Encoder) {
+            if (g_app.workspace != rtx::gui::WorkspaceMode::Encoder) {
                 runScrubPreviewAsync(hwnd);  // Player/NLE: drop = load into monitor
             }
             return 0;
@@ -822,18 +827,18 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_APP_SPLIT_DRAG: {
             const UINT mouseMsg = static_cast<UINT>(wParam);
             if (mouseMsg == WM_LBUTTONDBLCLK) {
-                setBorderlessFullscreen(hwnd, !g_fullscreen);
+                setBorderlessFullscreen(hwnd, !g_app.fullscreen);
                 return 0;
             }
             const int x = GET_X_LPARAM(lParam);
             RECT rc;
-            if (g_previewViewport.has_value() && GetClientRect(g_previewViewport->hwnd(), &rc) &&
+            if (g_app.previewViewport.has_value() && GetClientRect(g_app.previewViewport->hwnd(), &rc) &&
                 rc.right > 0) {
                 const float ratio = std::clamp(static_cast<float>(x) / static_cast<float>(rc.right), 0.0f, 1.0f);
                 if (mouseMsg != WM_LBUTTONUP) {
-                    g_splitRatio.store(ratio, std::memory_order_relaxed);
+                    g_app.splitRatio.store(ratio, std::memory_order_relaxed);
                 }
-                g_previewViewport->setSplitRatio(ratio);
+                g_app.previewViewport->setSplitRatio(ratio);
             }
             return 0;
         }
@@ -855,22 +860,22 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             std::vector<uint8_t> frame;
             uint32_t pitch = 0;
             {
-                std::lock_guard<std::mutex> lock(g_previewMutex);
-                if (!g_previewDirty || g_previewHost.empty()) {
+                std::lock_guard<std::mutex> lock(g_app.previewMutex);
+                if (!g_app.previewDirty || g_app.previewHost.empty()) {
                     return 0;
                 }
-                g_previewDirty = false;
-                frame = g_previewHost;
-                pitch = g_previewPitch;
+                g_app.previewDirty = false;
+                frame = g_app.previewHost;
+                pitch = g_app.previewPitch;
             }
-            if (g_previewViewport.has_value()) {
-                g_previewViewport->presentFromHostOrShared(frame.data(), pitch);
+            if (g_app.previewViewport.has_value()) {
+                g_app.previewViewport->presentFromHostOrShared(frame.data(), pitch);
             }
             return 0;
         }
 
         case WM_DRAWITEM:
-            if (rtx::gui::paintCommandButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam), g_hFont)) {
+            if (rtx::gui::paintCommandButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam), g_app.hFont)) {
                 return TRUE;
             }
             break;
@@ -952,17 +957,17 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == '1' && altDown) { setWorkspace(hwnd, rtx::gui::WorkspaceMode::Encoder); return 0; }
             if (wParam == '2' && altDown) { setWorkspace(hwnd, rtx::gui::WorkspaceMode::Player); return 0; }
             if (wParam == '3' && altDown) { setWorkspace(hwnd, rtx::gui::WorkspaceMode::Nle); return 0; }
-            if (wParam == VK_RETURN && altDown) { setBorderlessFullscreen(hwnd, !g_fullscreen); return 0; }
-            if (wParam == VK_F11) { setBorderlessFullscreen(hwnd, !g_fullscreen); return 0; }
+            if (wParam == VK_RETURN && altDown) { setBorderlessFullscreen(hwnd, !g_app.fullscreen); return 0; }
+            if (wParam == VK_F11) { setBorderlessFullscreen(hwnd, !g_app.fullscreen); return 0; }
             break;
         }
 
         case WM_KEYDOWN: {
             if (wParam == VK_F11) {
-                setBorderlessFullscreen(hwnd, !g_fullscreen);
+                setBorderlessFullscreen(hwnd, !g_app.fullscreen);
                 return 0;
             }
-            if (wParam == VK_ESCAPE && g_fullscreen) {
+            if (wParam == VK_ESCAPE && g_app.fullscreen) {
                 setBorderlessFullscreen(hwnd, false);
                 return 0;
             }
@@ -985,12 +990,14 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             double fps = static_cast<double>(lParam) / 10.0;
             SendMessageW(GetDlgItem(hwnd, IDC_PROGRESS), PBM_SETPOS, permille, 0);
             wchar_t buf[192];
-            size_t batch_total = 0;
+            const auto snapshots = g_app.jobQueue.snapshot();
+            size_t batch_total = snapshots.size();
             size_t batch_index = 0;
-            {
-                std::lock_guard<std::mutex> lock(g_batchMutex);
-                batch_total = g_batchQueue.size();
-                batch_index = g_batchIndex;
+            for (size_t i = 0; i < snapshots.size(); ++i) {
+                if (snapshots[i].status == rtx::JobStatus::Running) {
+                    batch_index = i;
+                    break;
+                }
             }
             if (batch_total > 1) {
                 _snwprintf_s(buf, _countof(buf), _TRUNCATE,
@@ -1006,12 +1013,40 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_APP_QUEUE_UPDATED: {
+            refreshQueueListbox(hwnd);
+            if (!g_app.jobQueue.isWorkerRunning()) {
+                setGuiTranscoding(false);
+                syncControlStates(hwnd);
+                const auto snapshots = g_app.jobQueue.snapshot();
+                const rtx::EncoderJob* lastFailed = nullptr;
+                bool anyCancelled = false;
+                for (const auto& j : snapshots) {
+                    if (j.status == rtx::JobStatus::Failed) lastFailed = &j;
+                    else if (j.status == rtx::JobStatus::Cancelled) anyCancelled = true;
+                }
+                if (lastFailed != nullptr) {
+                    SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusFailed));
+                    std::wstring detail = utf8ToWide(lastFailed->error_message.empty() ? "unknown error" : lastFailed->error_message);
+                    std::wstring box_text = std::wstring(rtx::trW(rtx::StrId::StatusFailed)) + L": " + detail;
+                    rtx::logError("transcode failed: " + lastFailed->error_message);
+                    MessageBoxW(hwnd, box_text.c_str(), rtx::trW(rtx::StrId::AppTitle), MB_ICONERROR);
+                } else if (anyCancelled) {
+                    SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusCancelled));
+                } else {
+                    SendMessageW(GetDlgItem(hwnd, IDC_PROGRESS), PBM_SETPOS, 1000, 0);
+                    SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusDonePrefix));
+                }
+            }
+            return 0;
+        }
+
         case WM_APP_DONE: {
             bool ok = (wParam == 1);
             setGuiTranscoding(false);
             syncControlStates(hwnd);
-            if (g_workerThread.joinable()) {
-                g_workerThread.join();
+            if (g_app.workerThread.joinable()) {
+                g_app.workerThread.join();
             }
             if (ok) {
                 SendMessageW(GetDlgItem(hwnd, IDC_PROGRESS), PBM_SETPOS, 1000, 0);
@@ -1021,8 +1056,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else {
                 SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(rtx::StrId::StatusFailed));
                 std::wstring err_text = std::wstring(rtx::trW(rtx::StrId::StatusFailed)) + L": " +
-                                        (g_lastErrorMessage.empty() ? L"unknown error" : g_lastErrorMessage);
-                rtx::logError("transcode failed: " + wideToUtf8(g_lastErrorMessage));
+                                        (g_app.lastErrorMessage.empty() ? L"unknown error" : g_app.lastErrorMessage);
+                rtx::logError("transcode failed: " + wideToUtf8(g_app.lastErrorMessage));
                 MessageBoxW(hwnd, err_text.c_str(), rtx::trW(rtx::StrId::AppTitle), MB_ICONERROR);
             }
             return 0;
@@ -1033,7 +1068,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc{};
             GetClientRect(hwnd, &rc);
-            rtx::gui::paintWorkspaceChrome(hdc, rc, g_workspace, g_hFont);
+            rtx::gui::paintWorkspaceChrome(hdc, rc, g_app.workspace, g_app.hFont);
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -1042,7 +1077,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             HDC hdc = reinterpret_cast<HDC>(wParam);
             SetTextColor(hdc, rtx::gui::kClrText);
             SetBkColor(hdc, rtx::gui::kClrPanel);
-            return reinterpret_cast<LRESULT>(g_hbrBg);
+            return reinterpret_cast<LRESULT>(g_app.hbrBg);
         }
 
         case WM_CTLCOLOREDIT:
@@ -1051,20 +1086,20 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             HDC hdc = reinterpret_cast<HDC>(wParam);
             SetTextColor(hdc, rtx::gui::kClrText);
             SetBkColor(hdc, rtx::gui::kClrCtrl);
-            return reinterpret_cast<LRESULT>(g_hbrCtrl);
+            return reinterpret_cast<LRESULT>(g_app.hbrCtrl);
         }
 
         case WM_TIMER: {
             if (wParam == 2) {
                 bool dirty = false;
                 {
-                    std::lock_guard<std::mutex> lock(g_previewMutex);
-                    dirty = g_previewDirty;
+                    std::lock_guard<std::mutex> lock(g_app.previewMutex);
+                    dirty = g_app.previewDirty;
                 }
                 if (dirty) {
                     SendMessageW(hwnd, WM_APP_PREVIEW, 0, 0);
                 }
-            } else if (wParam == 3 && g_isPlaying) {
+            } else if (wParam == 3 && g_app.isPlaying) {
                 // RW-4: the playback loop advances the transport every 66 ms,
                 // loops at the end, and drives the next single-frame decode
                 // only when the previous scrub finished (zero backlog).
@@ -1080,7 +1115,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 rtx::gui::sharedNleTimeline().playhead_ms = next;
                 rtx::gui::updateNleTimecode(hwnd);
                 InvalidateRect(GetDlgItem(hwnd, IDC_NLE_TIMELINE), nullptr, FALSE);
-                if (!g_previewBusy.load(std::memory_order_relaxed)) {
+                if (!g_app.previewBusy.load(std::memory_order_relaxed)) {
                     runScrubPreviewAsync(hwnd);
                 }
             }
@@ -1091,18 +1126,18 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             UnregisterHotKey(hwnd, 1);
             KillTimer(hwnd, 2);
             KillTimer(hwnd, 3);
-            if (g_scrubThread.joinable()) {
-                g_scrubThread.join();
+            if (g_app.scrubThread.joinable()) {
+                g_app.scrubThread.join();
             }
-            if (g_workerThread.joinable()) {
-                g_cancelRequested.store(true, std::memory_order_release);
-                g_workerThread.join();
+            if (g_app.workerThread.joinable()) {
+                g_app.cancelRequested.store(true, std::memory_order_release);
+                g_app.workerThread.join();
             }
-            g_previewViewport.reset();
-            if (g_hbrBg) DeleteObject(g_hbrBg);
-            if (g_hbrCtrl) DeleteObject(g_hbrCtrl);
-            if (g_hFont) DeleteObject(g_hFont);
-            if (g_hFontBold) DeleteObject(g_hFontBold);
+            g_app.previewViewport.reset();
+            if (g_app.hbrBg) DeleteObject(g_app.hbrBg);
+            if (g_app.hbrCtrl) DeleteObject(g_app.hbrCtrl);
+            if (g_app.hFont) DeleteObject(g_app.hFont);
+            if (g_app.hFontBold) DeleteObject(g_app.hFontBold);
             PostQuitMessage(0);
             return 0;
     }
@@ -1189,7 +1224,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR /*commandLine*/, int s
     SetTimer(hwnd, 2, 66, nullptr);
 
     if (!quickPlayFile.empty()) {
-        g_quickPlayFile = quickPlayFile;
+        g_app.quickPlayFile = quickPlayFile;
         SetDlgItemTextW(hwnd, IDC_EDT_INPUT, quickPlayFile.c_str());
         SetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, L"");
         autoFillOutputPath(hwnd);
@@ -1198,7 +1233,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR /*commandLine*/, int s
         // RW-2 entry point 5/5: probe the quick-play media for real geometry
         // + duration, then start the continuous playback loop (RW-4).
         applyProbedMedia(hwnd, std::filesystem::path(quickPlayFile));
-        g_isPlaying = true;
+        g_app.isPlaying = true;
         rtx::gui::setGuiPlaying(true);
         InvalidateRect(GetDlgItem(hwnd, IDC_BTN_PLAYER_PLAY), nullptr, FALSE);
         rtx::logInfo("quick-play launch: " + wideToUtf8(quickPlayFile) + " playback started");

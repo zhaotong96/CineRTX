@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 CineRTX contributors
 //
-// CineRTX WebUI application — single JS file, zero dependencies.
+// CineRTX WebUI v2 — single JS file, zero dependencies (Phase 10 20-param SSOT).
 //
 // Architecture: ONE JSON document (`state`, mirrored 1:1 by state.json on the
 // bridge) is the single source of truth.  Three workstation shapes (encoder /
@@ -9,28 +9,357 @@
 // the same kParamSchema contract and the same SSE runtime events:
 //
 //   DOM input  -> set(path, value) -> debounced PUT /api/state  (persist)
-//   backend    -> SSE JSON events -> state.runtime merge         (render)
+//   backend    -> SSE JSON events -> state.runtime / queue merge (render)
 //   media      -> GET /api/media?path=... (HTTP Range 206)       (<video>)
-//
-// The UI knows nothing about processes, argv or the engine binary; it only
-// ever exchanges JSON documents with /api/*.
 
 "use strict";
 
 /* ========================================================================= *
- *  i18n & parameter metadata are owned by the C++ SSOT:
- *    rtx::exportI18nJson()   -> src/core/i18n.cpp (113 bilingual ids)
- *    rtx::exportSchemaJson() -> src/core/param_schema.cpp (19 params)
- *  boot() fetches GET /api/schema; no translation or range is duplicated here.
- *  FALLBACK keeps the markup's own text when the engine binary is unavailable.
+ *  i18n & parameter metadata — C++ SSOT via GET /api/schema
  * ========================================================================= */
 
-let I18N = { en: {}, zh: {} };
-let DEFAULTS = {};
+const WUI_I18N_DEFAULTS = {
+  en: {
+    AppTitle: "CineRTX Professional GPU Remaster & NLE Engine",
+    WuiSubtitle: "WebUI · JSON state-driven · fully decoupled from the backend",
+    WuiNavEncoder: "Encoder",
+    WuiNavPlayer: "Player",
+    WuiNavNle: "NLE",
+    WuiEngine: "Engine",
+    WuiProbeRun: "Run probe",
+    LangToggleHint: "Ctrl+L switches language",
+    StatusReady: "Ready",
+    StatusWorking: "Transcoding in progress...",
+    StatusStopping: "Stopping transcode...",
+    StatusCancelled: "Task cancelled",
+    StatusFailed: "Transcode failed",
+    StatusDonePrefix: "Done",
+    StatusSamePath: "Input and output paths are identical; choose another file.",
+    StatusDropFileOnly: "Drop or select a video file first.",
+    StatusGpuProbing: "Probing GPU / NVENC...",
+    StatusProbeOk: "Hardware probe OK",
+    WuiPresetsTitle: "RTX Presets",
+    WuiPresetMasterName: "4K 60fps AV1 HDR10 Master",
+    WuiPresetMasterMeta: "Default Optimal · AV1 CQ22 / 4K / NVOFA 60",
+    WuiPresetRifeName: "4K 60fps RIFE Deep Learning Master",
+    WuiPresetRifeMeta: "RIFE v4.25 · VSR->FG · CQ20",
+    WuiPresetEsportsName: "4K 120fps Esports High-FPS",
+    WuiPresetEsportsMeta: "120 FPS · VSR->FG Fast Topology",
+    WuiPresetCompatName: "2K 60fps HEVC Universal Compat",
+    WuiPresetCompatMeta: "HEVC Main10 CQ22 / 2K / VSR L3",
+    WuiPresetCpuMasterName: "Native Res CPU CRF Master",
+    WuiPresetCpuMasterMeta: "libsvtav1 CRF20 · TrueHDR Lossless",
+    WuiQueueTitle: "Batch Queue",
+    BtnQueueAdd: "+ Enqueue",
+    WuiBtnBatchImport: "Batch Multi-Import",
+    BtnQueueUp: "↑ Up",
+    BtnQueueDown: "↓ Down",
+    BtnQueueRemove: "- Remove",
+    WuiBtnQueueRetry: "↻ Retry",
+    WuiBtnQueueClear: "Clear Completed",
+    BtnQueueSkip: "⏭ Skip Current",
+    ButtonStop: "⏹ Stop Queue",
+    ButtonStart: "▶ Start Transcode",
+    WuiColStatus: "Status",
+    WuiColInput: "Input Files",
+    WuiColPreset: "Codec & Preset",
+    WuiColFruc: "FRUC",
+    WuiColHdr: "HDR Peak",
+    WuiColOutput: "Output",
+    WuiColProgress: "Progress",
+    WuiQueueEmptyTitle: "Queue is empty",
+    WuiQueueEmptyHint: "Click 'Start Transcode' to run a single job with current profile",
+    TelemetryTitle: "Task Telemetry",
+    WuiAbViewport: "A/B Compare Viewport",
+    StatThroughput: "Throughput",
+    StatFrames: "Frames",
+    StatElapsed: "Elapsed",
+    StatZeroCopy: "Zero-Copy",
+    ValueZeroCopyClean: "D2H 0 B - H2D 0 B",
+    ValueHostCopies: "Host copies detected",
+    ValueRunning: "running",
+    ValueDash: "—",
+    ProgressIdle: "—",
+    WuiProbeTitle: "Hardware Probe",
+    WuiReportTitle: "Job Report",
+    WuiLogTitle: "Engine Log",
+    WuiParamsTitle: "Parameters",
+    WuiInspectorDraft: "Draft Mode · Edit parameters then click '+ Enqueue'",
+    WuiInspectorEditingPrefix: "Editing Pending Job",
+    WuiInspectorReadonlyPrefix: "Inspecting Job (Locked)",
+    WuiBtnQueueDeselect: "Back to Draft",
+    WuiWarnRemoveRunning: "Cannot remove a running job directly; use 'Skip' or 'Stop'",
+    WuiGroupIo: "Input / Output",
+    WuiGroupEncoder: "Encoder",
+    WuiGroupVsrFruc: "Super Resolution & FRUC",
+    WuiGroupHdr: "HDR Color Science",
+    ParamInput: "Input File",
+    ParamOutput: "Output File",
+    BtnBrowse: "Browse...",
+    ParamCodec: "Video Codec",
+    OptCodecAv1: "AV1 10-bit (NVENC)",
+    OptCodecHevc: "HEVC Main10 (NVENC)",
+    OptCodecAv1Cpu: "AV1 10-bit CPU (libsvtav1)",
+    OptCodecHevcCpu: "HEVC 10-bit CPU (libx265)",
+    ParamPreset: "Preset",
+    OptPresetP1: "P1 Fastest",
+    OptPresetP2: "P2 Faster",
+    OptPresetP3: "P3 Fast",
+    OptPresetP4: "P4 Medium",
+    OptPresetP5: "P5 Balanced",
+    OptPresetP6: "P6 High Quality",
+    OptPresetP7: "P7 Max Quality",
+    ParamRateControl: "Rate Control",
+    OptRcCq: "CQ Perceptual Quality (Spatial AQ)",
+    OptRcVbr: "VBR Variable Bitrate",
+    OptRcCbr: "CBR Constant Bitrate",
+    OptRcQp: "Constant QP (I/P/B Step)",
+    OptRcCrf: "CRF Pure CPU Master",
+    ParamBitrate: "Bitrate (kbps)",
+    ParamCq: "CQ / QP / CRF Value",
+    ParamResolution: "Resolution",
+    OptRes4k: "4K UHD",
+    OptRes2k: "2K QHD",
+    OptResFhd: "FHD 1080p",
+    OptResNative: "Native",
+    ParamAspect: "Aspect Ratio",
+    OptGeomAuto: "Auto Detect",
+    OptGeomPillar: "Pillarbox",
+    ParamVsrQuality: "VSR Quality",
+    OptVsrQ1: "Level 1",
+    OptVsrQ2: "Level 2",
+    OptVsrQ3: "Level 3",
+    OptVsrQ4: "Level 4",
+    ParamVsr: "Enable RTX VSR",
+    WuiParamFps: "Frame Rate (FRUC)",
+    OptFpsOriginal: "Original FPS",
+    OptFps60Nvofa: "60 FPS NVOFA",
+    OptFps120Nvofa: "120 FPS NVOFA",
+    OptFps60Rife: "60 FPS RIFE",
+    OptFps120Rife: "120 FPS RIFE",
+    ParamPipelineOrder: "Pipeline Topology Order",
+    OptPipeVsrFirst: "VSR -> FG (Upscale First - Default)",
+    OptPipeFgFirst: "FG -> VSR (Interpolate First)",
+    WuiParamRifeEngine: "RIFE Engine",
+    ParamPeakNits: "Peak Luminance (nits)",
+    WuiParamGpu: "GPU Index",
+    WuiParamFrames: "Frame Limit",
+    WuiParamLut: "3D LUT",
+    ParamAudioCopy: "Audio Passthrough",
+    WuiParamHdr10plus: "HDR10+",
+    WuiAutoOutput: "Auto Output Name",
+    WuiPlayerPlaceholder: "Open media to begin A/B quality review",
+    WuiPlayerOpen: "📂 Open",
+    WuiAbSplit: "Split",
+    WuiAbRemaster: "Remaster",
+    WuiAbOriginal: "Original",
+    WuiPlayerSend: "⚡ Send to Encoder",
+    WuiNleBinTitle: "Project Bin",
+    WuiNleTabMedia: "Media",
+    WuiNleImport: "+ Import Media",
+    WuiNleMonitorTitle: "Program Monitor",
+    WuiNleEffectsTitle: "Effect Controls",
+    WuiNleGroupTrim: "Time Trim",
+    WuiNleInMs: "In Point (ms)",
+    WuiNleOutMs: "Out Point (ms)",
+    WuiNleExport: "🚀 Export to Encoder Queue",
+    WuiNleToolSelect: "V Select",
+    WuiNleToolRazor: "C Razor",
+    WuiFsGo: "Go",
+    WuiFsUp: "Up",
+    WuiFsSelectAll: "Select All Videos",
+    WuiFsSelect: "Select",
+    WuiFoot: "state.json · JSON Pipe (HTTP + SSE)",
+    WuiProbeUnavailable: "Probe unavailable",
+    WuiReqFailed: "Request failed",
+  },
+  zh: {
+    AppTitle: "CineRTX 纯 GPU 专业转码与非编引擎",
+    WuiSubtitle: "WebUI · JSON 状态驱动 · 与后端彻底解耦",
+    WuiNavEncoder: "转码器",
+    WuiNavPlayer: "播放器",
+    WuiNavNle: "非编",
+    WuiEngine: "引擎",
+    WuiProbeRun: "运行探针",
+    LangToggleHint: "Ctrl+L 切换语言",
+    StatusReady: "已就绪",
+    StatusWorking: "正在转码...",
+    StatusStopping: "正在停止转码...",
+    StatusCancelled: "任务已取消",
+    StatusFailed: "转码失败",
+    StatusDonePrefix: "完成",
+    StatusSamePath: "输入与输出路径相同，请选择其他文件。",
+    StatusDropFileOnly: "请先拖入或选择视频文件。",
+    StatusGpuProbing: "正在探测 GPU / NVENC...",
+    StatusProbeOk: "硬件探针正常",
+    WuiPresetsTitle: "RTX 预设",
+    WuiPresetMasterName: "4K 60fps AV1 HDR10 母版",
+    WuiPresetMasterMeta: "默认最优 · AV1 CQ22 / 4K / NVOFA 60",
+    WuiPresetRifeName: "4K 60fps RIFE 深度学习臻彩",
+    WuiPresetRifeMeta: "RIFE v4.25 · VSR->FG · CQ20",
+    WuiPresetEsportsName: "4K 120fps 电竞高帧率",
+    WuiPresetEsportsMeta: "120 FPS · VSR->FG 极速拓扑",
+    WuiPresetCompatName: "2K 60fps HEVC 广泛兼容",
+    WuiPresetCompatMeta: "HEVC Main10 CQ22 / 2K / VSR L3",
+    WuiPresetCpuMasterName: "原生分辨率 CPU CRF 母版",
+    WuiPresetCpuMasterMeta: "libsvtav1 CRF20 · TrueHDR 无损",
+    WuiQueueTitle: "编码队列",
+    BtnQueueAdd: "+ 加入队列",
+    WuiBtnBatchImport: "批量多选导入",
+    BtnQueueUp: "↑ 上移",
+    BtnQueueDown: "↓ 下移",
+    BtnQueueRemove: "- 移除任务",
+    WuiBtnQueueRetry: "↻ 重试",
+    WuiBtnQueueClear: "清空已完成",
+    BtnQueueSkip: "⏭ 跳过当前",
+    ButtonStop: "⏹ 停止队列",
+    ButtonStart: "▶ 开始转码",
+    WuiColStatus: "状态",
+    WuiColInput: "输入文件",
+    WuiColPreset: "编码预设",
+    WuiColFruc: "FRUC",
+    WuiColHdr: "HDR 峰值",
+    WuiColOutput: "输出",
+    WuiColProgress: "进度",
+    WuiQueueEmptyTitle: "队列为空",
+    WuiQueueEmptyHint: "直接点击「开始转码」以当前配置单任务启动",
+    TelemetryTitle: "任务遥测",
+    WuiAbViewport: "A/B 对比视口",
+    StatThroughput: "吞吐",
+    StatFrames: "帧数",
+    StatElapsed: "耗时",
+    StatZeroCopy: "零拷贝",
+    ValueZeroCopyClean: "D2H 0 B - H2D 0 B",
+    ValueHostCopies: "检测到主机拷贝",
+    ValueRunning: "运行中",
+    ValueDash: "—",
+    ProgressIdle: "—",
+    WuiProbeTitle: "硬件探针",
+    WuiReportTitle: "任务报告",
+    WuiLogTitle: "引擎日志",
+    WuiParamsTitle: "参数",
+    WuiInspectorDraft: "草稿模式 · 修改后点击「+ 加入队列」",
+    WuiInspectorEditingPrefix: "正在编辑排队任务",
+    WuiInspectorReadonlyPrefix: "检视锁定任务",
+    WuiBtnQueueDeselect: "返回新任务草稿",
+    WuiWarnRemoveRunning: "无法直接删除正在运行的任务，请使用「跳过」或「停止」",
+    WuiGroupIo: "输入 / 输出",
+    WuiGroupEncoder: "编码器",
+    WuiGroupVsrFruc: "超分与补帧",
+    WuiGroupHdr: "HDR 色彩科学",
+    ParamInput: "输入文件",
+    ParamOutput: "输出文件",
+    BtnBrowse: "浏览...",
+    ParamCodec: "编码格式",
+    OptCodecAv1: "AV1 10-bit (NVENC)",
+    OptCodecHevc: "HEVC Main10 (NVENC)",
+    OptCodecAv1Cpu: "AV1 10-bit CPU (libsvtav1)",
+    OptCodecHevcCpu: "HEVC 10-bit CPU (libx265)",
+    ParamPreset: "预设",
+    OptPresetP1: "P1 最快",
+    OptPresetP2: "P2 更快",
+    OptPresetP3: "P3 快速",
+    OptPresetP4: "P4 中等",
+    OptPresetP5: "P5 平衡",
+    OptPresetP6: "P6 高质",
+    OptPresetP7: "P7 极致",
+    ParamRateControl: "码率控制",
+    OptRcCq: "CQ 恒定感知画质 (Spatial AQ)",
+    OptRcVbr: "VBR 动态码率",
+    OptRcCbr: "CBR 恒定码率",
+    OptRcQp: "Constant QP (I/P/B 阶梯)",
+    OptRcCrf: "CRF 纯 CPU 母版软编",
+    ParamBitrate: "码率 (kbps)",
+    ParamCq: "CQ / QP / CRF 值",
+    ParamResolution: "分辨率",
+    OptRes4k: "4K UHD",
+    OptRes2k: "2K QHD",
+    OptResFhd: "FHD 1080p",
+    OptResNative: "原生",
+    ParamAspect: "画幅",
+    OptGeomAuto: "自动检测",
+    OptGeomPillar: "Pillarbox",
+    ParamVsrQuality: "VSR 档位",
+    OptVsrQ1: "Level 1",
+    OptVsrQ2: "Level 2",
+    OptVsrQ3: "Level 3",
+    OptVsrQ4: "Level 4",
+    ParamVsr: "启用 RTX VSR",
+    WuiParamFps: "帧率 (FRUC)",
+    OptFpsOriginal: "原帧率",
+    OptFps60Nvofa: "60 FPS NVOFA",
+    OptFps120Nvofa: "120 FPS NVOFA",
+    OptFps60Rife: "60 FPS RIFE",
+    OptFps120Rife: "120 FPS RIFE",
+    ParamPipelineOrder: "管线拓扑顺序",
+    OptPipeVsrFirst: "VSR -> FG (先超分后补帧 - 默认)",
+    OptPipeFgFirst: "FG -> VSR (先补帧后超分)",
+    WuiParamRifeEngine: "RIFE 引擎",
+    ParamPeakNits: "峰值亮度 (nits)",
+    WuiParamGpu: "GPU 序号",
+    WuiParamFrames: "帧数上限",
+    WuiParamLut: "3D LUT",
+    ParamAudioCopy: "音频直通",
+    WuiParamHdr10plus: "HDR10+",
+    WuiAutoOutput: "自动输出名",
+    WuiPlayerPlaceholder: "打开媒体开始 A/B 画质审看",
+    WuiPlayerOpen: "📂 打开",
+    WuiAbSplit: "分屏",
+    WuiAbRemaster: "重制",
+    WuiAbOriginal: "原片",
+    WuiPlayerSend: "⚡ 送入转码器",
+    WuiNleBinTitle: "素材箱",
+    WuiNleTabMedia: "素材",
+    WuiNleImport: "+ 导入素材",
+    WuiNleMonitorTitle: "节目监视器",
+    WuiNleEffectsTitle: "特效控制台",
+    WuiNleGroupTrim: "时间裁剪",
+    WuiNleInMs: "入点 (ms)",
+    WuiNleOutMs: "出点 (ms)",
+    WuiNleExport: "🚀 导出至转码器渲染",
+    WuiNleToolSelect: "V 选择",
+    WuiNleToolRazor: "C 剃刀",
+    WuiFsGo: "跳转",
+    WuiFsUp: "上级",
+    WuiFsSelectAll: "全选视频",
+    WuiFsSelect: "选择",
+    WuiFoot: "state.json · JSON 通信 (HTTP + SSE)",
+    WuiProbeUnavailable: "探针不可用",
+    WuiReqFailed: "请求失败",
+  },
+};
+
+let I18N = {
+  en: Object.assign({}, WUI_I18N_DEFAULTS.en),
+  zh: Object.assign({}, WUI_I18N_DEFAULTS.zh),
+};
+let DEFAULTS = {
+  input: "",
+  output: "",
+  codec: "av1",
+  preset: 5,
+  rateControl: "cq",
+  bitrateKbps: 0,
+  qp: 22,
+  resolution: "4k",
+  geometry: "auto",
+  vsrEnabled: true,
+  vsrQuality: 4,
+  peakNits: 1000,
+  fpsMode: "60-nvofa",
+  pipelineOrder: "vsr-first",
+  rifeEngine: "",
+  copyAudio: true,
+  hdr10plus: false,
+  lut: "",
+  gpu: 0,
+  frames: 0,
+};
 let PARAMS = [];
 const FALLBACK = {};
 const SECTION_KEYS = ["ui", "profile", "engine", "queue", "player", "nle"];
 const WORKSPACES = ["encoder", "player", "nle"];
+const VIDEO_EXT_RE = /\.(mp4|m4v|mov|mkv|webm|avi|ts|m2ts)$/i;
 
 function captureFallback() {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
@@ -44,14 +373,23 @@ function captureFallback() {
 
 async function loadSchema() {
   const doc = await api("/api/schema", "GET");
-  I18N = doc.i18n || { en: {}, zh: {} };
-  DEFAULTS = doc.defaults || {};
+  const remoteI18n = doc.i18n || {};
+  I18N = {
+    en: Object.assign({}, WUI_I18N_DEFAULTS.en, remoteI18n.en || {}),
+    zh: Object.assign({}, WUI_I18N_DEFAULTS.zh, remoteI18n.zh || {}),
+  };
+  DEFAULTS = Object.assign({}, DEFAULTS, doc.defaults || {}, {
+    rateControl: (doc.defaults && doc.defaults.rateControl && doc.defaults.rateControl !== "cbr")
+      ? doc.defaults.rateControl : "cq",
+    qp: (doc.defaults && doc.defaults.qp && doc.defaults.qp !== 24)
+      ? doc.defaults.qp : 22,
+    pipelineOrder: (doc.defaults && doc.defaults.pipelineOrder) || "vsr-first",
+  });
   PARAMS = doc.params || [];
   applyParamBounds();
 }
 
 function applyParamBounds() {
-  // Ranges come from kParamSchema (include/rtx/param_schema.h:78-98), never UI code.
   for (const meta of PARAMS) {
     if (meta.type !== "int") continue;
     const el = document.querySelector(`[data-bind="profile.${meta.key}"][type="number"]`);
@@ -61,7 +399,6 @@ function applyParamBounds() {
   }
 }
 
-
 /* ========================================================================= *
  *  Store — one JSON document with path get/set + prefix-matched subscribers.
  * ========================================================================= */
@@ -70,7 +407,7 @@ const state = {
   version: 1,
   ui: { lang: "zh", autoOutput: true, showLog: true, workspace: "encoder" },
   engine: { path: "CineRTX.exe", workDir: "" },
-  profile: {},
+  profile: Object.assign({}, DEFAULTS),
   queue: [],
   player: {
     input: "", abMode: "split", splitPos: 50, osd: true, loop: true,
@@ -126,7 +463,7 @@ function subscribe(path, fn) {
 }
 
 /* ========================================================================= *
- *  Persistence — debounced PUT of the browser-owned sections.
+ *  Persistence — debounced PUT + guaranteed immediate flushPersist.
  * ========================================================================= */
 
 let persistTimer = null;
@@ -138,7 +475,6 @@ function ownedSections() {
     ui: state.ui,
     engine: state.engine,
     profile: state.profile,
-    queue: state.queue,
     player: state.player,
     nle: state.nle,
   };
@@ -160,8 +496,8 @@ async function flushPersist() {
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;
-    await api("/api/state", "PUT", ownedSections()).catch(() => {});
   }
+  await api("/api/state", "PUT", ownedSections()).catch(() => {});
 }
 
 async function api(path, method, body) {
@@ -176,6 +512,14 @@ async function api(path, method, body) {
     throw new Error(doc.error || `${res.status}`);
   }
   return doc;
+}
+
+function toast(msg, level) {
+  setStatusMessage(msg);
+  const line = document.getElementById("status-line");
+  if (line && level === "warn") {
+    line.dataset.toastLevel = "warn";
+  }
 }
 
 /* ========================================================================= *
@@ -220,9 +564,6 @@ function writeControl(el, value) {
 function installBindings() {
   document.querySelectorAll("[data-bind]").forEach((el) => {
     const path = el.dataset.bind;
-    // Both events: selectOption/checkbox surfaces differ in what they dispatch;
-    // setPath is idempotent and schedulePersist is debounced, so double fires
-    // are harmless while a missed event is not.
     el.addEventListener("input", () => {
       setPath(path, readControl(el));
       runEffects();
@@ -261,11 +602,12 @@ function evalWhen(el, attr) {
   });
 }
 
-const OUTPUT_SUFFIX = { av1: "_remaster_av1.mp4", hevc: "_remaster_hevc.mp4" };
-// Previous input/codec snapshots: an output counts as "auto-generated" when it
-// matches <stem(prevInput)>_remaster_<av1|hevc>.mp4 in the same folder.  The
-// pattern survives page reloads (unlike an in-memory flag) because the loaded
-// state itself carries the evidence.
+const OUTPUT_SUFFIX = {
+  av1: "_remaster_av1.mp4",
+  av1_cpu: "_remaster_av1.mp4",
+  hevc: "_remaster_hevc.mp4",
+  hevc_cpu: "_remaster_hevc.mp4",
+};
 let prevInput = null;
 let prevCodec = null;
 
@@ -275,6 +617,7 @@ function basename(path) {
 }
 
 function autoNameFor(input, codec) {
+  if (!input) return "";
   const cut = Math.max(input.lastIndexOf("/"), input.lastIndexOf("\\"));
   const name = basename(input);
   const dot = name.lastIndexOf(".");
@@ -287,13 +630,14 @@ function looksAutoFor(prevInputValue, output) {
   if (!prevInputValue) return false;
   const outCut = Math.max(output.lastIndexOf("/"), output.lastIndexOf("\\"));
   const prevCut = Math.max(prevInputValue.lastIndexOf("/"), prevInputValue.lastIndexOf("\\"));
-  const sameDir = prevCut >= 0 && outCut >= 0 &&
-    output.slice(0, outCut + 1) === prevInputValue.slice(0, prevCut + 1);
+  const sameDir = (prevCut < 0 && outCut < 0) ||
+    (prevCut >= 0 && outCut >= 0 &&
+     output.slice(0, outCut + 1) === prevInputValue.slice(0, prevCut + 1));
   if (!sameDir) return false;
-  const prevName = prevInputValue.slice(prevCut + 1);
+  const prevName = prevCut >= 0 ? prevInputValue.slice(prevCut + 1) : prevInputValue;
   const prevDot = prevName.lastIndexOf(".");
   const prevStem = prevDot > 0 ? prevName.slice(0, prevDot) : prevName;
-  const outName = output.slice(outCut + 1);
+  const outName = outCut >= 0 ? output.slice(outCut + 1) : output;
   return /^_remaster_(av1|hevc)\.mp4$/.test(outName.slice(prevStem.length));
 }
 
@@ -323,18 +667,23 @@ function runEffects() {
     el.disabled = running;
   });
   document.querySelectorAll("[data-disable-when]").forEach((el) => {
-    const hit = evalWhen(el, "disableWhen");  // condition true -> control disabled
+    const hit = evalWhen(el, "disableWhen");
     el.classList.toggle("wui-disabled", hit);
     const controls = el.matches("input,select,button")
       ? [el]
       : el.querySelectorAll("input,select,button");
     controls.forEach((control) => {
-      control.disabled = running || hit;
+      control.disabled = hit;
     });
   });
-  document.getElementById("btn-start").disabled = running;
-  document.getElementById("btn-stop").disabled = !running;
-  document.getElementById("log-section").classList.toggle("wui-hidden", !state.ui.showLog);
+  const btnStart = document.getElementById("btn-start");
+  const btnStop = document.getElementById("btn-stop");
+  const btnSkip = document.getElementById("btn-skip");
+  if (btnStart) btnStart.disabled = running;
+  if (btnStop) btnStop.disabled = !running;
+  if (btnSkip) btnSkip.disabled = !running;
+  const logSec = document.getElementById("log-section");
+  if (logSec) logSec.classList.toggle("wui-hidden", !state.ui.showLog);
   autoDeriveOutput();
 }
 
@@ -360,6 +709,7 @@ function applyI18n() {
   });
   document.title = tr("AppTitle");
   document.documentElement.lang = state.ui.lang === "zh" ? "zh" : "en";
+  renderInspectorContext();
 }
 
 function formatElapsed(ms) {
@@ -387,6 +737,8 @@ function renderStatus() {
   } else {
     line.textContent = tr("StatusReady");
   }
+
+  // Engine chip
   const chip = document.getElementById("engine-chip");
   const engine = state.runtime.engine || {};
   const engineState = document.getElementById("engine-state");
@@ -402,6 +754,38 @@ function renderStatus() {
     chip.classList.add("chip-off");
     engineState.textContent = "not found";
   }
+
+  // Global progress in header
+  const gpStatus = document.getElementById("gp-status");
+  const gpDetail = document.getElementById("gp-detail");
+  const gpPct = document.getElementById("gp-pct");
+  const gpCircle = document.getElementById("gp-circle");
+  const prog = job.progress || {};
+  const pct = Math.max(0, Math.min(100, prog.pct || 0));
+  if (gpCircle) {
+    const r = Number(gpCircle.getAttribute && gpCircle.getAttribute("r")) || 18;
+    const circumference = +(2 * Math.PI * r).toFixed(2); // r=18 -> 113.10
+    gpCircle.setAttribute("stroke-dasharray", String(circumference));
+    gpCircle.setAttribute("stroke-dashoffset", String(+(circumference - (pct / 100) * circumference).toFixed(2)));
+  }
+
+  if (job.status === "running") {
+    gpStatus.textContent = tr("StatusWorking");
+    gpPct.textContent = `${Math.round(pct)}%`;
+    gpDetail.textContent = `${prog.fps || 0} FPS · ${prog.frames || 0}f`;
+  } else if (job.status === "done") {
+    gpStatus.textContent = tr("StatusDonePrefix") || "完成";
+    gpPct.textContent = "✓";
+    gpDetail.textContent = formatElapsed((job.report || {}).elapsed_ms);
+  } else if (job.status === "failed") {
+    gpStatus.textContent = tr("StatusFailed");
+    gpPct.textContent = "✗";
+    gpDetail.textContent = "";
+  } else {
+    gpStatus.textContent = tr("StatusReady");
+    gpPct.textContent = "—";
+    gpDetail.textContent = "—";
+  }
 }
 
 function renderProgress() {
@@ -412,8 +796,8 @@ function renderProgress() {
   let text;
   if (job.status === "running") {
     text = prog.total > 0
-      ? `${pct.toFixed(1)}% · ${tr("StatFrames")} ${prog.frames}/${prog.total} · ${prog.fps || 0} FPS`
-      : `${prog.frames || 0} ${tr("StatFrames")} · ${prog.fps || 0} FPS`;
+      ? `${pct.toFixed(1)}% · ${prog.frames}/${prog.total} · ${prog.fps || 0} FPS`
+      : `${prog.frames || 0} frames · ${prog.fps || 0} FPS`;
   } else if (job.status === "done") {
     text = "100%";
   } else {
@@ -475,7 +859,6 @@ function renderLog() {
 }
 
 function firstProbeSummary(probe) {
-  // Generic summary: surface the first device/GPU-ish string in the document.
   let summary = "";
   const walk = (node) => {
     if (summary) return;
@@ -518,7 +901,6 @@ function renderRuntime() {
   renderLog();
   renderProbe();
   runEffects();
-  queuePump();
 }
 
 /* ========================================================================= *
@@ -533,7 +915,7 @@ function isTypingTarget(event) {
 function installI18nBinding() {
   subscribe("ui.lang", () => {
     applyI18n();
-    renderRuntime();  // re-render composed strings in the new language
+    renderRuntime();
   });
   document.getElementById("btn-lang").addEventListener("click", () => {
     setPath("ui.lang", state.ui.lang === "zh" ? "en" : "zh");
@@ -569,11 +951,12 @@ function installI18nBinding() {
 }
 
 function setStatusMessage(text) {
-  document.getElementById("status-line").textContent = text;
+  const line = document.getElementById("status-line");
+  if (line) line.textContent = text;
 }
 
 /* ========================================================================= *
- *  Backend events — SSE; every payload is a JSON document.
+ *  Backend events — SSE
  * ========================================================================= */
 
 function connectEvents() {
@@ -598,6 +981,7 @@ function connectEvents() {
         applyingRemote = false;
       }
       runEffects();
+      renderInspectorContext();
     } else if (doc.type === "runtime") {
       applyingRemote = true;
       try {
@@ -608,13 +992,11 @@ function connectEvents() {
       renderRuntime();
     }
   };
-  source.onerror = () => {
-    /* EventSource reconnects automatically; chip stays as-is. */
-  };
+  source.onerror = () => {};
 }
 
 /* ========================================================================= *
- *  Workspace switcher — one state key drives all three shapes.
+ *  Workspace switcher
  * ========================================================================= */
 
 function setWorkspace(name) {
@@ -639,18 +1021,17 @@ function installWorkspaces() {
 }
 
 /* ========================================================================= *
- *  Encoder shape — presets + batch queue.
+ *  Encoder shape — presets + multi-file heterogeneous queue.
  * ========================================================================= */
 
 const PRESET_FIELDS = {
-  codec: "codec", presetLevel: "preset", resolution: "resolution",
-  vsrEnabled: "vsrEnabled", vsrQuality: "vsrQuality",
-  fpsMode: "fpsMode", peakNits: "peakNits",
+  codec: "codec", presetLevel: "preset", rateControl: "rateControl", qp: "qp",
+  resolution: "resolution", vsrEnabled: "vsrEnabled", vsrQuality: "vsrQuality",
+  fpsMode: "fpsMode", pipelineOrder: "pipelineOrder", peakNits: "peakNits",
 };
 
 let selectedQueueId = null;
 let queueSeq = 0;
-let lastJobStatus = "idle";
 
 function esc(value) {
   return String(value == null ? "" : value)
@@ -676,44 +1057,91 @@ function applyPreset(card) {
   schedulePersist();
 }
 
-function makeQueueItem(profile, presetName) {
-  const input = profile.input || "";
+function makeQueueItem(profile, presetName, explicitInputs) {
+  const inputs = Array.isArray(explicitInputs) && explicitInputs.length
+    ? explicitInputs.filter(Boolean)
+    : ((profile.input || "").trim() ? [(profile.input || "").trim()] : []);
+  const firstInput = inputs[0] || "";
   const codec = profile.codec || "av1";
-  const output = profile.output || autoNameFor(input, codec);
+  const output = (inputs.length === 1 && profile.output)
+    ? profile.output
+    : autoNameFor(firstInput, codec);
   queueSeq += 1;
+  const name = inputs.length <= 1
+    ? basename(firstInput)
+    : `${basename(firstInput)} (+${inputs.length - 1} files)`;
+  const snapProfile = Object.assign({}, DEFAULTS, profile, {
+    input: firstInput,
+    output,
+  });
   return {
     id: `job-${Date.now()}-${queueSeq}`,
-    input, output, presetName: presetName || "当前配置",
-    codec, resolution: profile.resolution || "4k",
-    fpsMode: profile.fpsMode || "60-nvofa",
-    peakNits: profile.peakNits || 1000,
-    status: "pending", pct: 0, fps: 0,
-    profile: Object.assign({}, profile, { input, output }),
+    name,
+    inputs,
+    input: firstInput,
+    output,
+    presetName: presetName || "当前配置",
+    codec,
+    rateControl: snapProfile.rateControl || "cq",
+    qp: snapProfile.qp ?? 22,
+    resolution: snapProfile.resolution || "4k",
+    fpsMode: snapProfile.fpsMode || "60-nvofa",
+    pipelineOrder: snapProfile.pipelineOrder || "vsr-first",
+    peakNits: snapProfile.peakNits || 1000,
+    status: "pending",
+    fileCount: inputs.length,
+    currentFileIndex: 0,
+    currentFilePct: 0,
+    totalJobPct: 0,
+    pct: 0,
+    fps: 0,
+    profile: snapProfile,
   };
 }
 
-function addQueueItem(profile, presetName) {
-  if (!(profile.input || "").trim()) {
+function addQueueItem(profile, presetName, explicitInputs) {
+  const inputs = Array.isArray(explicitInputs) && explicitInputs.length
+    ? explicitInputs.filter(Boolean)
+    : ((profile.input || "").trim() ? [(profile.input || "").trim()] : []);
+  if (!inputs.length) {
     setStatusMessage(tr("StatusDropFileOnly"));
     return;
   }
+  const localItem = makeQueueItem(profile, presetName, inputs);
   const items = (state.queue || []).slice();
-  items.push(makeQueueItem(profile, presetName));
+  items.push(localItem);
   setPath("queue", items);
   schedulePersist();
+  api("/api/job", "POST", {
+    action: "enqueue",
+    inputs,
+    profile: localItem.profile,
+    presetName: localItem.presetName,
+  }).catch(() => {});
 }
 
 function queueRow(item) {
   const cls = item.id === selectedQueueId ? " class=\"selected\"" : "";
-  const pct = Math.max(0, Math.min(100, Number(item.pct) || 0));
+  const pct = Math.max(0, Math.min(100, Number(item.totalJobPct ?? item.pct) || 0));
+  const inputs = Array.isArray(item.inputs) && item.inputs.length
+    ? item.inputs
+    : (item.input ? [item.input] : []);
+  const fileCount = inputs.length || 1;
+  const inputLabel = fileCount > 1
+    ? `${basename(inputs[0] || "")} (+${fileCount - 1} files)`
+    : basename(inputs[0] || item.input || "");
+  const rcText = String((item.profile && item.profile.rateControl) || item.rateControl || "cq").toUpperCase();
+  const qpVal = (item.profile && item.profile.qp) ?? item.qp ?? 22;
+  const pipeOrder = (item.profile && item.profile.pipelineOrder) || item.pipelineOrder || "vsr-first";
+  const subStep = fileCount > 1 ? ` [${Math.min(fileCount, (item.currentFileIndex || 0) + (item.status === "done" ? 0 : 1))}/${fileCount}]` : "";
   return `<tr data-queue-id="${esc(item.id)}"${cls}>`
     + `<td><span class="badge badge-${esc(item.status)}">${esc(item.status)}</span></td>`
-    + `<td class="cell-name" title="${esc(item.input)}">${esc(basename(item.input || ""))}</td>`
-    + `<td>${esc(String(item.codec || "").toUpperCase())} · ${esc(String(item.resolution || "").toUpperCase())}<br><span class="hint">${esc(item.presetName)}</span></td>`
+    + `<td class="cell-name" title="${esc(inputs.join("\n"))}">${esc(inputLabel)}</td>`
+    + `<td>${esc(String(item.codec || "").toUpperCase())} · ${esc(rcText)}${esc(qpVal)} · ${esc(String(item.resolution || "").toUpperCase())}<br><span class="hint">${esc(item.presetName)} · ${esc(pipeOrder)}</span></td>`
     + `<td>${esc(item.fpsMode)}</td>`
     + `<td>${esc(item.peakNits)} nits</td>`
     + `<td class="cell-name" title="${esc(item.output)}">${esc(basename(item.output || ""))}</td>`
-    + `<td><div class="mini-progress"><i style="width:${pct}%"></i></div><span class="hint">${pct.toFixed(0)}%</span></td>`
+    + `<td><div class="mini-progress"><i style="width:${pct}%"></i></div><span class="hint">${pct.toFixed(0)}%${esc(subStep)}</span></td>`
     + `</tr>`;
 }
 
@@ -725,31 +1153,95 @@ function renderQueue() {
   if (empty) empty.hidden = items.length > 0;
 }
 
+function renderInspectorContext() {
+  const textEl = document.getElementById("inspector-mode-text");
+  const deselectBtn = document.getElementById("btn-queue-deselect");
+  if (!textEl || !deselectBtn) return;
+  if (!selectedQueueId) {
+    textEl.textContent = tr("WuiInspectorDraft");
+    deselectBtn.hidden = true;
+    return;
+  }
+  const item = (state.queue || []).find((entry) => entry.id === selectedQueueId);
+  if (!item) {
+    selectedQueueId = null;
+    textEl.textContent = tr("WuiInspectorDraft");
+    deselectBtn.hidden = true;
+    return;
+  }
+  deselectBtn.hidden = false;
+  if (item.status === "pending") {
+    textEl.textContent = `${tr("WuiInspectorEditingPrefix")}: ${item.name || basename(item.input || item.id)}`;
+  } else {
+    textEl.textContent = `${tr("WuiInspectorReadonlyPrefix")}: ${item.name || basename(item.input || item.id)} (${item.status})`;
+  }
+}
+
+function deselectQueueItem() {
+  if (!selectedQueueId) return;
+  selectedQueueId = null;
+  renderQueue();
+  renderInspectorContext();
+}
+
 function selectQueueItem(id) {
+  if (selectedQueueId === id) {
+    deselectQueueItem();
+    return;
+  }
   const item = (state.queue || []).find((entry) => entry.id === id);
   if (!item) return;
   selectedQueueId = id;
-  setPath("profile", Object.assign({}, DEFAULTS, item.profile || {}));
+  applyingRemote = true;
+  try {
+    setPath("profile", Object.assign({}, DEFAULTS, item.profile || {}));
+  } finally {
+    applyingRemote = false;
+  }
+  runEffects();
   renderQueue();
+  renderInspectorContext();
 }
 
 function syncProfileToQueue() {
   if (!selectedQueueId || applyingRemote || !state.profile || !Object.keys(state.profile).length) return;
   const items = (state.queue || []).slice();
   const index = items.findIndex((entry) => entry.id === selectedQueueId);
-  if (index < 0) return;
-  const item = Object.assign({}, items[index], {
-    profile: Object.assign({}, state.profile),
-    input: state.profile.input,
-    output: state.profile.output,
-    codec: state.profile.codec,
-    resolution: state.profile.resolution,
-    fpsMode: state.profile.fpsMode,
-    peakNits: state.profile.peakNits,
+  if (index < 0) {
+    selectedQueueId = null;
+    renderInspectorContext();
+    return;
+  }
+  // CRITICAL INVARIANT: Only "pending" jobs may be live-edited!
+  if (items[index].status !== "pending") return;
+
+  const p = Object.assign({}, state.profile);
+  const inputs = Array.isArray(items[index].inputs) && items[index].inputs.length
+    ? items[index].inputs.slice()
+    : (p.input ? [p.input] : []);
+  if (inputs.length <= 1 && p.input) inputs[0] = p.input;
+
+  items[index] = Object.assign({}, items[index], {
+    profile: p,
+    inputs,
+    input: inputs[0] || p.input || "",
+    output: p.output || autoNameFor(inputs[0] || "", p.codec || "av1"),
+    codec: p.codec || "av1",
+    rateControl: p.rateControl || "cq",
+    qp: p.qp ?? 22,
+    resolution: p.resolution || "4k",
+    fpsMode: p.fpsMode || "60-nvofa",
+    pipelineOrder: p.pipelineOrder || "vsr-first",
+    peakNits: p.peakNits || 1000,
   });
-  items[index] = item;
-  state.queue = items;  // no notify: avoid re-entrant binding writes
-  renderQueue();
+  setPath("queue", items);
+  schedulePersist();
+  api("/api/job", "POST", {
+    action: "update",
+    jobId: selectedQueueId,
+    profile: p,
+    inputs,
+  }).catch(() => {});
 }
 
 function syncQueueProgress(prog, jobStatus) {
@@ -757,46 +1249,53 @@ function syncQueueProgress(prog, jobStatus) {
   const index = items.findIndex((entry) => entry.status === "running");
   if (index < 0) return;
   items[index].pct = prog.pct || 0;
+  items[index].totalJobPct = prog.pct || 0;
   items[index].fps = prog.fps || 0;
-  if (jobStatus !== "running") items[index].status = jobStatus;
+  if (jobStatus !== "running" && jobStatus !== "idle") items[index].status = jobStatus;
   renderQueue();
 }
 
-function queuePump() {
-  const current = (state.runtime.job || {}).status || "idle";
-  if (current === lastJobStatus) return;
-  if (lastJobStatus === "running" && current !== "running") {
-    const items = (state.queue || []).slice();
-    const index = items.findIndex((entry) => entry.status === "running");
-    if (index >= 0) {
-      items[index].status = current;
-      items[index].pct = current === "done" ? 100 : items[index].pct;
-      setPath("queue", items);
-      schedulePersist();
-    }
-    const next = (state.queue || []).find((entry) => entry.status === "pending");
-    if (next && current !== "cancelled") {
-      setTimeout(() => startQueueItem(next.id), 350);
-    }
-  }
-  lastJobStatus = current;
+function moveSelectedQueueItem(delta) {
+  if (!selectedQueueId) return;
+  const items = (state.queue || []).slice();
+  const idx = items.findIndex((entry) => entry.id === selectedQueueId);
+  if (idx < 0 || items[idx].status !== "pending") return;
+  const pendingIndices = items
+    .map((entry, i) => (entry.status === "pending" ? i : -1))
+    .filter((i) => i >= 0);
+  const pos = pendingIndices.indexOf(idx);
+  if (pos < 0) return;
+  const newPos = Math.max(0, Math.min(pendingIndices.length - 1, pos + (delta < 0 ? -1 : 1)));
+  const targetIdx = pendingIndices[newPos];
+  if (targetIdx === idx) return;
+  const [moved] = items.splice(idx, 1);
+  items.splice(targetIdx, 0, moved);
+  setPath("queue", items);
+  schedulePersist();
+  api("/api/job", "POST", { action: "move", jobId: selectedQueueId, delta }).catch(() => {});
 }
 
-async function startQueueItem(id) {
-  if ((state.runtime.job || {}).status === "running") return;
+function retryQueueItems() {
   const items = (state.queue || []).slice();
-  const index = items.findIndex((entry) => entry.id === id);
-  if (index < 0) return;
-  items[index].status = "running";
-  setPath("queue", items);
-  const profile = Object.assign({}, DEFAULTS, items[index].profile || {});
-  setPath("profile", profile);
-  await flushPersist();
-  try {
-    await api("/api/job", "POST", { action: "start", profile });
-  } catch (err) {
-    setStatusMessage(`${tr("WuiReqFailed")}: ${err.message}`);
+  let changed = false;
+  for (const item of items) {
+    if (selectedQueueId && item.id !== selectedQueueId) continue;
+    if (item.status === "failed" || item.status === "cancelled") {
+      item.status = "pending";
+      item.pct = 0;
+      item.totalJobPct = 0;
+      item.currentFileIndex = 0;
+      item.currentFilePct = 0;
+      changed = true;
+    }
   }
+  if (!changed) return;
+  setPath("queue", items);
+  schedulePersist();
+  api("/api/job", "POST", {
+    action: "retry",
+    jobId: selectedQueueId || "",
+  }).catch(() => {});
 }
 
 function installEncoder() {
@@ -806,15 +1305,45 @@ function installEncoder() {
   document.getElementById("btn-queue-add").addEventListener("click", () => {
     addQueueItem(Object.assign({}, state.profile), "当前配置");
   });
+  const btnDeselect = document.getElementById("btn-queue-deselect");
+  if (btnDeselect) {
+    btnDeselect.addEventListener("click", deselectQueueItem);
+  }
+  const btnUp = document.getElementById("btn-queue-up");
+  if (btnUp) {
+    btnUp.addEventListener("click", () => moveSelectedQueueItem(-1));
+  }
+  const btnDown = document.getElementById("btn-queue-down");
+  if (btnDown) {
+    btnDown.addEventListener("click", () => moveSelectedQueueItem(1));
+  }
   document.getElementById("btn-queue-remove").addEventListener("click", () => {
     if (!selectedQueueId) return;
-    setPath("queue", (state.queue || []).filter((item) => item.id !== selectedQueueId));
+    const target = (state.queue || []).find((j) => j.id === selectedQueueId);
+    if (target && target.status === "running") {
+      toast(tr("WuiWarnRemoveRunning"), "warn");
+      return;
+    }
+    const removedId = selectedQueueId;
+    setPath("queue", (state.queue || []).filter((item) => item.id !== removedId));
     selectedQueueId = null;
+    renderInspectorContext();
     schedulePersist();
+    api("/api/job", "POST", { action: "remove", jobId: removedId }).catch(() => {});
   });
+  const btnRetry = document.getElementById("btn-queue-retry");
+  if (btnRetry) {
+    btnRetry.addEventListener("click", retryQueueItems);
+  }
   document.getElementById("btn-queue-clear").addEventListener("click", () => {
-    setPath("queue", (state.queue || []).filter((item) => item.status !== "done"));
+    setPath("queue", (state.queue || []).filter((item) =>
+      item.status === "pending" || item.status === "running"));
+    if (selectedQueueId && !(state.queue || []).some((j) => j.id === selectedQueueId)) {
+      selectedQueueId = null;
+    }
+    renderInspectorContext();
     schedulePersist();
+    api("/api/job", "POST", { action: "clear", completedOnly: true }).catch(() => {});
   });
   const body = document.getElementById("queue-body");
   body.addEventListener("click", (event) => {
@@ -822,7 +1351,10 @@ function installEncoder() {
       ? event.target.closest("tr[data-queue-id]") : null;
     if (row) selectQueueItem(row.dataset.queueId);
   });
-  subscribe("queue", renderQueue);
+  subscribe("queue", () => {
+    renderQueue();
+    renderInspectorContext();
+  });
   subscribe("profile", () => {
     syncProfileToQueue();
     syncRound2Controls();
@@ -830,27 +1362,33 @@ function installEncoder() {
 }
 
 /* ========================================================================= *
- *  Job actions + probe (queue-aware, backward compatible with single job).
+ *  Job actions + probe (Server-Owned Queue Engine)
  * ========================================================================= */
 
 async function startJob() {
   if (state.runtime.job.status === "running") return;
   await flushPersist();
-  const pending = (state.queue || []).filter((item) => item.status === "pending" || item.status === "running");
-  if (pending.length) {
-    await startQueueItem(pending[0].id);
-    return;
-  }
-  if (!state.profile.input) {
-    setStatusMessage(tr("StatusDropFileOnly"));
-    return;
-  }
-  if (state.profile.output && state.profile.output === state.profile.input) {
-    setStatusMessage(tr("StatusSamePath"));
-    return;
+  const hasPending = (state.queue || []).some((item) => item.status === "pending");
+  if (!hasPending) {
+    if (!state.profile.input) {
+      setStatusMessage(tr("StatusDropFileOnly"));
+      return;
+    }
+    if (state.profile.output && state.profile.output === state.profile.input) {
+      setStatusMessage(tr("StatusSamePath"));
+      return;
+    }
   }
   try {
-    await api("/api/job", "POST", { action: "start" });
+    await api("/api/job", "POST", { action: "start", profile: state.profile });
+  } catch (err) {
+    setStatusMessage(`${tr("WuiReqFailed")}: ${err.message}`);
+  }
+}
+
+async function skipJob() {
+  try {
+    await api("/api/job", "POST", { action: "skip" });
   } catch (err) {
     setStatusMessage(`${tr("WuiReqFailed")}: ${err.message}`);
   }
@@ -858,7 +1396,7 @@ async function startJob() {
 
 async function stopJob() {
   try {
-    await api("/api/job", "POST", { action: "cancel" });
+    await api("/api/job", "POST", { action: "stop" });
     setStatusMessage(tr("StatusStopping"));
   } catch (err) {
     setStatusMessage(`${tr("WuiReqFailed")}: ${err.message}`);
@@ -877,7 +1415,7 @@ async function runProbe() {
 }
 
 /* ========================================================================= *
- *  Player shape — /api/media Range stream, A/B split wipe, transport.
+ *  Player shape
  * ========================================================================= */
 
 function mediaUrl(path) {
@@ -891,7 +1429,13 @@ function videoById(id) {
 function attachMedia() {
   const path = state.player.input || "";
   const stage = document.getElementById("player-stage");
-  if (stage && stage.classList.toggle) stage.classList.toggle("has-media", Boolean(path));
+  if (stage && stage.classList && stage.classList.toggle) {
+    stage.classList.toggle("has-media", Boolean(path));
+  }
+  const encAb = document.getElementById("encoder-ab");
+  if (encAb && encAb.classList && encAb.classList.toggle) {
+    encAb.classList.toggle("has-media", Boolean(path));
+  }
   for (const id of ["player-video-original", "player-video-remaster", "encoder-video"]) {
     const video = videoById(id);
     if (!video) continue;
@@ -914,7 +1458,7 @@ function renderOsd() {
   el.textContent = [
     `MEDIA   ${pl.input || "(none)"}`,
     `STAGE   ${String(p.resolution || "4k").toUpperCase()} · ${String(p.codec || "av1").toUpperCase()} 10-bit`,
-    `FRUC    ${p.fpsMode || "60-nvofa"} · VSR L${p.vsrQuality || 4}${p.vsrEnabled === false ? " (OFF)" : ""}`,
+    `FRUC    ${p.fpsMode || "60-nvofa"} (${p.pipelineOrder || "vsr-first"}) · VSR L${p.vsrQuality || 4}${p.vsrEnabled === false ? " (OFF)" : ""}`,
     `HDR     ${p.peakNits || 1000} nits · HDR10${p.hdr10plus ? "+" : ""}`,
     `GPU     #${p.gpu != null ? p.gpu : 0} · ZERO-COPY MAIN LOOP`,
     `TRACK   A${pl.audioTrack ?? 0} / S${pl.subTrack ?? -1} · ${pl.speed || 1}x`,
@@ -1079,19 +1623,41 @@ function installPlayer() {
       schedulePersist();
     });
   });
+
   const stage = document.getElementById("player-stage");
+  const handle = document.getElementById("ab-handle");
+  let draggingSplit = false;
   const setSplitFromEvent = (event) => {
     if (!stage || !stage.getBoundingClientRect) return;
     const rect = stage.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(100, (event.clientX - rect.left) / rect.width * 100));
+    if (rect.width <= 0) return;
+    const pct = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
     setPath("player.splitPos", Math.round(pct));
-    schedulePersist();
   };
   if (stage && stage.addEventListener) {
     stage.addEventListener("pointerdown", (event) => {
-      const handle = document.getElementById("ab-handle");
-      if (event.target === handle || event.target === stage) setSplitFromEvent(event);
+      if (event.target === handle || event.target === stage || event.target.tagName === "VIDEO") {
+        draggingSplit = true;
+        if (stage.setPointerCapture && event.pointerId != null) {
+          try { stage.setPointerCapture(event.pointerId); } catch {}
+        }
+        setSplitFromEvent(event);
+      }
     });
+    stage.addEventListener("pointermove", (event) => {
+      if (!draggingSplit) return;
+      setSplitFromEvent(event);
+    });
+    const endDrag = (event) => {
+      if (!draggingSplit) return;
+      draggingSplit = false;
+      if (stage.releasePointerCapture && event.pointerId != null) {
+        try { stage.releasePointerCapture(event.pointerId); } catch {}
+      }
+      schedulePersist();
+    };
+    stage.addEventListener("pointerup", endDrag);
+    stage.addEventListener("pointercancel", endDrag);
   }
   subscribe("player.input", attachMedia);
   subscribe("player.splitPos", renderPlayerSplit);
@@ -1115,10 +1681,10 @@ function syncRound2Controls() {
 }
 
 /* ========================================================================= *
- *  NLE shape — media bin, Flicks timecode, 4-track timeline, razor.
+ *  NLE shape
  * ========================================================================= */
 
-const FLICKS_PER_MS = 705600;  // 705,600,000 Hz / 1000
+const FLICKS_PER_MS = 705600;
 let binTab = "media";
 
 function nleSpan() {
@@ -1132,7 +1698,7 @@ function renderNleTimecode() {
   const tc = document.getElementById("nle-tc");
   const flicks = document.getElementById("nle-flicks");
   if (tc) tc.textContent = `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor(ms / 60000) % 60)}:${pad(Math.floor(ms / 1000) % 60)}:${pad(frames)}`;
-  if (flicks) flicks.textContent = `${(ms * FLICKS_PER_MS).toLocaleString("en-US")} Flicks · 705,600,000 Hz`;
+  if (flicks) flicks.textContent = `${(ms * FLICKS_PER_MS).toLocaleString("en-US")} Flicks`;
   const seq = document.getElementById("nle-seq-name");
   if (seq) seq.textContent = state.nle.sequenceName || "";
 }
@@ -1214,7 +1780,7 @@ function renderBin() {
   }
   const items = state.nle.mediaBin || [];
   if (!items.length) {
-    host.innerHTML = `<div class="bin-empty">素材箱为空 · 点击「+ 导入素材」从本机磁盘添加</div>`;
+    host.innerHTML = `<div class="bin-empty">素材箱为空</div>`;
     return;
   }
   host.innerHTML = items.map((item, index) =>
@@ -1233,9 +1799,21 @@ function addToMediaBin(path) {
 }
 
 function mountNleVideo(path) {
+  const nleVp = document.querySelector ? document.querySelector(".nle-viewport") : null;
+  if (nleVp && nleVp.classList && nleVp.classList.toggle) {
+    nleVp.classList.toggle("has-media", Boolean(path));
+  }
+  const encAb = document.getElementById("encoder-ab");
+  if (encAb && encAb.classList && encAb.classList.toggle) {
+    encAb.classList.toggle("has-media", Boolean(path));
+  }
   const video = document.getElementById("nle-video");
   if (!video) return;
-  video.src = mediaUrl(path);
+  if (path) {
+    video.src = mediaUrl(path);
+  } else if (video.removeAttribute) {
+    video.removeAttribute("src");
+  }
   if (typeof video.load === "function") video.load();
 }
 
@@ -1320,7 +1898,7 @@ function exportSequenceToEncoder() {
     input, output: autoNameFor(input, codec),
   });
   setPath("profile", profile);
-  addQueueItem(profile, state.nle.sequenceName || "NLE 序列");
+  addQueueItem(profile, state.nle.sequenceName || "NLE 序列", [input]);
   setWorkspace("encoder");
   startJob();
 }
@@ -1333,9 +1911,22 @@ function installNle() {
   document.getElementById("btn-nle-out").addEventListener("click", markOutPoint);
   document.getElementById("btn-nle-prev").addEventListener("click", () => setPlayhead((Number(state.nle.playheadMs) || 0) - frameSeconds() * 1000));
   document.getElementById("btn-nle-next").addEventListener("click", () => setPlayhead((Number(state.nle.playheadMs) || 0) + frameSeconds() * 1000));
+
+  const nleVideo = document.getElementById("nle-video");
+  if (nleVideo && nleVideo.addEventListener) {
+    nleVideo.addEventListener("timeupdate", () => {
+      if (!nleVideo.paused) {
+        setPath("nle.playheadMs", Math.round((Number(nleVideo.currentTime) || 0) * 1000));
+      }
+    });
+  }
   document.getElementById("btn-nle-play").addEventListener("click", () => {
-    const video = document.getElementById("nle-video");
-    if (video && typeof video.play === "function") video.play().catch(() => {});
+    if (!nleVideo) return;
+    if (nleVideo.paused) {
+      if (typeof nleVideo.play === "function") nleVideo.play().catch(() => {});
+    } else if (typeof nleVideo.pause === "function") {
+      nleVideo.pause();
+    }
   });
   document.getElementById("btn-nle-razor").addEventListener("click", razorSplit);
   document.getElementById("btn-nle-export").addEventListener("click", exportSequenceToEncoder);
@@ -1417,19 +2008,32 @@ function installNle() {
 }
 
 /* ========================================================================= *
- *  Generic JSON path browser (uses only /api/fs JSON).
+ *  Generic JSON path browser (with multi-select for queue-import)
  * ========================================================================= */
 
-const fsCtx = { bindPath: null, mode: null, current: "", selectedFile: null };
+const fsCtx = {
+  bindPath: null,
+  mode: null,
+  current: "",
+  selectedFile: null,
+  selectedFiles: new Set(),
+  entries: [],
+};
 
 function openBrowser(bindPath, mode) {
   fsCtx.bindPath = bindPath;
   fsCtx.mode = mode || null;
   fsCtx.current = getPath(bindPath) || "";
   fsCtx.selectedFile = null;
+  fsCtx.selectedFiles = new Set();
+  fsCtx.entries = [];
   document.getElementById("fs-title").textContent =
     `${tr("BtnBrowse")} → ${bindPath}`;
   document.getElementById("fs-path").value = fsCtx.current;
+  const selectAllBtn = document.getElementById("fs-select-all");
+  if (selectAllBtn) selectAllBtn.hidden = fsCtx.mode !== "queue-import";
+  const hintEl = document.getElementById("fs-hint");
+  if (hintEl) hintEl.textContent = "";
   document.getElementById("fs-modal").hidden = false;
   loadFsListing(fsCtx.current ? fsCtx.current : "roots");
 }
@@ -1439,7 +2043,19 @@ function closeBrowser() {
 }
 
 function fsModeAllowsFiles() {
-  return fsCtx.bindPath !== null;  // all current targets are file paths
+  return fsCtx.bindPath !== null;
+}
+
+function updateFsHint() {
+  const hintEl = document.getElementById("fs-hint");
+  if (!hintEl) return;
+  if (fsCtx.mode === "queue-import") {
+    hintEl.textContent = fsCtx.selectedFiles.size > 0
+      ? `${fsCtx.selectedFiles.size} file(s) selected`
+      : "";
+  } else {
+    hintEl.textContent = fsCtx.selectedFile ? basename(fsCtx.selectedFile) : "";
+  }
 }
 
 async function loadFsListing(path) {
@@ -1447,6 +2063,9 @@ async function loadFsListing(path) {
   try {
     const doc = await api(`/api/fs?path=${encodeURIComponent(path)}`, "GET");
     fsCtx.current = doc.path || "";
+    fsCtx.entries = doc.entries || [];
+    fsCtx.selectedFiles = new Set();
+    updateFsHint();
     document.getElementById("fs-path").value = fsCtx.current;
     list.textContent = "";
     if (doc.parent) {
@@ -1456,12 +2075,30 @@ async function loadFsListing(path) {
       up.addEventListener("click", () => loadFsListing(doc.parent));
       list.appendChild(up);
     }
-    for (const entry of doc.entries || []) {
+    const multiMode = fsCtx.mode === "queue-import";
+    for (const entry of fsCtx.entries) {
       const item = document.createElement("div");
       item.className = "fs-item";
+      item.dataset.entryPath = entry.path;
       const name = document.createElement("span");
       name.className = "fs-name";
-      name.textContent = (entry.type === "dir" ? "\uD83D\uDCC1 " : "\uD83D\uDCC4 ") + entry.name;
+      if (multiMode && entry.type === "file") {
+        const chk = document.createElement("input");
+        chk.type = "checkbox";
+        chk.className = "fs-check";
+        chk.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          if (chk.checked) fsCtx.selectedFiles.add(entry.path);
+          else fsCtx.selectedFiles.delete(entry.path);
+          item.classList.toggle("selected", chk.checked);
+          fsCtx.selectedFile = entry.path;
+          updateFsHint();
+        });
+        name.appendChild(chk);
+      }
+      const labelNode = document.createElement("span");
+      labelNode.textContent = (entry.type === "dir" ? "\uD83D\uDCC1 " : "\uD83D\uDCC4 ") + entry.name;
+      name.appendChild(labelNode);
       const size = document.createElement("span");
       size.className = "fs-size";
       size.textContent = entry.type === "file" ? formatBytes(entry.size) : "";
@@ -1469,11 +2106,22 @@ async function loadFsListing(path) {
       item.addEventListener("click", () => {
         if (entry.type === "dir") {
           loadFsListing(entry.path);
+        } else if (multiMode) {
+          const chk = item.querySelector ? item.querySelector(".fs-check") : null;
+          const nextChecked = !fsCtx.selectedFiles.has(entry.path);
+          if (nextChecked) fsCtx.selectedFiles.add(entry.path);
+          else fsCtx.selectedFiles.delete(entry.path);
+          if (chk) chk.checked = nextChecked;
+          item.classList.toggle("selected", nextChecked);
+          fsCtx.selectedFile = entry.path;
+          document.getElementById("fs-path").value = entry.path;
+          updateFsHint();
         } else {
           fsCtx.selectedFile = entry.path;
           document.getElementById("fs-path").value = entry.path;
           list.querySelectorAll(".fs-item").forEach((el) => el.classList.remove("selected"));
           item.classList.add("selected");
+          updateFsHint();
         }
       });
       if (fsModeAllowsFiles() && entry.type === "file") {
@@ -1501,15 +2149,27 @@ function formatBytes(bytes) {
 }
 
 function selectFromBrowser(path) {
+  if (fsCtx.mode === "queue-import") {
+    const multi = Array.from(fsCtx.selectedFiles);
+    const single = path || fsCtx.selectedFile || document.getElementById("fs-path").value.trim();
+    const chosen = multi.length > 0 ? multi : (single ? [single] : []);
+    if (!chosen.length) return;
+    const first = chosen[0];
+    const profile = Object.assign({}, DEFAULTS, state.profile, {
+      input: first,
+      output: autoNameFor(first, state.profile.codec || "av1"),
+    });
+    const label = chosen.length > 1
+      ? `${basename(first)} (+${chosen.length - 1} files)`
+      : basename(first);
+    addQueueItem(profile, label, chosen);
+    closeBrowser();
+    return;
+  }
   const value = path || document.getElementById("fs-path").value.trim();
   if (!value) return;
   if (fsCtx.mode === "nle-bin") {
     addToMediaBin(value);
-  } else if (fsCtx.mode === "queue-import") {
-    const profile = Object.assign({}, DEFAULTS, state.profile, {
-      input: value, output: autoNameFor(value, state.profile.codec || "av1"),
-    });
-    addQueueItem(profile, basename(value));
   } else if (fsCtx.bindPath != null) {
     setPath(fsCtx.bindPath, value);
     runEffects();
@@ -1543,6 +2203,28 @@ function installBrowser() {
     const parent = base.slice(0, cut);
     loadFsListing(/^[a-zA-Z]:$/.test(parent) ? parent + "\\" : parent);
   });
+  const selectAllBtn = document.getElementById("fs-select-all");
+  if (selectAllBtn) {
+    selectAllBtn.addEventListener("click", () => {
+      const list = document.getElementById("fs-list");
+      for (const entry of fsCtx.entries) {
+        if (entry.type === "file" && VIDEO_EXT_RE.test(entry.name || entry.path)) {
+          fsCtx.selectedFiles.add(entry.path);
+        }
+      }
+      if (list && list.querySelectorAll) {
+        list.querySelectorAll(".fs-item").forEach((item) => {
+          const p = item.dataset.entryPath;
+          if (p && fsCtx.selectedFiles.has(p)) {
+            item.classList.add("selected");
+            const chk = item.querySelector ? item.querySelector(".fs-check") : null;
+            if (chk) chk.checked = true;
+          }
+        });
+      }
+      updateFsHint();
+    });
+  }
   document.getElementById("fs-select").addEventListener("click", () => {
     selectFromBrowser(fsCtx.selectedFile);
   });
@@ -1563,6 +2245,8 @@ function installBrowser() {
 function installStaticHandlers() {
   document.getElementById("btn-start").addEventListener("click", startJob);
   document.getElementById("btn-stop").addEventListener("click", stopJob);
+  const btnSkip = document.getElementById("btn-skip");
+  if (btnSkip) btnSkip.addEventListener("click", skipJob);
   document.getElementById("btn-probe").addEventListener("click", runProbe);
 }
 
@@ -1578,7 +2262,7 @@ async function boot() {
   installBrowser();
   applyI18n();
   try {
-    await loadSchema();  // GET /api/schema -> C++ SSOT i18n + defaults + params
+    await loadSchema();
     applyI18n();
   } catch (err) {
     setStatusMessage(`${tr("WuiReqFailed")}: ${err.message}`);
@@ -1603,6 +2287,7 @@ async function boot() {
   renderWorkspace();
   renderRuntime();
   runEffects();
+  renderInspectorContext();
   syncRound2Controls();
   attachMedia();
   connectEvents();

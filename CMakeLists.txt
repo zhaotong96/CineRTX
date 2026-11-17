@@ -125,6 +125,7 @@ endif()
 set(RTX_CORE_SOURCES
     src/core/geometry.cpp
     src/core/hw_transcode.cpp
+    src/core/hw_transcode_stages.cpp
     src/core/i18n.cpp
     src/core/logger.cpp
     src/core/lut3d.cpp
@@ -135,10 +136,13 @@ set(RTX_CORE_SOURCES
     src/core/rational.cpp
     src/core/sei_synthesizer.cpp
     src/core/status.cpp
+    src/core/shot_segmenter.cpp
+    src/core/job_queue.cpp
     src/io/ffmpeg_io.cpp
     src/io/memory_avio.cpp
     src/io/msvc_compat_mt.cpp
-    src/io/bitstream.cpp)
+    src/io/bitstream.cpp
+    src/io/cpu_video_encoder.cpp)
 
 add_library(rtx_core STATIC ${RTX_CORE_SOURCES})
 add_library(rtx::core ALIAS rtx_core)
@@ -379,6 +383,7 @@ else()
         "${RTX_RIFE_PTX_HEADER}")
 endif()
 
+
 if(WIN32)
     add_library(rtx_ngx_bridge SHARED
         ${RTX_NGX_BRIDGE_SOURCES}
@@ -424,6 +429,7 @@ if(NOT MSVC)
         -Wno-deprecated-declarations -Wno-unused-const-variable)
 endif()
 target_include_directories(rtx_ngx_bridge_static PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
     "${RTX_NVCODEC_INCLUDE_DIR}"
@@ -442,7 +448,6 @@ if(WIN32)
 else()
     add_library(rtx::ngx_bridge ALIAS rtx_ngx_bridge_static)
     target_link_libraries(rtx_core PUBLIC rtx_ngx_bridge_static)
-    target_compile_definitions(rtx_core PUBLIC RTX_EMBEDDED_NGX_BRIDGE=1)
 endif()
 
 

@@ -481,9 +481,11 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_launch(
     return RTX_OK;
 }
 
+
+
 static const char kNvofWarpPtx[] =
-    ".version 7.0\n"
-    ".target sm_70\n"
+    ".version 7.5\n"
+    ".target sm_75\n"
     ".address_size 64\n"
     ".visible .entry rtx_nvof_warp_nv12(\n"
     "    .param .u64 prev_ptr,\n"
@@ -582,19 +584,19 @@ static const char kNvofWarpPtx[] =
     "    ld.global.s16 %r31, [%rd23+2];\n"
     "    and.b32 %r41, %r19, 3;\n"
     "    cvt.rn.f32.u32 %f19, %r41;\n"
-    "    mul.f32 %f19, %f19, 0f3E800000;\n" // 0.25f vertical sub-block interpolation weight
+    "    mul.f32 %f19, %f19, 0f3E800000;\n"
     "    sub.f32 %f20, 0f3F800000, %f19;\n"
     "    cvt.rn.f32.s32 %f2, %r25;\n"
     "    cvt.rn.f32.s32 %f17, %r30;\n"
     "    mul.f32 %f2, %f2, %f20;\n"
     "    mad.rn.f32 %f2, %f17, %f19, %f2;\n"
-    "    mul.f32 %f2, %f2, 0f3D000000;\n" // 0.03125f = 1/32
+    "    mul.f32 %f2, %f2, 0f3D000000;\n"
     "    cvt.rn.f32.s32 %f3, %r26;\n"
     "    cvt.rn.f32.s32 %f18, %r31;\n"
     "    mul.f32 %f3, %f3, %f20;\n"
     "    mad.rn.f32 %f3, %f18, %f19, %f3;\n"
     "    mul.f32 %f3, %f3, 0f3D000000;\n"
-    "    @!%p3 mul.f32 %f3, %f3, 0f3F000000;\n" // UV vertical height is 0.5x of Y; horizontal byte width is 1.0x
+    "    @!%p3 mul.f32 %f3, %f3, 0f3F000000;\n"
     "    cvt.rn.f32.u32 %f4, %r9;\n"
     "    cvt.rn.f32.u32 %f5, %r13;\n"
     "    mul.f32 %f6, %f2, %f1;\n"

@@ -76,9 +76,6 @@ public:
     const char* lastError(RtxNgxBridge* bridge) const;
 
 private:
-    template <typename Fn>
-    bool resolve(Fn& function, const char* name, std::string* error);
-
 #if defined(RTX_EMBEDDED_NGX_BRIDGE)
     // Binds the v2 remaster contract to the bridge that was statically linked
     // into this image.  Same C ABI, no LoadLibraryExW, no sidecar required.

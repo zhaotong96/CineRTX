@@ -369,125 +369,6 @@ RTX_SHIM_API void RTX_SHIM_CALL rtx_ngx_bridge_destroy(RtxNgxBridge* bridge) {
     delete asBridge(bridge);
 }
 
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_textures(
-    RtxNgxBridge* bridge, RtxNgxTextureDesc* input_desc, RtxNgxTextureDesc* output_desc,
-    uint64_t* input_shared_handle, uint64_t* output_shared_handle) {
-    if (input_desc == nullptr || output_desc == nullptr || input_shared_handle == nullptr ||
-        output_shared_handle == nullptr) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    *input_shared_handle = 0;
-    *output_shared_handle = 0;
-    if (bridge == nullptr) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    BridgeImpl* impl = asBridge(bridge);
-    if (!impl->interop || !impl->interop->valid()) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    const rtx_ngx::InteropTexture& input = impl->interop->input();
-    const rtx_ngx::InteropTexture& output = impl->interop->output();
-    input_desc->width = input.width;
-    input_desc->height = input.height;
-    input_desc->format = input.format;
-    input_desc->allow_uav = 1;
-    input_desc->allocation_size = input.allocation_size;
-    output_desc->width = output.width;
-    output_desc->height = output.height;
-    output_desc->format = output.format;
-    output_desc->allow_uav = 1;
-    output_desc->allocation_size = output.allocation_size;
-    *input_shared_handle = reinterpret_cast<uint64_t>(input.shared_handle);
-    *output_shared_handle = reinterpret_cast<uint64_t>(output.shared_handle);
-    return RTX_OK;
-}
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_process(RtxNgxBridge* bridge,
-                                                            uint64_t input_fence_value) {
-    (void)input_fence_value;
-    if (bridge == nullptr) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    BridgeImpl* impl = asBridge(bridge);
-    if (!impl->interop || !impl->interop->valid()) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-#if defined(RTX_HAVE_NGX_SDK)
-    if (impl->ngx) {
-        std::string error;
-        if (!impl->ngx->process(input_fence_value, &error)) {
-            impl->error = error;
-            if (impl->interop->pollDeviceLost(nullptr)) {
-                return RTX_ERR_DEVICE_LOST;
-            }
-            return RTX_ERR_NGX;
-        }
-        impl->error.clear();
-        return RTX_OK;
-    }
-#endif
-    std::string lost_error;
-    if (impl->interop->pollDeviceLost(&lost_error)) {
-        impl->error = lost_error;
-        return RTX_ERR_DEVICE_LOST;
-    }
-    return RTX_ERR_NGX;
-}
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_get_fence(RtxNgxBridge* bridge,
-                                                              uint64_t* fence_handle,
-                                                              uint64_t* timeline_value) {
-    if (bridge == nullptr || fence_handle == nullptr || timeline_value == nullptr) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    BridgeImpl* impl = asBridge(bridge);
-    if (!impl->interop || !impl->interop->valid() ||
-        impl->interop->fence_shared_handle() == nullptr) {
-        return RTX_ERR_ARCH_UNSUPPORTED;
-    }
-    *fence_handle = reinterpret_cast<uint64_t>(impl->interop->fence_shared_handle());
-    *timeline_value = impl->interop->timeline_value();
-    return RTX_OK;
-}
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_flush(RtxNgxBridge* bridge) {
-    if (bridge == nullptr) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    BridgeImpl* impl = asBridge(bridge);
-#if defined(RTX_HAVE_NGX_SDK)
-    if (impl->ngx) {
-        std::string ngx_error;
-        if (!impl->ngx->flush(&ngx_error)) {
-            impl->error = ngx_error;
-            if (impl->interop->pollDeviceLost(nullptr)) {
-                return RTX_ERR_DEVICE_LOST;
-            }
-            return RTX_ERR_INTERNAL;
-        }
-    }
-#endif
-    std::string error;
-    if (impl->interop && impl->interop->valid() && !impl->interop->flush_queue(&error)) {
-        impl->error = error;
-        if (impl->interop->pollDeviceLost(nullptr)) {
-            return RTX_ERR_DEVICE_LOST;
-        }
-        return RTX_ERR_INTERNAL;
-    }
-    return RTX_OK;
-}
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_reset(RtxNgxBridge* bridge, int32_t width,
-                                                          int32_t height) {
-    if (bridge == nullptr || width <= 0 || height <= 0) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    // Texture recreation is driven by the core's ResolutionGuard; the bridge
-    // currently requires a new instance after a geometry change.
-    return RTX_ERR_UNSUPPORTED;
-}
-
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_ngx_bridge_last_error(RtxNgxBridge* bridge) {
     if (bridge == nullptr) {
         if (!g_last_bridge_create_error.empty()) {
@@ -496,39 +377,6 @@ RTX_SHIM_API const char* RTX_SHIM_CALL rtx_ngx_bridge_last_error(RtxNgxBridge* b
         return kSdkMissingDiagnostic;
     }
     return asBridge(bridge)->error.c_str();
-}
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_set_frame_stats(
-    RtxNgxBridge* bridge, const RtxNgxFrameStats* stats) {
-    if (bridge == nullptr || stats == nullptr) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    if (!std::isfinite(stats->y_norm) || !std::isfinite(stats->p_high) ||
-        stats->y_norm < 0.0 || stats->y_norm > 1.0 || stats->p_high < 0.0 ||
-        stats->p_high > 1.0) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-#if defined(RTX_HAVE_NGX_SDK)
-    BridgeImpl* impl = asBridge(bridge);
-    if (impl->ngx) {
-        impl->ngx->set_frame_stats(*stats);
-    }
-#else
-    (void)bridge;
-    (void)stats;
-#endif
-    return RTX_OK;
-}
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_selftest(int32_t width, int32_t height,
-                                                             char* detail, size_t detail_capacity) {
-    if (detail == nullptr || detail_capacity == 0 || width <= 0 || height <= 0) {
-        return RTX_ERR_INVALID_ARGUMENT;
-    }
-    std::snprintf(detail, detail_capacity,
-                  "round trip OK: %dx%d RGBA16F D3D12 -> CUDA -> D3D12; queue depth cap 2, pack stream priority high, adapter removal declared",
-                  width, height);
-    return RTX_OK;
 }
 
 RTX_SHIM_API uint32_t RTX_SHIM_CALL rtx_ngx_bridge_abi_version(void) {
@@ -783,7 +631,8 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_remaster(
     }
 
     const auto ngx_started = std::chrono::steady_clock::now();
-    if (!impl->ngx->process(v, &error)) {
+    const bool reset_temporal = (input->reset_temporal != 0);
+    if (!impl->ngx->process(v, &error, reset_temporal)) {
         impl->error = "rtx_ngx_bridge_remaster: " + error;
         return interop.pollDeviceLost(nullptr) ? RTX_ERR_DEVICE_LOST : RTX_ERR_NGX;
     }

@@ -103,6 +103,7 @@ struct RifePackState {
     CUfunction postprocess_kernel = nullptr;
     CUfunction fp32_to_fp16_kernel = nullptr;
     CUfunction fp16_to_fp32_kernel = nullptr;
+    CUfunction eval_block_sad_kernel = nullptr;
     CUcontext primary_context = nullptr;
     bool primary_context_retained = false;
     bool attempted = false;
@@ -213,6 +214,7 @@ bool ensureLoaded(RifePackState& s) {
      * engine I/O chain. */
     (void)s.api.module_get_function(&s.fp32_to_fp16_kernel, s.module, "rife_fp32_to_fp16");
     (void)s.api.module_get_function(&s.fp16_to_fp32_kernel, s.module, "rife_fp16_to_fp32");
+    (void)s.api.module_get_function(&s.eval_block_sad_kernel, s.module, "rtx_eval_block_sad_8x8");
 
     if (!s.preprocess_kernel || !s.postprocess_kernel ||
         !s.fp32_to_fp16_kernel || !s.fp16_to_fp32_kernel) {
@@ -457,6 +459,45 @@ RtxResult launchFp16ToFp32(uint64_t src_fp16, uint64_t dst_fp32, uint32_t count,
 
     if (res != kSuccess) {
         s.error = driverError(s.api, "cuLaunchKernel failed for rife_fp16_to_fp32:", res);
+        return RTX_ERR_INTERNAL;
+    }
+    return RTX_OK;
+}
+
+RtxResult launchEvalBlockSad8x8(uint64_t prev_y, uint64_t curr_y, uint32_t pitch,
+                               uint32_t width, uint32_t height,
+                               uint64_t d_block_sad_64, void* stream) {
+    if (prev_y == 0 || curr_y == 0 || d_block_sad_64 == 0 || width == 0 || height == 0 || pitch == 0) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    RifePackState& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!ensureLoaded(s) || !bindPrimaryContext(s)) {
+        return RTX_ERR_NGX;
+    }
+    if (!s.eval_block_sad_kernel) {
+        s.error = "kernel rtx_eval_block_sad_8x8 is missing from rife_pack.ptx";
+        return RTX_ERR_UNSUPPORTED;
+    }
+
+    unsigned long long p_prev = prev_y;
+    unsigned long long p_curr = curr_y;
+    int p_pitch = static_cast<int>(pitch);
+    int p_width = static_cast<int>(width);
+    int p_height = static_cast<int>(height);
+    unsigned long long p_out = d_block_sad_64;
+
+    void* args[] = { &p_prev, &p_curr, &p_pitch, &p_width, &p_height, &p_out };
+    const unsigned block_x = 16;
+    const unsigned block_y = 16;
+    const unsigned grid_x = (width + block_x - 1) / block_x;
+    const unsigned grid_y = (height + block_y - 1) / block_y;
+
+    const CUresult res = s.api.launch_kernel(
+        s.eval_block_sad_kernel, grid_x, grid_y, 1, block_x, block_y, 1, 0,
+        reinterpret_cast<CUstream>(stream), args, nullptr);
+    if (res != kSuccess) {
+        s.error = driverError(s.api, "cuLaunchKernel failed for rtx_eval_block_sad_8x8:", res);
         return RTX_ERR_INTERNAL;
     }
     return RTX_OK;

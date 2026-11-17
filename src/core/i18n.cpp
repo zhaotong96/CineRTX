@@ -139,6 +139,18 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"120 FPS (NVOFA Optical Flow)",                                // OptFps120Nvofa
         L"60 FPS (RIFE Deep Learning - TensorRT)",                      // OptFps60Rife
         L"120 FPS (RIFE Deep Learning - TensorRT)",                     // OptFps120Rife
+        L"CQ (Constant Quality + Spatial AQ - Default)",                // OptRcCq
+        L"CRF (Pure CPU Software Master)",                              // OptRcCrf
+        L"AV1 10-bit CPU (libsvtav1)",                                  // OptCodecAv1Cpu
+        L"HEVC 10-bit CPU (libx265)",                                   // OptCodecHevcCpu
+        L"Pipeline Topology",                                           // ParamPipelineOrder
+        L"VSR -> FG (Upscale First - Default)",                         // OptPipeVsrFirst
+        L"FG -> VSR (Interpolate First)",                               // OptPipeFgFirst
+        L"+ Add Job",                                                   // BtnQueueAdd
+        L"- Remove",                                                    // BtnQueueRemove
+        L"Move Up",                                                     // BtnQueueUp
+        L"Move Down",                                                   // BtnQueueDown
+        L"Skip Current",                                                // BtnQueueSkip
     },
     // Simplified Chinese
     {
@@ -259,6 +271,18 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"120 FPS (NVOFA 硬件光流)",                                     // OptFps120Nvofa
         L"60 FPS (RIFE 深度学习 - TensorRT)",                            // OptFps60Rife
         L"120 FPS (RIFE 深度学习 - TensorRT)",                           // OptFps120Rife
+        L"CQ (恒定感知画质 + Spatial AQ - 默认)",                        // OptRcCq
+        L"CRF (纯 CPU 10-bit 母版软编)",                                 // OptRcCrf
+        L"AV1 10-bit CPU (libsvtav1 软编)",                              // OptCodecAv1Cpu
+        L"HEVC 10-bit CPU (libx265 软编)",                               // OptCodecHevcCpu
+        L"管线拓扑顺序",                                                 // ParamPipelineOrder
+        L"VSR -> FG (先超分后补帧 - 默认)",                              // OptPipeVsrFirst
+        L"FG -> VSR (先补帧后超分)",                                     // OptPipeFgFirst
+        L"+ 加入队列",                                                   // BtnQueueAdd
+        L"- 移除任务",                                                   // BtnQueueRemove
+        L"↑ 上移",                                                       // BtnQueueUp
+        L"↓ 下移",                                                       // BtnQueueDown
+        L"⏭ 跳过当前",                                                   // BtnQueueSkip
     },
 };
 
@@ -378,6 +402,18 @@ constexpr const char* kStrIdNames[kStrIdCount] = {
     "OptFps120Nvofa",
     "OptFps60Rife",
     "OptFps120Rife",
+    "OptRcCq",
+    "OptRcCrf",
+    "OptCodecAv1Cpu",
+    "OptCodecHevcCpu",
+    "ParamPipelineOrder",
+    "OptPipeVsrFirst",
+    "OptPipeFgFirst",
+    "BtnQueueAdd",
+    "BtnQueueRemove",
+    "BtnQueueUp",
+    "BtnQueueDown",
+    "BtnQueueSkip",
 };
 
 static_assert(sizeof(kTableW[0]) / sizeof(kTableW[0][0]) == kStrIdCount,

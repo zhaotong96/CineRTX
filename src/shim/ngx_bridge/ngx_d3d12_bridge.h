@@ -34,7 +34,7 @@ public:
 
     // Waits for the CUDA signal on the shared fence, evaluates VSR and/or
     // TrueHDR and signals input_fence_value + 1 on the same fence.
-    bool process(uint64_t input_fence_value, std::string* error);
+    bool process(uint64_t input_fence_value, std::string* error, bool reset_temporal = false);
 
     // Completes the outstanding submission before the bridge is flushed or
     // destroyed, so no command list outlives its allocator.

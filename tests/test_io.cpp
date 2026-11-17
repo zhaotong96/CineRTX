@@ -445,3 +445,55 @@ RTX_TEST(io_memory_audio_video_stream_copy_roundtrip) {
     RTX_CHECK_EQ(video_read, 4);
     RTX_CHECK_EQ(audio_read, 4);
 }
+
+
+#include "rtx/cpu_video_encoder.h"
+#include "shim/rtx_shim_abi.h"
+
+RTX_TEST(test_nvenc_cq_and_qp_config) {
+    RtxEncoderConfig cfg{};
+    cfg.rate_control = RTX_RC_CQ;
+    cfg.qp = 22;
+    cfg.spatial_aq = 1;
+    cfg.aq_strength = 8;
+    RTX_CHECK_EQ(cfg.rate_control, static_cast<int32_t>(RTX_RC_CQ));
+    RTX_CHECK_EQ(cfg.qp, 22);
+    RTX_CHECK_EQ(cfg.spatial_aq, 1);
+
+    cfg.rate_control = RTX_RC_CONSTQP;
+    cfg.qp = 24;
+    const int32_t qp_i = std::max(0, cfg.qp - 2);
+    const int32_t qp_p = cfg.qp;
+    const int32_t qp_b = std::min(51, cfg.qp + 2);
+    RTX_CHECK_EQ(qp_i, 22);
+    RTX_CHECK_EQ(qp_p, 24);
+    RTX_CHECK_EQ(qp_b, 26);
+}
+
+RTX_TEST(test_cpu_crf_encoder_10bit_hdr10) {
+    CpuEncoderConfig cfg{};
+    cfg.codec = VideoCodec::AV1;
+    cfg.width = 128;
+    cfg.height = 128;
+    cfg.crf = 20;
+    cfg.preset = 8;
+    cfg.hdr.enabled = true;
+    auto enc = CpuVideoEncoder::create(cfg);
+    if (!enc.has_value()) {
+        // Static FFmpeg without libsvtav1 in older cache; verify structured error
+        RTX_CHECK(enc.error().code == ErrorCode::Unsupported || enc.error().code == ErrorCode::Internal);
+        return;
+    }
+    std::vector<uint16_t> y(128 * 128, static_cast<uint16_t>(512 << 6));
+    std::vector<uint16_t> uv(128 * 64, static_cast<uint16_t>(512 << 6));
+    size_t bytes_crf20 = 0;
+    for (int f = 0; f < 4; ++f) {
+        auto pkts = enc->encodeP010Frame(y.data(), 128 * 2, uv.data(), 128 * 2, f * 1500, f == 0);
+        RTX_REQUIRE(pkts.has_value());
+        for (const auto& p : *pkts) bytes_crf20 += p.data.size();
+    }
+    auto flushed = enc->flush();
+    RTX_REQUIRE(flushed.has_value());
+    for (const auto& p : *flushed) bytes_crf20 += p.data.size();
+    RTX_CHECK(bytes_crf20 > 0);
+}

@@ -37,11 +37,14 @@ struct HwTranscodeOptions {
     int frame_limit = 0;  // 0 = consume the whole stream
 
     VideoCodec codec = VideoCodec::AV1;  // AV1 10-bit (default) or HEVC Main10
+    bool use_cpu_encoder = false;        // true = CPU SVT-AV1 / x265 encoder
+    std::string cpu_preset = "4";        // SVT-AV1 0..13 or x265 preset string
     int bitrate_kbps = 0;                // 0 = auto
     int preset = 5;                      // 1..7 (NVENC P1..P7, default P5)
-    int rate_control = 0;                // 0 = CBR, 1 = VBR, 2 = const-QP
-    int qp = 24;                         // 0..51 (unified default 24 across CLI/GUI/WebUI)
+    int rate_control = 3;                // 0 = CBR, 1 = VBR, 2 = const-QP, 3 = CQ, 4 = CRF
+    int qp = 22;                         // 0..51 (unified default 22 across CLI/GUI/WebUI)
     bool copy_audio = true;
+    bool vsr_before_fg = true;           // true = VSR upscale before Frame Gen (vsr-first)
     // Phase 7 (Task 7-B2): emit SMPTE ST 2094-40 (HDR10+) dynamic metadata
     // per frame (AV1 OBU_METADATA / HEVC prefix SEI).
     bool hdr10plus = false;

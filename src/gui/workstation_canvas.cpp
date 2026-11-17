@@ -694,9 +694,17 @@ rtx::TranscodeProfile collectProfileFromUi(HWND hwnd) {
 
     profile.input = wideToUtf8(text(IDC_EDT_INPUT));
     profile.output = wideToUtf8(text(IDC_EDT_OUTPUT));
-    profile.codec = (sel(IDC_CMB_CODEC) == 1) ? "hevc" : "av1";
-    profile.preset = sel(IDC_CMB_PRESET) + 1;
-    profile.rate_control = (sel(IDC_CMB_RC) == 1) ? "vbr" : (sel(IDC_CMB_RC) == 2) ? "qp" : "cbr";
+
+    constexpr const char* kCodecs[] = {"av1", "hevc", "av1_cpu", "hevc_cpu"};
+    const int codecIdx = std::clamp(sel(IDC_CMB_CODEC), 0, 3);
+    profile.codec = kCodecs[codecIdx];
+
+    profile.preset = std::clamp(sel(IDC_CMB_PRESET), 0, 6) + 1;
+
+    constexpr const char* kRcModes[] = {"cq", "vbr", "cbr", "qp", "crf"};
+    const int rcIdx = std::clamp(sel(IDC_CMB_RC), 0, 4);
+    profile.rate_control = kRcModes[rcIdx];
+
     profile.bitrate_kbps = _wtoi(text(IDC_EDT_BITRATE).c_str());
     profile.qp = _wtoi(text(IDC_EDT_QP).c_str());
     profile.resolution = (sel(IDC_CMB_RES) == 1) ? "2k"
@@ -704,7 +712,7 @@ rtx::TranscodeProfile collectProfileFromUi(HWND hwnd) {
                          : (sel(IDC_CMB_RES) == 3) ? "native" : "4k";
     profile.geometry = (sel(IDC_CMB_GEOM) == 1) ? "pillarbox" : "auto";
     profile.vsr_enabled = checked(IDC_CHK_VSR);
-    profile.vsr_quality = sel(IDC_CMB_VSR_QUAL) + 1;
+    profile.vsr_quality = std::clamp(sel(IDC_CMB_VSR_QUAL), 0, 3) + 1;
     profile.peak_nits = _wtoi(text(IDC_EDT_PEAK_NITS).c_str());
     constexpr const wchar_t* kFpsModes[] = {
         L"original", L"60-nvofa", L"120-nvofa", L"60-rife", L"120-rife"
@@ -729,9 +737,22 @@ void applyProfileToUi(HWND hwnd, const rtx::TranscodeProfile& profile) {
     };
     setEdit(IDC_EDT_INPUT, utf8ToWide(profile.input));
     setEdit(IDC_EDT_OUTPUT, utf8ToWide(profile.output));
-    setSel(IDC_CMB_CODEC, profile.codec == "hevc" ? 1 : 0);
-    setSel(IDC_CMB_PRESET, profile.preset - 1);
-    setSel(IDC_CMB_RC, profile.rate_control == "vbr" ? 1 : profile.rate_control == "qp" ? 2 : 0);
+
+    int codecSel = 0;
+    if (profile.codec == "hevc") codecSel = 1;
+    else if (profile.codec == "av1_cpu") codecSel = 2;
+    else if (profile.codec == "hevc_cpu") codecSel = 3;
+    setSel(IDC_CMB_CODEC, codecSel);
+
+    setSel(IDC_CMB_PRESET, std::clamp(profile.preset - 1, 0, 6));
+
+    int rcSel = 0; // default "cq"
+    if (profile.rate_control == "vbr") rcSel = 1;
+    else if (profile.rate_control == "cbr") rcSel = 2;
+    else if (profile.rate_control == "qp") rcSel = 3;
+    else if (profile.rate_control == "crf") rcSel = 4;
+    setSel(IDC_CMB_RC, rcSel);
+
     setEdit(IDC_EDT_BITRATE, std::to_wstring(profile.bitrate_kbps));
     setEdit(IDC_EDT_QP, std::to_wstring(profile.qp));
     setSel(IDC_CMB_RES, profile.resolution == "2k" ? 1
@@ -740,7 +761,7 @@ void applyProfileToUi(HWND hwnd, const rtx::TranscodeProfile& profile) {
     setSel(IDC_CMB_GEOM, profile.geometry == "pillarbox" ? 1 : 0);
     Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_VSR),
                     profile.vsr_enabled ? BST_CHECKED : BST_UNCHECKED);
-    setSel(IDC_CMB_VSR_QUAL, profile.vsr_quality - 1);
+    setSel(IDC_CMB_VSR_QUAL, std::clamp(profile.vsr_quality - 1, 0, 3));
     setEdit(IDC_EDT_PEAK_NITS, std::to_wstring(profile.peak_nits));
     constexpr const wchar_t* kFpsModes[] = {
         L"original", L"60-nvofa", L"120-nvofa", L"60-rife", L"120-rife"
@@ -791,12 +812,16 @@ void populateComboBoxes(HWND hwnd) {
         }
         ComboBox_SetCurSel(h, sel);
     };
-    refill(IDC_CMB_CODEC, {rtx::StrId::OptCodecAv1, rtx::StrId::OptCodecHevc}, 0);
+    refill(IDC_CMB_CODEC,
+           {rtx::StrId::OptCodecAv1, rtx::StrId::OptCodecHevc,
+            rtx::StrId::OptCodecAv1Cpu, rtx::StrId::OptCodecHevcCpu}, 0);
     refill(IDC_CMB_PRESET,
            {rtx::StrId::OptPresetP1, rtx::StrId::OptPresetP2, rtx::StrId::OptPresetP3,
             rtx::StrId::OptPresetP4, rtx::StrId::OptPresetP5, rtx::StrId::OptPresetP6,
             rtx::StrId::OptPresetP7}, 4);
-    refill(IDC_CMB_RC, {rtx::StrId::OptRcCbr, rtx::StrId::OptRcVbr, rtx::StrId::OptRcQp}, 0);
+    refill(IDC_CMB_RC,
+           {rtx::StrId::OptRcCq, rtx::StrId::OptRcVbr, rtx::StrId::OptRcCbr,
+            rtx::StrId::OptRcQp, rtx::StrId::OptRcCrf}, 0);
     refill(IDC_CMB_RES,
            {rtx::StrId::OptRes4k, rtx::StrId::OptRes2k, rtx::StrId::OptResFhd,
             rtx::StrId::OptResNative}, 0);
@@ -811,9 +836,11 @@ void populateComboBoxes(HWND hwnd) {
 
 void syncControlStates(HWND hwnd) {
     const int rcSel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_RC));
-    const bool qpMode = (rcSel == 2);
-    EnableWindow(GetDlgItem(hwnd, IDC_EDT_BITRATE), !qpMode && !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_EDT_QP), qpMode && !guiIsTranscoding());
+    // rcSel: 0=cq, 1=vbr, 2=cbr, 3=qp, 4=crf
+    const bool usesQualityTarget = (rcSel == 0 || rcSel == 3 || rcSel == 4);
+    const bool usesBitrateTarget = (rcSel == 1 || rcSel == 2);
+    EnableWindow(GetDlgItem(hwnd, IDC_EDT_BITRATE), usesBitrateTarget && !guiIsTranscoding());
+    EnableWindow(GetDlgItem(hwnd, IDC_EDT_QP), usesQualityTarget && !guiIsTranscoding());
 
     const int fpsSel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_FPS));
     const bool rifeMode = (fpsSel == 3 || fpsSel == 4);
@@ -934,7 +961,7 @@ void createWorkstationControls(HWND hwnd, HFONT font, HFONT font_bold) {
     createLabel(IDC_LBL_BITRATE, L"Bitrate:");
     createEdit(IDC_EDT_BITRATE, L"0", true);
     createLabel(IDC_LBL_QP, L"QP:");
-    createEdit(IDC_EDT_QP, L"24", true);
+    createEdit(IDC_EDT_QP, L"22", true);
     createLabel(IDC_LBL_RES, L"Resolution:");
     createCombo(IDC_CMB_RES);
     createLabel(IDC_LBL_GEOM, L"Aspect:");

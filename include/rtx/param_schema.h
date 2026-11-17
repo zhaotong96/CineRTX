@@ -53,11 +53,11 @@ struct ParamMeta {
 struct TranscodeProfile {
     std::string input{};
     std::string output{};
-    std::string codec{"av1"};           // "av1" | "hevc" (10-bit HDR10 pipeline)
-    int preset = 5;                     // 1..7 (NVENC P1..P7)
-    std::string rate_control{"cbr"};    // "cbr" | "vbr" | "qp"
+    std::string codec{"av1"};           // "av1" | "hevc" | "av1_cpu" | "hevc_cpu"
+    int preset = 5;                     // NVENC P1..P7 (1..7), SVT-AV1 (0..13), or x265 preset index
+    std::string rate_control{"cq"};     // "cq" | "crf" | "vbr" | "cbr" | "qp"
     int bitrate_kbps = 0;               // 0..200000 (0 = auto)
-    int qp = 24;                        // 0..51 (unified across CLI/GUI/WebUI)
+    int qp = 22;                        // 0..51 (unified default 22 across CLI/GUI/WebUI)
     std::string resolution{"4k"};       // "4k" | "2k" | "fhd" | "native"
     int target_width = 3840;            // explicit override or derived from resolution
     int target_height = 2160;           // explicit override or derived from resolution
@@ -66,6 +66,7 @@ struct TranscodeProfile {
     int vsr_quality = 4;                // 1..4 (Level 4 Ultra default)
     int peak_nits = 1000;               // 400..4000 cd/m^2
     std::string fps_mode{"60-nvofa"};   // "original" | "60-nvofa" | "120-nvofa" | "60-rife" | "120-rife"
+    std::string pipeline_order{"vsr-first"}; // "vsr-first" | "fg-first"
     std::string rife_engine{};          // path to TensorRT .engine when fps_mode ends with "-rife"
     bool copy_audio = true;             // lossless audio/subtitle stream passthrough
     bool hdr10plus = false;             // SMPTE ST 2094-40 dynamic metadata
@@ -75,26 +76,27 @@ struct TranscodeProfile {
     bool auto_output = true;            // auto-derive output path when empty or auto-generated
 };
 
-inline constexpr std::array<ParamMeta, 19> kParamSchema{{
-    {.json_key = "input",        .cli_flag = "--input",        .kind = ParamKind::String, .label_id = StrId::ParamInput},
-    {.json_key = "output",       .cli_flag = "--output",       .kind = ParamKind::String, .label_id = StrId::ParamOutput},
-    {.json_key = "codec",        .cli_flag = "--codec",        .kind = ParamKind::Enum,   .label_id = StrId::ParamCodec,       .default_str = "av1",      .enum_csv = "av1,hevc"},
-    {.json_key = "preset",       .cli_flag = "--preset",       .kind = ParamKind::Int,    .label_id = StrId::ParamPreset,      .min_val = 1,   .max_val = 7,      .default_int = 5},
-    {.json_key = "rateControl",  .cli_flag = "--rate-control", .kind = ParamKind::Enum,   .label_id = StrId::ParamRateControl, .default_str = "cbr",      .enum_csv = "cbr,vbr,qp"},
-    {.json_key = "bitrateKbps",  .cli_flag = "--bitrate",      .kind = ParamKind::Int,    .label_id = StrId::ParamBitrate,     .min_val = 0,   .max_val = 200000, .default_int = 0},
-    {.json_key = "qp",           .cli_flag = "--qp",           .kind = ParamKind::Int,    .label_id = StrId::ParamCq,          .min_val = 0,   .max_val = 51,     .default_int = 24},
-    {.json_key = "resolution",   .cli_flag = "--resolution",   .kind = ParamKind::Enum,   .label_id = StrId::ParamResolution,  .default_str = "4k",       .enum_csv = "4k,2k,fhd,native"},
-    {.json_key = "geometry",     .cli_flag = "--pillarbox",    .kind = ParamKind::Enum,   .label_id = StrId::ParamAspect,      .default_str = "auto",     .enum_csv = "auto,pillarbox"},
-    {.json_key = "vsrEnabled",   .cli_flag = "--no-vsr",       .kind = ParamKind::Bool,   .label_id = StrId::ParamVsr,         .default_bool = true},
-    {.json_key = "vsrQuality",   .cli_flag = "--vsr-quality",  .kind = ParamKind::Int,    .label_id = StrId::ParamVsrQuality,  .min_val = 1,   .max_val = 4,      .default_int = 4},
-    {.json_key = "peakNits",     .cli_flag = "--peak-nits",    .kind = ParamKind::Int,    .label_id = StrId::ParamPeakNits,    .min_val = 400, .max_val = 4000,   .default_int = 1000},
-    {.json_key = "fpsMode",      .cli_flag = "--target-fps",   .kind = ParamKind::Enum,   .label_id = StrId::WuiParamFps,      .default_str = "60-nvofa", .enum_csv = "original,60-nvofa,120-nvofa,60-rife,120-rife"},
-    {.json_key = "rifeEngine",   .cli_flag = "--rife-engine",  .kind = ParamKind::String, .label_id = StrId::WuiParamRifeEngine},
-    {.json_key = "copyAudio",    .cli_flag = "--no-audio",     .kind = ParamKind::Bool,   .label_id = StrId::ParamAudioCopy,   .default_bool = true},
-    {.json_key = "hdr10plus",    .cli_flag = "--hdr10plus",    .kind = ParamKind::Bool,   .label_id = StrId::WuiParamHdr10plus,.default_bool = false},
-    {.json_key = "lut",          .cli_flag = "--lut",          .kind = ParamKind::String, .label_id = StrId::WuiParamLut},
-    {.json_key = "gpu",          .cli_flag = "--gpu",          .kind = ParamKind::Int,    .label_id = StrId::WuiParamGpu,      .min_val = 0,   .max_val = 15,     .default_int = 0},
-    {.json_key = "frames",       .cli_flag = "--frames",       .kind = ParamKind::Int,    .label_id = StrId::WuiParamFrames,   .min_val = 0,   .max_val = 100000000, .default_int = 0},
+inline constexpr std::array<ParamMeta, 20> kParamSchema{{
+    {.json_key = "input",         .cli_flag = "--input",          .kind = ParamKind::String, .label_id = StrId::ParamInput},
+    {.json_key = "output",        .cli_flag = "--output",         .kind = ParamKind::String, .label_id = StrId::ParamOutput},
+    {.json_key = "codec",         .cli_flag = "--codec",          .kind = ParamKind::Enum,   .label_id = StrId::ParamCodec,          .default_str = "av1",       .enum_csv = "av1,hevc,av1_cpu,hevc_cpu"},
+    {.json_key = "preset",        .cli_flag = "--preset",         .kind = ParamKind::Int,    .label_id = StrId::ParamPreset,         .min_val = 0,   .max_val = 13,     .default_int = 5},
+    {.json_key = "rateControl",   .cli_flag = "--rate-control",   .kind = ParamKind::Enum,   .label_id = StrId::ParamRateControl,    .default_str = "cq",        .enum_csv = "cq,crf,vbr,cbr,qp"},
+    {.json_key = "bitrateKbps",   .cli_flag = "--bitrate",        .kind = ParamKind::Int,    .label_id = StrId::ParamBitrate,        .min_val = 0,   .max_val = 200000, .default_int = 0},
+    {.json_key = "qp",            .cli_flag = "--qp",             .kind = ParamKind::Int,    .label_id = StrId::ParamCq,             .min_val = 0,   .max_val = 51,     .default_int = 22},
+    {.json_key = "resolution",    .cli_flag = "--resolution",     .kind = ParamKind::Enum,   .label_id = StrId::ParamResolution,     .default_str = "4k",        .enum_csv = "4k,2k,fhd,native"},
+    {.json_key = "geometry",      .cli_flag = "--pillarbox",      .kind = ParamKind::Enum,   .label_id = StrId::ParamAspect,         .default_str = "auto",      .enum_csv = "auto,pillarbox"},
+    {.json_key = "vsrEnabled",    .cli_flag = "--no-vsr",         .kind = ParamKind::Bool,   .label_id = StrId::ParamVsr,            .default_bool = true},
+    {.json_key = "vsrQuality",    .cli_flag = "--vsr-quality",    .kind = ParamKind::Int,    .label_id = StrId::ParamVsrQuality,     .min_val = 1,   .max_val = 4,      .default_int = 4},
+    {.json_key = "peakNits",      .cli_flag = "--peak-nits",      .kind = ParamKind::Int,    .label_id = StrId::ParamPeakNits,       .min_val = 400, .max_val = 4000,   .default_int = 1000},
+    {.json_key = "fpsMode",       .cli_flag = "--target-fps",     .kind = ParamKind::Enum,   .label_id = StrId::WuiParamFps,         .default_str = "60-nvofa",  .enum_csv = "original,60-nvofa,120-nvofa,60-rife,120-rife"},
+    {.json_key = "pipelineOrder", .cli_flag = "--pipeline-order", .kind = ParamKind::Enum,   .label_id = StrId::ParamPipelineOrder,  .default_str = "vsr-first", .enum_csv = "vsr-first,fg-first"},
+    {.json_key = "rifeEngine",    .cli_flag = "--rife-engine",    .kind = ParamKind::String, .label_id = StrId::WuiParamRifeEngine},
+    {.json_key = "copyAudio",     .cli_flag = "--no-audio",       .kind = ParamKind::Bool,   .label_id = StrId::ParamAudioCopy,      .default_bool = true},
+    {.json_key = "hdr10plus",     .cli_flag = "--hdr10plus",      .kind = ParamKind::Bool,   .label_id = StrId::WuiParamHdr10plus,   .default_bool = false},
+    {.json_key = "lut",           .cli_flag = "--lut",            .kind = ParamKind::String, .label_id = StrId::WuiParamLut},
+    {.json_key = "gpu",           .cli_flag = "--gpu",            .kind = ParamKind::Int,    .label_id = StrId::WuiParamGpu,         .min_val = 0,   .max_val = 15,     .default_int = 0},
+    {.json_key = "frames",        .cli_flag = "--frames",         .kind = ParamKind::Int,    .label_id = StrId::WuiParamFrames,      .min_val = 0,   .max_val = 100000000, .default_int = 0},
 }};
 
 // Derives the canonical output path `<input_dir>/<input_stem>_remaster_<codec>.mp4`

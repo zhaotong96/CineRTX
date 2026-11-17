@@ -369,7 +369,7 @@ bool NgxD3D12Bridge::create_features(std::string* error) {
     return true;
 }
 
-bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error) {
+bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, bool reset_temporal) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!initialized_ || interop_ == nullptr) {
         *error = "the NGX bridge is not initialized";
@@ -426,6 +426,11 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error) {
 
     move(input, input_state, srv);
     if (needs_vsr_) {
+        if (ngx_params_ != nullptr) {
+            NVSDK_NGX_Parameter_SetI(as<NVSDK_NGX_Parameter>(ngx_params_),
+                                     NVSDK_NGX_Parameter_Reset,
+                                     reset_temporal ? 1 : 0);
+        }
         ID3D12Resource* target = needs_mid_ ? mid : output;
         int& target_state = needs_mid_ ? mid_state : output_state;
         move(target, target_state, uav);

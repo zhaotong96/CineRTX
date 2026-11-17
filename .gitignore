@@ -27,3 +27,8 @@ CMakeUserPresets.json
 
 # Test artifacts
 /tests/artifacts/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

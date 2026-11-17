@@ -3,11 +3,9 @@
   SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
   Copyright (C) 2026 CineRTX contributors
 
-  CineRTX WebUI — one static HTML document, three workstation shapes.
-  Every parameter control declares a path into the single JSON state document
-  (data-bind) and an i18n string id (data-i18n).  Parameter ranges, defaults,
-  enums and translations come from the frozen C++ SSOT via GET /api/schema.
-  All three workspaces share one state tree and one binding engine.
+  CineRTX WebUI v3 — Cinematic Studio Redesign.
+  Glass-morphism dark theme with NVIDIA RTX signature accents.
+  Same JSON SSOT contract, same data-bind / data-i18n architecture.
 -->
 <html lang="zh">
 <head>
@@ -19,543 +17,429 @@
 </head>
 <body data-status="idle" data-workspace="encoder">
 
-<header class="topbar">
-  <div class="brand">
-    <span class="brand-mark" aria-label="NVIDIA RTX">RTX</span>
-    <div>
-      <h1 data-i18n="AppTitle">CineRTX 纯 GPU 专业转码与非编引擎</h1>
-      <p class="sub" data-i18n="WuiSubtitle">WebUI · JSON 状态驱动 · 与后端彻底解耦</p>
+<!-- ═══════════ AMBIENT BACKGROUND ═══════════ -->
+<div class="ambient-bg" aria-hidden="true">
+  <div class="ambient-orb orb-1"></div>
+  <div class="ambient-orb orb-2"></div>
+  <div class="ambient-orb orb-3"></div>
+</div>
+
+<!-- ═══════════ SIDEBAR ═══════════ -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-brand">
+    <div class="brand-logo">
+      <div class="brand-icon">
+        <svg viewBox="0 0 36 36" width="36" height="36" fill="none">
+          <defs>
+            <linearGradient id="g1" x1="0" y1="0" x2="36" y2="36">
+              <stop offset="0%" stop-color="#76b900"/>
+              <stop offset="100%" stop-color="#4e8a00"/>
+            </linearGradient>
+          </defs>
+          <rect x="2" y="6" width="32" height="24" rx="4" fill="url(#g1)" opacity="0.15"/>
+          <path d="M10 16l5-5v10l-5-5zm9-5l5 5-5 5V11zm9 0v10l-5-5 5-5z" fill="url(#g1)"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <span class="brand-name">CineRTX</span>
+        <span class="brand-sub">Studio Engine</span>
+      </div>
     </div>
   </div>
 
-  <nav class="workspace-tabs" aria-label="工作区形态切换器">
-    <button type="button" class="workspace-tab" data-workspace-tab="encoder">
-      <span class="tab-key">[1]</span>视频转码器 · Media Encoder<span class="core-badge">CORE</span>
+  <nav class="sidebar-nav">
+    <button type="button" class="nav-item" data-workspace-tab="encoder" title="Alt+1">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8l3 2-3 2V8zM14 8h3M14 12h3"/>
+      </svg>
+      <span data-i18n="WuiNavEncoder">转码器</span>
+      <kbd>1</kbd>
     </button>
-    <button type="button" class="workspace-tab" data-workspace-tab="player">
-      <span class="tab-key">[2]</span>超分播放器 · RTX Player
+    <button type="button" class="nav-item" data-workspace-tab="player" title="Alt+2">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16"/>
+      </svg>
+      <span data-i18n="WuiNavPlayer">播放器</span>
+      <kbd>2</kbd>
     </button>
-    <button type="button" class="workspace-tab" data-workspace-tab="nle">
-      <span class="tab-key">[3]</span>非线性编辑 · RTX NLE Studio
+    <button type="button" class="nav-item" data-workspace-tab="nle" title="Alt+3">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 10h20M9 4v16"/>
+      </svg>
+      <span data-i18n="WuiNavNle">非编</span>
+      <kbd>3</kbd>
     </button>
   </nav>
 
-  <div class="top-actions">
-    <span id="engine-chip" class="chip chip-off" title=""><span data-i18n="WuiEngine">后端引擎</span>: <b id="engine-state">—</b></span>
-    <button id="btn-probe" class="btn btn-sm" data-i18n="WuiProbeRun">运行探针</button>
-    <button id="btn-lang" class="btn btn-ghost btn-sm" data-i18n-title="LangToggleHint" title="Ctrl+L 切换语言">EN/中文</button>
-  </div>
-</header>
-
-<main class="workspaces">
-
-  <!-- ==================================================================== -->
-  <!-- 形态一：视频转码器工作站 (Adobe Media Encoder 对标)                    -->
-  <!-- ==================================================================== -->
-  <section id="ws-encoder" class="workspace" data-workspace-panel="encoder">
-
-    <!-- 左栏：RTX 黄金预设浏览器 -->
-    <aside class="panel enc-side" id="panel-presets">
-      <div class="panel-head">
-        <h2 class="panel-title">RTX 黄金预设库</h2><span class="eyebrow">PRESETS</span>
-      </div>
-      <p class="sub">一键应用 · 参数写入 SSOT 检查器</p>
-      <div class="preset-list" id="preset-list">
-        <button type="button" class="preset-card active" data-preset="master"
-                data-codec="av1" data-preset-level="5" data-resolution="4k"
-                data-vsr-enabled="true" data-vsr-quality="4" data-fps-mode="60-nvofa" data-peak-nits="1000">
-          <span class="preset-name">★ 4K 60fps AV1 HDR10 母版</span>
-          <span class="preset-meta">默认开箱最优 · AV1 / 4K / NVOFA60</span>
-        </button>
-        <button type="button" class="preset-card" data-preset="rife"
-                data-codec="av1" data-preset-level="6" data-resolution="4k"
-                data-vsr-enabled="true" data-vsr-quality="4" data-fps-mode="60-rife" data-peak-nits="1000">
-          <span class="preset-name">◆ 4K 60fps RIFE 深度学习臻彩</span>
-          <span class="preset-meta">RIFE v4.25 · TensorRT 补帧</span>
-        </button>
-        <button type="button" class="preset-card" data-preset="esports"
-                data-codec="av1" data-preset-level="4" data-resolution="4k"
-                data-vsr-enabled="true" data-vsr-quality="4" data-fps-mode="120-nvofa" data-peak-nits="1000">
-          <span class="preset-name">⚡ 4K 120fps NVOFA 电竞高帧率</span>
-          <span class="preset-meta">120 FPS · 硬件光流</span>
-        </button>
-        <button type="button" class="preset-card" data-preset="compat"
-                data-codec="hevc" data-preset-level="5" data-resolution="2k"
-                data-vsr-enabled="true" data-vsr-quality="3" data-fps-mode="60-nvofa" data-peak-nits="1000">
-          <span class="preset-name">🎬 2K 60fps HEVC Main10 广泛兼容</span>
-          <span class="preset-meta">HEVC / 2K / VSR L3</span>
-        </button>
-        <button type="button" class="preset-card" data-preset="native"
-                data-codec="av1" data-preset-level="6" data-resolution="native"
-                data-vsr-enabled="false" data-vsr-quality="4" data-fps-mode="original" data-peak-nits="1000">
-          <span class="preset-name">🎞 原生分辨率 TrueHDR 无损重制</span>
-          <span class="preset-meta">Native · 不补帧 · 不超分</span>
-        </button>
-      </div>
-    </aside>
-
-    <!-- 中栏：批处理队列 + 编码遥测 -->
-    <div class="enc-center">
-      <section class="panel" id="panel-queue">
-        <div class="panel-head">
-          <h2 class="panel-title">多任务批处理编码队列</h2><span class="eyebrow">BATCH QUEUE</span>
-        </div>
-        <div class="toolbar">
-          <button id="btn-queue-add" class="btn btn-sm">+ 添加当前配置到队列</button>
-          <button id="btn-queue-import" class="btn btn-sm" data-browse="queue.pendingImport" data-browse-mode="queue-import">批量导入文件</button>
-          <button id="btn-queue-remove" class="btn btn-sm">移除选中</button>
-          <button id="btn-queue-clear" class="btn btn-sm">清空已完成</button>
-          <span class="spacer"></span>
-          <button id="btn-start" class="btn btn-primary" data-i18n="ButtonStart">开始硬件转码</button>
-          <button id="btn-stop" class="btn btn-danger" data-i18n="ButtonStop" disabled>停止转码</button>
-        </div>
-        <div class="queue-scroll">
-          <table class="queue-table">
-            <thead><tr>
-              <th>状态</th><th>输入源文件名</th><th>编码预设</th><th>FRUC 引擎</th>
-              <th>HDR 峰值</th><th>输出路径</th><th>实时进度</th>
-            </tr></thead>
-            <tbody id="queue-body"></tbody>
-          </table>
-          <div id="queue-empty" class="queue-empty">队列为空 · 直接点击「开始硬件转码」即以当前配置单任务启动（向后兼容）</div>
-        </div>
-        <div class="actions">
-          <span id="status-line" class="status" data-i18n="StatusReady">已就绪。点击"开始硬件转码"启动后台任务。</span>
-        </div>
-        <div class="progress-wrap">
-          <div class="progress"><div id="progress-fill" class="progress-fill" style="width:0%"></div></div>
-          <span id="progress-text" class="progress-text">—</span>
-        </div>
-      </section>
-
-      <section class="panel" id="panel-monitor">
-        <div class="panel-head">
-          <h2 class="panel-title" data-i18n="TelemetryTitle">任务遥测</h2><span class="eyebrow">TELEMETRY</span>
-        </div>
-        <p class="sub" data-i18n="TelemetrySubtitle">WDDM 异步 · 零拷贝主循环</p>
-        <div class="monitor-grid">
-          <div>
-            <div class="ab-compare" id="encoder-ab">
-              <div class="ab-fallback">A/B 对比监看视口 · 原片 / 重制成品</div>
-              <video id="encoder-video" muted playsinline preload="metadata"></video>
-              <span class="ab-tag left">ORIGINAL · SDR BT.709</span>
-              <span class="ab-tag right">RTX REMASTER · 4K HDR10 PQ</span>
-            </div>
-            <div class="hint">监看视口经 /api/media 流式加载 · 支持 Range 逐帧拖拽</div>
-          </div>
-          <div>
-            <div class="tiles">
-              <div class="tile"><span class="tile-k" data-i18n="StatThroughput">吞吐</span><span class="tile-v" id="tile-fps">—</span></div>
-              <div class="tile"><span class="tile-k" data-i18n="StatFrames">帧数</span><span class="tile-v" id="tile-frames">—</span></div>
-              <div class="tile"><span class="tile-k" data-i18n="StatElapsed">耗时</span><span class="tile-v" id="tile-elapsed">—</span></div>
-              <div class="tile"><span class="tile-k" data-i18n="StatZeroCopy">零拷贝</span><span class="tile-v" id="tile-zero">—</span></div>
-            </div>
-            <div class="subsection">
-              <h3 data-i18n="WuiProbeTitle">硬件探针 (--probe --json)</h3>
-              <div class="probe-bar">
-                <span id="probe-quick" class="probe-quick"></span>
-              </div>
-              <pre id="probe-view" class="jsonview" hidden></pre>
-            </div>
-          </div>
-        </div>
-        <div class="subsection">
-          <h3 data-i18n="WuiReportTitle">任务报告</h3>
-          <pre id="report-view" class="jsonview" data-i18n="ValueDash">—</pre>
-        </div>
-        <div class="subsection" id="log-section">
-          <h3>
-            <span data-i18n="WuiLogTitle">引擎日志</span>
-            <label class="check check-inline">
-              <input type="checkbox" data-bind="ui.showLog">
-              <span data-i18n="WuiShowLog">显示</span>
-            </label>
-          </h3>
-          <pre id="log-view" class="logview"></pre>
-        </div>
-      </section>
-    </div>
-
-    <!-- 右栏：19 项 SSOT 参数检查器 -->
-    <aside class="panel enc-side inspector" id="panel-params">
-      <div class="panel-head">
-        <h2 id="params-title" class="panel-title" data-i18n="WuiParamsTitle">转码参数</h2>
-        <span class="eyebrow">19 · SSOT</span>
-      </div>
-
-      <div class="section-label">输入 / 输出路径</div>
-      <div class="row row-path">
-        <label for="ctl-input" data-i18n="ParamInput">输入文件</label>
-        <input id="ctl-input" type="text" spellcheck="false" data-bind="profile.input" data-lock>
-        <button class="btn btn-sm" data-browse="profile.input" data-lock data-i18n="BtnBrowse">浏览...</button>
-      </div>
-      <div class="row row-path">
-        <label for="ctl-output" data-i18n="ParamOutput">输出文件</label>
-        <input id="ctl-output" type="text" spellcheck="false" data-bind="profile.output" data-lock>
-        <button class="btn btn-sm" data-browse="profile.output" data-lock data-i18n="BtnBrowse">浏览...</button>
-      </div>
-
-      <div class="section-label">编码器与码率控制</div>
-      <div class="grid">
-        <div class="cell">
-          <label for="ctl-codec" data-i18n="ParamCodec">编码格式</label>
-          <select id="ctl-codec" data-bind="profile.codec" data-lock>
-            <option value="av1" data-i18n="OptCodecAv1">AV1 10-bit (默认推荐)</option>
-            <option value="hevc" data-i18n="OptCodecHevc">HEVC Main10 (H.265)</option>
-          </select>
-        </div>
-        <div class="cell">
-          <label for="ctl-preset" data-i18n="ParamPreset">编码预设</label>
-          <select id="ctl-preset" data-bind="profile.preset" data-type="number" data-lock>
-            <option value="1" data-i18n="OptPresetP1">P1 (最快)</option>
-            <option value="2" data-i18n="OptPresetP2">P2 (更快)</option>
-            <option value="3" data-i18n="OptPresetP3">P3 (快)</option>
-            <option value="4" data-i18n="OptPresetP4">P4 (中等)</option>
-            <option value="5" data-i18n="OptPresetP5">P5 (平衡默认)</option>
-            <option value="6" data-i18n="OptPresetP6">P6 (更高画质)</option>
-            <option value="7" data-i18n="OptPresetP7">P7 (最高画质)</option>
-          </select>
-        </div>
-        <div class="cell">
-          <label for="ctl-rc" data-i18n="ParamRateControl">码率控制</label>
-          <select id="ctl-rc" data-bind="profile.rateControl" data-lock>
-            <option value="cbr" data-i18n="OptRcCbr">CBR (恒定码率)</option>
-            <option value="vbr" data-i18n="OptRcVbr">VBR (动态码率)</option>
-            <option value="qp" data-i18n="OptRcQp">Constant QP (固定量化)</option>
-          </select>
-        </div>
-        <div class="cell" data-visible-when="profile.rateControl=cbr||profile.rateControl=vbr">
-          <label for="ctl-bitrate" data-i18n="ParamBitrate">目标码率 (kbps)</label>
-          <input id="ctl-bitrate" type="number" min="0" max="200000" step="500"
-                 data-bind="profile.bitrateKbps" data-type="number" data-lock>
-        </div>
-        <div class="cell" data-visible-when="profile.rateControl=qp">
-          <label for="ctl-qp" data-i18n="ParamCq">质量 QP</label>
-          <input id="ctl-qp" type="number" min="0" max="51" data-bind="profile.qp" data-type="number" data-lock>
-        </div>
-      </div>
-
-      <div class="section-label">超分画幅与帧率补帧</div>
-      <div class="grid">
-        <div class="cell">
-          <label for="ctl-res" data-i18n="ParamResolution">目标分辨率</label>
-          <select id="ctl-res" data-bind="profile.resolution" data-lock>
-            <option value="4k" data-i18n="OptRes4k">4K UHD (3840x2160 / 2160x3840 自适应)</option>
-            <option value="2k" data-i18n="OptRes2k">2K QHD (2560x1440)</option>
-            <option value="fhd" data-i18n="OptResFhd">FHD (1920x1080)</option>
-            <option value="native" data-i18n="OptResNative">保持原画分辨率 (Native)</option>
-          </select>
-        </div>
-        <div class="cell">
-          <label for="ctl-geom" data-i18n="ParamAspect">画面画幅与旋转</label>
-          <select id="ctl-geom" data-bind="profile.geometry" data-lock>
-            <option value="auto" data-i18n="OptGeomAuto">自动竖屏检测旋转 (9:16 / 16:9 智能适配)</option>
-            <option value="pillarbox" data-i18n="OptGeomPillar">横屏填充黑边居中 (Pillarbox 3840x2160)</option>
-          </select>
-        </div>
-        <div class="cell">
-          <label for="ctl-vsrq" data-i18n="ParamVsrQuality">VSR 质量档位</label>
-          <select id="ctl-vsrq" data-bind="profile.vsrQuality" data-type="number" data-lock>
-            <option value="1" data-i18n="OptVsrQ1">Level 1 (Basic)</option>
-            <option value="2" data-i18n="OptVsrQ2">Level 2 (Standard)</option>
-            <option value="3" data-i18n="OptVsrQ3">Level 3 (High)</option>
-            <option value="4" data-i18n="OptVsrQ4">Level 4 (极致超分 - 默认)</option>
-          </select>
-          <label class="check">
-            <input type="checkbox" data-bind="profile.vsrEnabled" data-lock>
-            <span data-i18n="ParamVsr">启用 RTX VSR 超分辨率</span>
-          </label>
-        </div>
-        <div class="cell">
-          <label for="ctl-fps" data-i18n="WuiParamFps">目标帧率 (FRUC 补帧)</label>
-          <select id="ctl-fps" data-bind="profile.fpsMode" data-lock>
-            <option value="original" data-i18n="OptFpsOriginal">保持原帧率 (不补帧)</option>
-            <option value="60-nvofa" data-i18n="OptFps60Nvofa">60 FPS (NVOFA 硬件光流 - 默认)</option>
-            <option value="120-nvofa" data-i18n="OptFps120Nvofa">120 FPS (NVOFA 硬件光流)</option>
-            <option value="60-rife" data-i18n="OptFps60Rife">60 FPS (RIFE 深度学习 - TensorRT)</option>
-            <option value="120-rife" data-i18n="OptFps120Rife">120 FPS (RIFE 深度学习 - TensorRT)</option>
-          </select>
-        </div>
-        <div class="cell cell-wide" data-visible-when="profile.fpsMode=60-rife||profile.fpsMode=120-rife">
-          <label for="ctl-rife" data-i18n="WuiParamRifeEngine">RIFE TensorRT 引擎路径</label>
-          <div class="inline">
-            <input id="ctl-rife" type="text" spellcheck="false" placeholder="models/rife_v4.25.engine"
-                   data-bind="profile.rifeEngine" data-lock>
-            <button class="btn btn-sm" data-browse="profile.rifeEngine" data-lock data-i18n="BtnBrowse">浏览...</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="section-label">TrueHDR 色彩科学与硬件绑定</div>
-      <div class="grid">
-        <div class="cell">
-          <label for="ctl-nits" data-i18n="ParamPeakNits">HDR 峰值亮度 (nits)</label>
-          <input id="ctl-nits" type="number" min="400" max="4000" step="50"
-                 data-bind="profile.peakNits" data-type="number" data-lock>
-        </div>
-        <div class="cell cell-checks">
-          <label class="check">
-            <input type="checkbox" data-bind="profile.copyAudio" data-lock>
-            <span data-i18n="ParamAudioCopy">音频流无损直通 (Stream Copy)</span>
-          </label>
-          <label class="check">
-            <input type="checkbox" data-bind="profile.hdr10plus" data-lock>
-            <span data-i18n="WuiParamHdr10plus">HDR10+ 动态元数据 (ST 2094-40)</span>
-          </label>
-          <label class="check">
-            <input type="checkbox" data-bind="ui.autoOutput" data-lock>
-            <span data-i18n="WuiAutoOutput">自动补全输出文件名</span>
-          </label>
-        </div>
-        <div class="cell cell-wide">
-          <label for="ctl-lut" data-i18n="WuiParamLut">3D LUT (.cube, pack 内核内应用)</label>
-          <div class="inline">
-            <input id="ctl-lut" type="text" spellcheck="false" data-bind="profile.lut" data-lock>
-            <button class="btn btn-sm" data-browse="profile.lut" data-lock data-i18n="BtnBrowse">浏览...</button>
-          </div>
-        </div>
-        <div class="cell">
-          <label for="ctl-gpu" data-i18n="WuiParamGpu">GPU 设备序号</label>
-          <input id="ctl-gpu" type="number" min="0" max="15" data-bind="profile.gpu" data-type="number" data-lock>
-        </div>
-        <div class="cell">
-          <label for="ctl-frames" data-i18n="WuiParamFrames">帧数上限 (0 = 全流)</label>
-          <input id="ctl-frames" type="number" min="0" max="100000000" data-bind="profile.frames" data-type="number" data-lock>
-        </div>
-      </div>
-    </aside>
-  </section>
-
-  <!-- ==================================================================== -->
-  <!-- 形态二：AI 超分重制播放器 (VLC 对标)                                  -->
-  <!-- ==================================================================== -->
-  <section id="ws-player" class="workspace" data-workspace-panel="player">
-    <div class="player-shell">
-      <div class="player-stage" id="player-stage" data-ab-mode="split">
-        <video id="player-video-original" muted playsinline preload="metadata"></video>
-        <video id="player-video-remaster" muted playsinline preload="metadata"></video>
-        <div class="stage-placeholder" id="player-placeholder">打开本地媒体以开始 A/B 画质审看<br>ORIGINAL · SDR BT.709  |  RTX REMASTER · 4K HDR10 PQ</div>
-        <span class="ab-corner left">ORIGINAL · SDR BT.709</span>
-        <span class="ab-corner right">RTX REMASTER · 4K HDR10 PQ + VSR L4 + 60FPS</span>
-        <div id="player-osd" class="player-osd"></div>
-        <div id="ab-handle" class="ab-handle" role="slider" aria-label="A/B 分屏位置"
-             aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
-      </div>
-
-      <div class="transport">
-        <div class="scrubber-row">
-          <input id="player-scrub" type="range" min="0" max="1000" value="0" aria-label="时间轴">
-          <span class="timecode">
-            <b id="player-tc">00:00:00.000</b> / <span id="player-duration">00:00:00.000</span>
-            · <span id="player-frame">frame 0</span>
-          </span>
-        </div>
-        <div class="transport-row">
-          <div class="transport-group">
-            <button id="btn-player-open" class="tbtn" data-browse="player.input">打开媒体</button>
-            <button id="btn-player-head" class="tbtn">⏮ 片头</button>
-            <button id="btn-player-prev" class="tbtn">⏪ -1f</button>
-            <button id="btn-player-play" class="tbtn">▶ / ⏸</button>
-            <button id="btn-player-next" class="tbtn">⏩ +1f</button>
-            <button id="btn-player-stop" class="tbtn">⏹ 停止</button>
-          </div>
-          <div class="transport-group">
-            <span class="cap-label">A/B</span>
-            <button class="capsule active" data-ab-mode="split">分屏</button>
-            <button class="capsule" data-ab-mode="remaster">仅重制</button>
-            <button class="capsule" data-ab-mode="original">仅原片</button>
-            <input id="player-split" type="range" min="0" max="100" step="1"
-                   data-bind="player.splitPos" data-type="number" aria-label="分屏位置">
-          </div>
-          <div class="transport-group">
-            <span class="cap-label">VSR</span>
-            <button class="capsule" data-vsr-level="1">L1</button>
-            <button class="capsule" data-vsr-level="2">L2</button>
-            <button class="capsule" data-vsr-level="3">L3</button>
-            <button class="capsule" data-vsr-level="4">L4</button>
-            <span class="cap-label">FRUC</span>
-            <button class="capsule" data-fps-mode="60-nvofa">NVOFA 60</button>
-            <button class="capsule" data-fps-mode="60-rife">RIFE 60</button>
-            <button class="capsule" data-fps-mode="120-nvofa">120 FPS</button>
-            <select id="player-speed" data-bind="player.speed" data-type="number" aria-label="倍速">
-              <option value="0.25">0.25x</option><option value="0.5">0.5x</option>
-              <option value="1">1.0x</option><option value="1.5">1.5x</option>
-              <option value="2">2.0x</option>
-            </select>
-            <select id="player-audio" data-bind="player.audioTrack" data-type="number" aria-label="音轨">
-              <option value="0">音轨 1</option><option value="1">音轨 2</option>
-            </select>
-            <select id="player-sub" data-bind="player.subTrack" data-type="number" aria-label="字幕轨">
-              <option value="-1">字幕关闭</option><option value="0">内挂字幕 1</option>
-            </select>
-          </div>
-          <span class="spacer"></span>
-          <button id="btn-player-osd" class="tbtn">OSD (O)</button>
-          <button id="btn-player-send" class="btn btn-primary">⚡ 将当前媒体送入转码器</button>
-        </div>
+  <div class="sidebar-bottom">
+    <div class="engine-status" id="engine-chip" title="">
+      <div class="engine-dot" id="engine-dot"></div>
+      <div class="engine-info">
+        <span class="engine-label" data-i18n="WuiEngine">引擎</span>
+        <span class="engine-state" id="engine-state">—</span>
       </div>
     </div>
-  </section>
-
-  <!-- ==================================================================== -->
-  <!-- 形态三：非线性编辑工作站 (Adobe Premiere Pro 对标)                    -->
-  <!-- ==================================================================== -->
-  <section id="ws-nle" class="workspace" data-workspace-panel="nle">
-
-    <!-- 左上：项目素材箱与特效库 -->
-    <aside class="panel" id="nle-bin">
-      <div class="panel-head"><h2 class="panel-title">项目素材箱</h2><span class="eyebrow">PROJECT BIN</span></div>
-      <div class="bin-tabs">
-        <button class="btn btn-sm active" data-bin-tab="media">素材</button>
-        <button class="btn btn-sm" data-bin-tab="lut">3D LUT</button>
-        <button class="btn btn-sm" data-bin-tab="fx">RTX 算子</button>
-      </div>
-      <div class="bin-list" id="bin-list"></div>
-      <div class="toolbar" style="margin-top:8px">
-        <button id="btn-nle-import" class="btn btn-sm" data-browse="nle.pendingImport" data-browse-mode="nle-bin">+ 导入素材</button>
-      </div>
-    </aside>
-
-    <!-- 中上：源 / 节目监视器 -->
-    <section class="panel" id="nle-monitor">
-      <div class="panel-head"><h2 class="panel-title">源 / 节目监视器</h2><span class="eyebrow">PROGRAM</span></div>
-      <div class="hint">节目: <b id="nle-seq-name">4K_60FPS_HDR10_Master_Seq</b></div>
-      <div class="nle-timecode">
-        <span>SMPTE <b id="nle-tc">00:00:00:00</b></span>
-        <span class="flicks" id="nle-flicks">0 Flicks · 705,600,000 Hz</span>
-      </div>
-      <div class="nle-monitor-stage">
-        <video id="nle-video" muted playsinline preload="metadata"></video>
-        <div class="stage-placeholder">PROGRAM MONITOR · 4K HDR10 PQ</div>
-      </div>
-      <div class="toolbar" style="margin-top:8px">
-        <button id="btn-nle-in" class="tbtn">[ 标记入点 (I)</button>
-        <button id="btn-nle-out" class="tbtn">标记出点 (O) ]</button>
-        <button id="btn-nle-prev" class="tbtn">⏪ -1f</button>
-        <button id="btn-nle-play" class="tbtn">▶ 播放</button>
-        <button id="btn-nle-next" class="tbtn">⏩ +1f</button>
-        <button id="btn-nle-razor" class="tbtn">✂ 在播放头处分割</button>
-      </div>
-    </section>
-
-    <!-- 右上：特效控制台 / Lumetri 调色 -->
-    <aside class="panel" id="nle-effects">
-      <div class="panel-head"><h2 class="panel-title">特效控制台 · RTX HDR</h2><span class="eyebrow">LUMETRI</span></div>
-      <div class="section-label">时间裁剪 (Timing)</div>
-      <div class="effect-grid">
-        <div class="cell">
-          <label for="nle-in-ms">入点 In (ms)</label>
-          <input id="nle-in-ms" type="number" min="0" max="600000" data-bind="nle.inMs" data-type="number">
-        </div>
-        <div class="cell">
-          <label for="nle-out-ms">出点 Out (ms)</label>
-          <input id="nle-out-ms" type="number" min="0" max="600000" data-bind="nle.outMs" data-type="number">
-        </div>
-        <div class="cell cell-wide">
-          <label for="nle-frames">帧率上限 profile.frames</label>
-          <input id="nle-frames" type="number" min="0" max="100000000" data-bind="profile.frames" data-type="number">
-        </div>
-      </div>
-
-      <div class="section-label">RTX AI 超分与补帧</div>
-      <div class="effect-grid">
-        <div class="cell">
-          <label class="check"><input type="checkbox" data-bind="profile.vsrEnabled"> 启用 VSR</label>
-        </div>
-        <div class="cell">
-          <label for="nle-vsrq">VSR 档位</label>
-          <select id="nle-vsrq" data-bind="profile.vsrQuality" data-type="number">
-            <option value="1">L1</option><option value="2">L2</option>
-            <option value="3">L3</option><option value="4">L4</option>
-          </select>
-        </div>
-        <div class="cell">
-          <label for="nle-fps">补帧模式</label>
-          <select id="nle-fps" data-bind="profile.fpsMode">
-            <option value="original">原始</option><option value="60-nvofa">NVOFA 60</option>
-            <option value="120-nvofa">NVOFA 120</option>
-            <option value="60-rife">RIFE 60</option><option value="120-rife">RIFE 120</option>
-          </select>
-        </div>
-        <div class="cell">
-          <label for="nle-rife">RIFE 引擎</label>
-          <input id="nle-rife" type="text" data-bind="profile.rifeEngine" placeholder="models/rife_v4.25.engine">
-        </div>
-      </div>
-
-      <div class="section-label">Lumetri / TrueHDR 色彩科学</div>
-      <div class="effect-grid">
-        <div class="cell cell-wide">
-          <label for="nle-nits">Peak Nits <span id="nle-nits-value">1000</span> (400..4000)</label>
-          <input id="nle-nits-range" type="range" min="400" max="4000" step="50"
-                 data-bind="profile.peakNits" data-type="number">
-          <input id="nle-nits" type="number" min="400" max="4000" step="50"
-                 data-bind="profile.peakNits" data-type="number">
-        </div>
-        <div class="cell">
-          <label class="check"><input type="checkbox" data-bind="profile.hdr10plus"> HDR10+ 元数据</label>
-        </div>
-        <div class="cell">
-          <label for="nle-lut">3D LUT (.cube)</label>
-          <div class="inline">
-            <input id="nle-lut" type="text" data-bind="profile.lut">
-            <button class="btn btn-sm" data-browse="profile.lut">浏览</button>
-          </div>
-        </div>
-      </div>
-
-      <button id="btn-nle-export" class="btn btn-primary" style="width:100%;margin-top:12px">
-        🚀 导出序列至转码器渲染
+    <div class="sidebar-actions">
+      <button id="btn-probe" class="sidebar-btn" data-i18n-title="WuiProbeRun" title="运行探针">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
       </button>
-    </aside>
+      <button id="btn-lang" class="sidebar-btn" data-i18n-title="LangToggleHint" title="Ctrl+L 切换语言">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      </button>
+    </div>
+  </div>
+</aside>
 
-    <!-- 底部通栏：多轨 Flicks 时间轴 -->
-    <section class="panel" id="nle-timeline">
-      <div class="panel-head"><h2 class="panel-title">多轨 Flicks 时间轴</h2><span class="eyebrow">705,600,000 Hz · DRIFT 0</span></div>
-      <div class="timeline-wrap">
-        <div class="tool-dock">
-          <button class="btn btn-sm active" data-nle-tool="select" id="nle-tool-select">V 选择工具</button>
-          <button class="btn btn-sm" data-nle-tool="razor" id="nle-tool-razor">C 剃刀切割</button>
-          <button class="btn btn-sm" data-nle-tool="snap" id="nle-tool-snap">Snap 吸附</button>
-          <label for="nle-zoom">Zoom <span id="nle-zoom-value">100</span>%</label>
-          <input id="nle-zoom" type="range" min="50" max="200" step="10" data-bind="nle.zoom" data-type="number">
+<!-- ═══════════ MAIN CONTENT ═══════════ -->
+<main class="main-content">
+
+  <!-- ── HEADER BAR ── -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <h1 class="page-title" id="page-title" data-i18n="AppTitle">CineRTX 纯 GPU 专业转码与非编引擎</h1>
+      <p class="page-sub" data-i18n="WuiSubtitle">WebUI · JSON 状态驱动 · 与后端彻底解耦</p>
+    </div>
+    <div class="topbar-right">
+      <div class="global-progress" id="global-progress">
+        <div class="gp-ring" id="gp-ring">
+          <svg viewBox="0 0 44 44" width="44" height="44">
+            <circle cx="22" cy="22" r="18" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="3"/>
+            <circle id="gp-circle" cx="22" cy="22" r="18" fill="none" stroke="var(--accent)" stroke-width="3"
+                    stroke-dasharray="113.1" stroke-dashoffset="113.1" stroke-linecap="round"
+                    transform="rotate(-90 22 22)"/>
+          </svg>
+          <span class="gp-pct" id="gp-pct">—</span>
         </div>
-        <div class="timeline">
-          <div class="timeline-ruler" id="timeline-ruler">
-            <div class="timeline-inout" id="timeline-inout"></div>
-            <div class="playhead" id="timeline-playhead"></div>
-          </div>
-          <div id="timeline-tracks"></div>
+        <div class="gp-info">
+          <span class="gp-status" id="gp-status" data-i18n="StatusReady">就绪</span>
+          <span class="gp-detail" id="gp-detail">—</span>
         </div>
       </div>
-    </section>
+    </div>
+  </header>
+
+  <!-- ══════════════════ WORKSPACE 1: ENCODER ══════════════════ -->
+  <section id="ws-encoder" class="workspace" data-workspace-panel="encoder">
+    <div class="enc-layout">
+
+      <!-- Left: Presets -->
+      <aside class="enc-presets glass-panel" id="panel-presets">
+        <div class="panel-header">
+          <h2 class="panel-title" data-i18n="WuiPresetsTitle">RTX 预设</h2>
+          <span class="badge-glow">PRESETS</span>
+        </div>
+        <div class="preset-list" id="preset-list">
+          <button type="button" class="preset-card active" data-preset="master"
+                  data-codec="av1" data-preset-level="5" data-rate-control="cq" data-qp="22"
+                  data-resolution="4k" data-vsr-enabled="true" data-vsr-quality="4"
+                  data-fps-mode="60-nvofa" data-pipeline-order="vsr-first" data-peak-nits="1000">
+            <div class="preset-icon-wrap"><span class="preset-icon">★</span></div>
+            <div class="preset-text">
+              <span class="preset-name" data-i18n="WuiPresetMasterName">4K 60fps AV1 HDR10 母版</span>
+              <span class="preset-meta" data-i18n="WuiPresetMasterMeta">默认最优 · AV1 CQ22 / 4K / NVOFA 60</span>
+            </div>
+          </button>
+          <button type="button" class="preset-card" data-preset="rife"
+                  data-codec="av1" data-preset-level="6" data-rate-control="cq" data-qp="20"
+                  data-resolution="4k" data-vsr-enabled="true" data-vsr-quality="4"
+                  data-fps-mode="60-rife" data-pipeline-order="vsr-first" data-peak-nits="1000">
+            <div class="preset-icon-wrap"><span class="preset-icon">◆</span></div>
+            <div class="preset-text">
+              <span class="preset-name" data-i18n="WuiPresetRifeName">4K 60fps RIFE 深度学习臻彩</span>
+              <span class="preset-meta" data-i18n="WuiPresetRifeMeta">RIFE v4.25 · VSR->FG · CQ20</span>
+            </div>
+          </button>
+          <button type="button" class="preset-card" data-preset="esports"
+                  data-codec="av1" data-preset-level="4" data-rate-control="cq" data-qp="22"
+                  data-resolution="4k" data-vsr-enabled="true" data-vsr-quality="4"
+                  data-fps-mode="120-nvofa" data-pipeline-order="vsr-first" data-peak-nits="1000">
+            <div class="preset-icon-wrap"><span class="preset-icon">⚡</span></div>
+            <div class="preset-text">
+              <span class="preset-name" data-i18n="WuiPresetEsportsName">4K 120fps 电竞高帧率</span>
+              <span class="preset-meta" data-i18n="WuiPresetEsportsMeta">120 FPS · VSR->FG 极速拓扑</span>
+            </div>
+          </button>
+          <button type="button" class="preset-card" data-preset="compat"
+                  data-codec="hevc" data-preset-level="5" data-rate-control="cq" data-qp="22"
+                  data-resolution="2k" data-vsr-enabled="true" data-vsr-quality="3"
+                  data-fps-mode="60-nvofa" data-pipeline-order="vsr-first" data-peak-nits="1000">
+            <div class="preset-icon-wrap"><span class="preset-icon">🎬</span></div>
+            <div class="preset-text">
+              <span class="preset-name" data-i18n="WuiPresetCompatName">2K 60fps HEVC 广泛兼容</span>
+              <span class="preset-meta" data-i18n="WuiPresetCompatMeta">HEVC Main10 CQ22 / 2K / VSR L3</span>
+            </div>
+          </button>
+          <button type="button" class="preset-card" data-preset="cpu-master"
+                  data-codec="av1_cpu" data-preset-level="5" data-rate-control="crf" data-qp="20"
+                  data-resolution="native" data-vsr-enabled="false" data-vsr-quality="4"
+                  data-fps-mode="original" data-pipeline-order="vsr-first" data-peak-nits="1000">
+            <div class="preset-icon-wrap"><span class="preset-icon">🎞</span></div>
+            <div class="preset-text">
+              <span class="preset-name" data-i18n="WuiPresetCpuMasterName">原生分辨率 CPU CRF 母版</span>
+              <span class="preset-meta" data-i18n="WuiPresetCpuMasterMeta">libsvtav1 CRF20 · TrueHDR 无损</span>
+            </div>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Center: Queue + Telemetry -->
+      <div class="enc-center">
+        <section class="glass-panel" id="panel-queue">
+          <div class="panel-header">
+            <h2 class="panel-title" data-i18n="WuiQueueTitle">编码队列</h2>
+            <span class="badge-glow">BATCH QUEUE</span>
+          </div>
+          <div class="queue-toolbar">
+            <button id="btn-queue-add" class="btn btn-sm btn-ghost" data-i18n="BtnQueueAdd">+ 加入队列</button>
+            <button id="btn-queue-import" class="btn btn-sm btn-ghost" data-browse="queue.pendingImport" data-browse-mode="queue-import" data-i18n="WuiBtnBatchImport">批量多选导入</button>
+            <button id="btn-queue-up" class="btn btn-sm btn-ghost" data-i18n="BtnQueueUp">↑ 上移</button>
+            <button id="btn-queue-down" class="btn btn-sm btn-ghost" data-i18n="BtnQueueDown">↓ 下移</button>
+            <button id="btn-queue-remove" class="btn btn-sm btn-ghost" data-i18n="BtnQueueRemove">- 移除任务</button>
+            <button id="btn-queue-retry" class="btn btn-sm btn-ghost" data-i18n="WuiBtnQueueRetry">↻ 重试</button>
+            <button id="btn-queue-clear" class="btn btn-sm btn-ghost" data-i18n="WuiBtnQueueClear">清空已完成</button>
+            <span class="spacer"></span>
+            <button id="btn-skip" class="btn btn-sm btn-ghost" data-i18n="BtnQueueSkip" disabled>⏭ 跳过当前</button>
+            <button id="btn-stop" class="btn btn-sm btn-danger" data-i18n="ButtonStop" disabled>⏹ 停止队列</button>
+            <button id="btn-start" class="btn btn-primary" data-i18n="ButtonStart">▶ 开始转码</button>
+          </div>
+          <div class="queue-scroll">
+            <table class="queue-table">
+              <thead><tr>
+                <th data-i18n="WuiColStatus">状态</th>
+                <th data-i18n="WuiColInput">输入文件</th>
+                <th data-i18n="WuiColPreset">编码预设</th>
+                <th data-i18n="WuiColFruc">FRUC</th>
+                <th data-i18n="WuiColHdr">HDR 峰值</th>
+                <th data-i18n="WuiColOutput">输出</th>
+                <th data-i18n="WuiColProgress">进度</th>
+              </tr></thead>
+              <tbody id="queue-body"></tbody>
+            </table>
+            <div id="queue-empty" class="queue-empty">
+              <div class="empty-icon">
+                <svg viewBox="0 0 48 48" width="48" height="48" fill="none" stroke="var(--text-muted)" stroke-width="1" opacity="0.3">
+                  <rect x="6" y="6" width="36" height="36" rx="6"/><path d="M24 16v8M24 32h.02"/>
+                </svg>
+              </div>
+              <p data-i18n="WuiQueueEmptyTitle">队列为空</p>
+              <span data-i18n="WuiQueueEmptyHint">直接点击「开始转码」以当前配置单任务启动</span>
+            </div>
+          </div>
+          <div class="queue-footer">
+            <span id="status-line" class="status-text" data-i18n="StatusReady">已就绪</span>
+            <div class="progress-bar">
+              <div id="progress-fill" class="progress-fill" style="width:0%"></div>
+            </div>
+            <span id="progress-text" class="progress-text">—</span>
+          </div>
+        </section>
+
+        <section class="glass-panel" id="panel-monitor">
+          <div class="panel-header">
+            <h2 class="panel-title" data-i18n="TelemetryTitle">任务遥测</h2>
+            <span class="badge-glow">TELEMETRY</span>
+          </div>
+          <div class="telemetry-grid">
+            <div class="tele-card">
+              <div class="ab-viewport" id="encoder-ab">
+                <div class="ab-fallback" data-i18n="WuiAbViewport">A/B 对比视口</div>
+                <video id="encoder-video" muted playsinline preload="metadata"></video>
+                <span class="ab-label left">ORIGINAL</span>
+                <span class="ab-label right">RTX REMASTER</span>
+              </div>
+            </div>
+            <div class="tele-stats">
+              <div class="stat-tiles">
+                <div class="stat-tile"><span class="stat-label" data-i18n="StatThroughput">吞吐</span><span class="stat-value" id="tile-fps">—</span></div>
+                <div class="stat-tile"><span class="stat-label" data-i18n="StatFrames">帧数</span><span class="stat-value" id="tile-frames">—</span></div>
+                <div class="stat-tile"><span class="stat-label" data-i18n="StatElapsed">耗时</span><span class="stat-value" id="tile-elapsed">—</span></div>
+                <div class="stat-tile"><span class="stat-label" data-i18n="StatZeroCopy">零拷贝</span><span class="stat-value" id="tile-zero">—</span></div>
+              </div>
+              <div class="probe-section"><h3 data-i18n="WuiProbeTitle">硬件探针</h3><span id="probe-quick" class="probe-summary"></span><pre id="probe-view" class="code-block" hidden></pre></div>
+              <div class="report-section"><h3 data-i18n="WuiReportTitle">任务报告</h3><pre id="report-view" class="code-block" data-i18n="ValueDash">—</pre></div>
+              <div class="log-section" id="log-section"><h3><span data-i18n="WuiLogTitle">引擎日志</span><label class="toggle-switch"><input type="checkbox" data-bind="ui.showLog"><span class="toggle-slider"></span></label></h3><pre id="log-view" class="log-block"></pre></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Right: Parameter Inspector -->
+      <aside class="enc-inspector glass-panel" id="panel-params">
+        <div class="panel-header">
+          <h2 id="params-title" class="panel-title" data-i18n="WuiParamsTitle">参数</h2>
+          <span class="badge-glow" id="inspector-badge">20 · SSOT</span>
+        </div>
+        <div id="inspector-context-bar" class="context-bar">
+          <span id="inspector-mode-text" class="sub" data-i18n="WuiInspectorDraft">草稿模式 · 修改后点击「+ 加入队列」</span>
+          <button id="btn-queue-deselect" class="btn btn-xs btn-ghost" data-i18n="WuiBtnQueueDeselect" hidden>返回新任务草稿</button>
+        </div>
+        <div class="inspector-scroll">
+          <div class="param-group">
+            <div class="param-group-title" data-i18n="WuiGroupIo">输入 / 输出</div>
+            <div class="param-row"><label for="ctl-input" data-i18n="ParamInput">输入文件</label><div class="param-input-wrap"><input id="ctl-input" type="text" spellcheck="false" data-bind="profile.input" placeholder="拖拽文件或点击浏览"><button class="btn-icon" data-browse="profile.input" data-i18n="BtnBrowse" title="浏览"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"/></svg></button></div></div>
+            <div class="param-row"><label for="ctl-output" data-i18n="ParamOutput">输出文件</label><div class="param-input-wrap"><input id="ctl-output" type="text" spellcheck="false" data-bind="profile.output"><button class="btn-icon" data-browse="profile.output" data-i18n="BtnBrowse" title="浏览"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"/></svg></button></div></div>
+          </div>
+          <div class="param-group">
+            <div class="param-group-title" data-i18n="WuiGroupEncoder">编码器</div>
+            <div class="param-grid">
+              <div class="param-cell"><label for="ctl-codec" data-i18n="ParamCodec">编码格式</label><select id="ctl-codec" data-bind="profile.codec"><option value="av1" data-i18n="OptCodecAv1">AV1 10-bit (NVENC)</option><option value="hevc" data-i18n="OptCodecHevc">HEVC Main10 (NVENC)</option><option value="av1_cpu" data-i18n="OptCodecAv1Cpu">AV1 10-bit CPU (libsvtav1)</option><option value="hevc_cpu" data-i18n="OptCodecHevcCpu">HEVC 10-bit CPU (libx265)</option></select></div>
+              <div class="param-cell"><label for="ctl-preset" data-i18n="ParamPreset">预设</label><select id="ctl-preset" data-bind="profile.preset" data-type="number"><option value="1" data-i18n="OptPresetP1">P1 最快</option><option value="2" data-i18n="OptPresetP2">P2 更快</option><option value="3" data-i18n="OptPresetP3">P3 快速</option><option value="4" data-i18n="OptPresetP4">P4 中等</option><option value="5" data-i18n="OptPresetP5">P5 平衡</option><option value="6" data-i18n="OptPresetP6">P6 高质</option><option value="7" data-i18n="OptPresetP7">P7 极致</option></select></div>
+              <div class="param-cell"><label for="ctl-rc" data-i18n="ParamRateControl">码率控制</label><select id="ctl-rc" data-bind="profile.rateControl"><option value="cq" data-i18n="OptRcCq">CQ 恒定感知画质 (Spatial AQ)</option><option value="vbr" data-i18n="OptRcVbr">VBR 动态码率</option><option value="cbr" data-i18n="OptRcCbr">CBR 恒定码率</option><option value="qp" data-i18n="OptRcQp">Constant QP (I/P/B 阶梯)</option><option value="crf" data-i18n="OptRcCrf">CRF 纯 CPU 母版软编</option></select></div>
+              <div class="param-cell" data-visible-when="profile.rateControl=cbr||profile.rateControl=vbr"><label for="ctl-bitrate" data-i18n="ParamBitrate">码率 (kbps)</label><input id="ctl-bitrate" type="number" min="0" max="200000" step="500" data-bind="profile.bitrateKbps" data-type="number"></div>
+              <div class="param-cell" data-visible-when="profile.rateControl=cq||profile.rateControl=qp||profile.rateControl=crf"><label for="ctl-qp" data-i18n="ParamCq">CQ / QP / CRF 值</label><input id="ctl-qp" type="number" min="0" max="51" data-bind="profile.qp" data-type="number"></div>
+            </div>
+          </div>
+          <div class="param-group">
+            <div class="param-group-title" data-i18n="WuiGroupVsrFruc">超分与补帧</div>
+            <div class="param-grid">
+              <div class="param-cell"><label for="ctl-res" data-i18n="ParamResolution">分辨率</label><select id="ctl-res" data-bind="profile.resolution"><option value="4k" data-i18n="OptRes4k">4K UHD</option><option value="2k" data-i18n="OptRes2k">2K QHD</option><option value="fhd" data-i18n="OptResFhd">FHD 1080p</option><option value="native" data-i18n="OptResNative">原生</option></select></div>
+              <div class="param-cell"><label for="ctl-geom" data-i18n="ParamAspect">画幅</label><select id="ctl-geom" data-bind="profile.geometry"><option value="auto" data-i18n="OptGeomAuto">自动检测</option><option value="pillarbox" data-i18n="OptGeomPillar">Pillarbox</option></select></div>
+              <div class="param-cell"><label for="ctl-vsrq" data-i18n="ParamVsrQuality">VSR 档位</label><select id="ctl-vsrq" data-bind="profile.vsrQuality" data-type="number"><option value="1" data-i18n="OptVsrQ1">Level 1</option><option value="2" data-i18n="OptVsrQ2">Level 2</option><option value="3" data-i18n="OptVsrQ3">Level 3</option><option value="4" data-i18n="OptVsrQ4">Level 4</option></select></div>
+              <div class="param-cell"><label class="checkbox-label"><input type="checkbox" data-bind="profile.vsrEnabled"><span data-i18n="ParamVsr">启用 RTX VSR</span></label></div>
+              <div class="param-cell full"><label for="ctl-fps" data-i18n="WuiParamFps">帧率 (FRUC)</label><select id="ctl-fps" data-bind="profile.fpsMode"><option value="original" data-i18n="OptFpsOriginal">原帧率</option><option value="60-nvofa" data-i18n="OptFps60Nvofa">60 FPS NVOFA</option><option value="120-nvofa" data-i18n="OptFps120Nvofa">120 FPS NVOFA</option><option value="60-rife" data-i18n="OptFps60Rife">60 FPS RIFE</option><option value="120-rife" data-i18n="OptFps120Rife">120 FPS RIFE</option></select></div>
+              <div class="param-cell full"><label for="ctl-pipeline-order" data-i18n="ParamPipelineOrder">管线拓扑顺序</label><select id="ctl-pipeline-order" data-bind="profile.pipelineOrder"><option value="vsr-first" data-i18n="OptPipeVsrFirst">VSR -> FG (先超分后补帧 - 默认)</option><option value="fg-first" data-i18n="OptPipeFgFirst">FG -> VSR (先补帧后超分)</option></select></div>
+              <div class="param-cell full" data-visible-when="profile.fpsMode=60-rife||profile.fpsMode=120-rife"><label for="ctl-rife" data-i18n="WuiParamRifeEngine">RIFE 引擎</label><div class="param-input-wrap"><input id="ctl-rife" type="text" spellcheck="false" placeholder="models/rife_v4.25.engine" data-bind="profile.rifeEngine"><button class="btn-icon" data-browse="profile.rifeEngine" data-i18n="BtnBrowse" title="浏览"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"/></svg></button></div></div>
+            </div>
+          </div>
+          <div class="param-group">
+            <div class="param-group-title" data-i18n="WuiGroupHdr">HDR 色彩科学</div>
+            <div class="param-grid">
+              <div class="param-cell"><label for="ctl-nits" data-i18n="ParamPeakNits">峰值亮度 (nits)</label><input id="ctl-nits" type="number" min="400" max="4000" step="50" data-bind="profile.peakNits" data-type="number"></div>
+              <div class="param-cell"><label for="ctl-gpu" data-i18n="WuiParamGpu">GPU 序号</label><input id="ctl-gpu" type="number" min="0" max="15" data-bind="profile.gpu" data-type="number"></div>
+              <div class="param-cell"><label for="ctl-frames" data-i18n="WuiParamFrames">帧数上限</label><input id="ctl-frames" type="number" min="0" max="100000000" data-bind="profile.frames" data-type="number"></div>
+              <div class="param-cell full"><label for="ctl-lut" data-i18n="WuiParamLut">3D LUT</label><div class="param-input-wrap"><input id="ctl-lut" type="text" spellcheck="false" data-bind="profile.lut"><button class="btn-icon" data-browse="profile.lut" data-i18n="BtnBrowse" title="浏览"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"/></svg></button></div></div>
+              <div class="param-cell"><label class="checkbox-label"><input type="checkbox" data-bind="profile.copyAudio"><span data-i18n="ParamAudioCopy">音频直通</span></label></div>
+              <div class="param-cell"><label class="checkbox-label"><input type="checkbox" data-bind="profile.hdr10plus"><span data-i18n="WuiParamHdr10plus">HDR10+</span></label></div>
+              <div class="param-cell"><label class="checkbox-label"><input type="checkbox" data-bind="ui.autoOutput"><span data-i18n="WuiAutoOutput">自动输出名</span></label></div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
   </section>
+
+  <!-- ══════════════════ WORKSPACE 2: PLAYER ══════════════════ -->
+  <section id="ws-player" class="workspace" data-workspace-panel="player">
+    <div class="player-layout">
+      <div class="player-stage-wrap">
+        <div class="player-stage" id="player-stage" data-ab-mode="split">
+          <video id="player-video-original" muted playsinline preload="metadata"></video>
+          <video id="player-video-remaster" muted playsinline preload="metadata"></video>
+          <div class="stage-placeholder" id="player-placeholder">
+            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="var(--text-muted)" stroke-width="1" opacity="0.3"><circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16"/></svg>
+            <span data-i18n="WuiPlayerPlaceholder">打开媒体开始 A/B 画质审看</span>
+          </div>
+          <span class="ab-tag left">ORIGINAL</span>
+          <span class="ab-tag right">RTX REMASTER</span>
+          <div id="player-osd" class="player-osd"></div>
+          <div id="ab-handle" class="ab-handle" role="slider" aria-label="A/B 分屏" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
+        </div>
+        <div class="transport">
+          <div class="scrubber-row">
+            <input id="player-scrub" type="range" min="0" max="1000" value="0" aria-label="时间轴">
+            <span class="timecode"><b id="player-tc">00:00:00.000</b> / <span id="player-duration">00:00:00.000</span> · <span id="player-frame">frame 0</span></span>
+          </div>
+          <div class="transport-row">
+            <div class="transport-group">
+              <button id="btn-player-open" class="t-btn" data-browse="player.input" data-i18n="WuiPlayerOpen">📂 打开</button>
+              <button id="btn-player-head" class="t-btn">⏮</button>
+              <button id="btn-player-prev" class="t-btn">⏪</button>
+              <button id="btn-player-play" class="t-btn t-btn-play">▶</button>
+              <button id="btn-player-next" class="t-btn">⏩</button>
+              <button id="btn-player-stop" class="t-btn">⏹</button>
+            </div>
+            <div class="transport-group">
+              <span class="group-label">A/B</span>
+              <button class="capsule active" data-ab-mode="split" data-i18n="WuiAbSplit">分屏</button>
+              <button class="capsule" data-ab-mode="remaster" data-i18n="WuiAbRemaster">重制</button>
+              <button class="capsule" data-ab-mode="original" data-i18n="WuiAbOriginal">原片</button>
+              <input id="player-split" type="range" min="0" max="100" step="1" class="split-range" data-bind="player.splitPos" data-type="number" aria-label="分屏位置">
+            </div>
+            <div class="transport-group">
+              <span class="group-label">VSR</span>
+              <button class="capsule" data-vsr-level="1">L1</button>
+              <button class="capsule" data-vsr-level="2">L2</button>
+              <button class="capsule" data-vsr-level="3">L3</button>
+              <button class="capsule" data-vsr-level="4">L4</button>
+            </div>
+            <div class="transport-group">
+              <span class="group-label">FRUC</span>
+              <button class="capsule" data-fps-mode="60-nvofa">OFA 60</button>
+              <button class="capsule" data-fps-mode="60-rife">RIFE 60</button>
+              <button class="capsule" data-fps-mode="120-nvofa">120fps</button>
+              <select id="player-speed" data-bind="player.speed" data-type="number" aria-label="倍速">
+                <option value="0.25">0.25x</option><option value="0.5">0.5x</option>
+                <option value="1">1.0x</option><option value="1.5">1.5x</option><option value="2">2.0x</option>
+              </select>
+            </div>
+            <span class="spacer"></span>
+            <button id="btn-player-osd" class="t-btn">OSD</button>
+            <button id="btn-player-send" class="btn btn-primary btn-sm" data-i18n="WuiPlayerSend">⚡ 送入转码器</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════ WORKSPACE 3: NLE ══════════════════ -->
+  <section id="ws-nle" class="workspace" data-workspace-panel="nle">
+    <div class="nle-layout">
+      <aside class="glass-panel nle-bin" id="nle-bin">
+        <div class="panel-header"><h2 class="panel-title" data-i18n="WuiNleBinTitle">素材箱</h2><span class="badge-glow">PROJECT</span></div>
+        <div class="bin-tabs">
+          <button class="capsule active" data-bin-tab="media" data-i18n="WuiNleTabMedia">素材</button>
+          <button class="capsule" data-bin-tab="lut">LUT</button>
+          <button class="capsule" data-bin-tab="fx">RTX FX</button>
+        </div>
+        <div class="bin-list" id="bin-list"></div>
+        <button id="btn-nle-import" class="btn btn-sm btn-ghost full-w" data-browse="nle.pendingImport" data-browse-mode="nle-bin" data-i18n="WuiNleImport">+ 导入素材</button>
+      </aside>
+      <section class="glass-panel nle-monitor" id="nle-monitor">
+        <div class="panel-header"><h2 class="panel-title" data-i18n="WuiNleMonitorTitle">节目监视器</h2><span class="badge-glow">PROGRAM</span></div>
+        <div class="nle-tc-bar"><span>SMPTE <b id="nle-tc">00:00:00:00</b></span><span class="flicks-label" id="nle-flicks">0 Flicks</span><span class="seq-name" id="nle-seq-name">4K_60FPS_HDR10_Master_Seq</span></div>
+        <div class="nle-viewport"><video id="nle-video" muted playsinline preload="metadata"></video><div class="stage-placeholder">PROGRAM MONITOR</div></div>
+        <div class="nle-transport">
+          <button id="btn-nle-in" class="t-btn">[ I</button><button id="btn-nle-out" class="t-btn">O ]</button>
+          <button id="btn-nle-prev" class="t-btn">⏪</button><button id="btn-nle-play" class="t-btn t-btn-play">▶</button><button id="btn-nle-next" class="t-btn">⏩</button>
+          <button id="btn-nle-razor" class="t-btn">✂</button>
+        </div>
+      </section>
+      <aside class="glass-panel nle-effects" id="nle-effects">
+        <div class="panel-header"><h2 class="panel-title" data-i18n="WuiNleEffectsTitle">特效控制台</h2><span class="badge-glow">LUMETRI</span></div>
+        <div class="fx-scroll">
+          <div class="param-group"><div class="param-group-title" data-i18n="WuiNleGroupTrim">时间裁剪</div><div class="param-grid"><div class="param-cell"><label for="nle-in-ms" data-i18n="WuiNleInMs">入点 (ms)</label><input id="nle-in-ms" type="number" min="0" max="600000" data-bind="nle.inMs" data-type="number"></div><div class="param-cell"><label for="nle-out-ms" data-i18n="WuiNleOutMs">出点 (ms)</label><input id="nle-out-ms" type="number" min="0" max="600000" data-bind="nle.outMs" data-type="number"></div><div class="param-cell full"><label for="nle-frames" data-i18n="WuiParamFrames">帧数上限</label><input id="nle-frames" type="number" min="0" max="100000000" data-bind="profile.frames" data-type="number"></div></div></div>
+          <div class="param-group"><div class="param-group-title">RTX AI</div><div class="param-grid"><div class="param-cell"><label class="checkbox-label"><input type="checkbox" data-bind="profile.vsrEnabled"> VSR</label></div><div class="param-cell"><label for="nle-vsrq" data-i18n="ParamVsrQuality">档位</label><select id="nle-vsrq" data-bind="profile.vsrQuality" data-type="number"><option value="1">L1</option><option value="2">L2</option><option value="3">L3</option><option value="4">L4</option></select></div><div class="param-cell"><label for="nle-fps" data-i18n="WuiParamFps">补帧</label><select id="nle-fps" data-bind="profile.fpsMode"><option value="original" data-i18n="OptFpsOriginal">原始</option><option value="60-nvofa" data-i18n="OptFps60Nvofa">OFA 60</option><option value="120-nvofa" data-i18n="OptFps120Nvofa">OFA 120</option><option value="60-rife" data-i18n="OptFps60Rife">RIFE 60</option><option value="120-rife" data-i18n="OptFps120Rife">RIFE 120</option></select></div><div class="param-cell full"><label for="nle-pipeline-order" data-i18n="ParamPipelineOrder">管线拓扑顺序</label><select id="nle-pipeline-order" data-bind="profile.pipelineOrder"><option value="vsr-first" data-i18n="OptPipeVsrFirst">VSR -> FG (先超分后补帧 - 默认)</option><option value="fg-first" data-i18n="OptPipeFgFirst">FG -> VSR (先补帧后超分)</option></select></div><div class="param-cell full"><label for="nle-rife" data-i18n="WuiParamRifeEngine">RIFE 引擎</label><input id="nle-rife" type="text" data-bind="profile.rifeEngine" placeholder="models/rife_v4.25.engine"></div></div></div>
+          <div class="param-group"><div class="param-group-title" data-i18n="WuiGroupHdr">TrueHDR 色彩</div><div class="param-grid"><div class="param-cell full"><label for="nle-nits-range">Peak Nits <span id="nle-nits-value">1000</span></label><input id="nle-nits-range" type="range" min="400" max="4000" step="50" data-bind="profile.peakNits" data-type="number"><input id="nle-nits" type="number" min="400" max="4000" step="50" data-bind="profile.peakNits" data-type="number"></div><div class="param-cell"><label class="checkbox-label"><input type="checkbox" data-bind="profile.hdr10plus"> HDR10+</label></div><div class="param-cell full"><label for="nle-lut">3D LUT</label><div class="param-input-wrap"><input id="nle-lut" type="text" data-bind="profile.lut"><button class="btn-icon" data-browse="profile.lut" title="浏览"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z"/></svg></button></div></div></div></div>
+          <button id="btn-nle-export" class="btn btn-primary full-w" data-i18n="WuiNleExport">🚀 导出至转码器渲染</button>
+        </div>
+      </aside>
+      <section class="glass-panel nle-timeline" id="nle-timeline">
+        <div class="tl-header">
+          <div class="tl-tools"><button class="capsule active" data-nle-tool="select" id="nle-tool-select" data-i18n="WuiNleToolSelect">V 选择</button><button class="capsule" data-nle-tool="razor" id="nle-tool-razor" data-i18n="WuiNleToolRazor">C 剃刀</button><button class="capsule" data-nle-tool="snap" id="nle-tool-snap">Snap</button></div>
+          <div class="tl-zoom"><label for="nle-zoom">Zoom <span id="nle-zoom-value">100</span>%</label><input id="nle-zoom" type="range" min="50" max="200" step="10" data-bind="nle.zoom" data-type="number"></div>
+          <span class="badge-glow">705,600,000 Hz</span>
+        </div>
+        <div class="timeline-wrap"><div class="timeline"><div class="timeline-ruler" id="timeline-ruler"><div class="timeline-inout" id="timeline-inout"></div><div class="playhead" id="timeline-playhead"></div></div><div id="timeline-tracks"></div></div></div>
+      </section>
+    </div>
+  </section>
+
+  <footer class="app-footer">
+    <span data-i18n="WuiFoot">state.json · JSON 通信 (HTTP + SSE)</span>
+    · NVIDIA RTX Studio · SSOT
+  </footer>
+
 </main>
 
-<!-- ============================ path browser modal ============================ -->
-<div id="fs-modal" class="modal" hidden>
-  <div class="modal-box">
-    <div class="modal-head">
-      <strong id="fs-title">…</strong>
-      <button id="fs-close" class="btn btn-ghost">✕</button>
-    </div>
-    <div class="modal-path">
-      <input id="fs-path" type="text" spellcheck="false">
-      <button id="fs-go" class="btn" data-i18n="WuiFsGo">跳转</button>
-      <button id="fs-up" class="btn" data-i18n="WuiFsUp">上级</button>
-    </div>
+<!-- ═══════════ FILE BROWSER MODAL ═══════════ -->
+<div id="fs-modal" class="modal-overlay" hidden>
+  <div class="modal-dialog">
+    <div class="modal-head"><strong id="fs-title">…</strong><button id="fs-close" class="btn-icon" aria-label="关闭"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+    <div class="modal-path"><input id="fs-path" type="text" spellcheck="false" placeholder="输入路径..."><button id="fs-go" class="btn btn-sm" data-i18n="WuiFsGo">跳转</button><button id="fs-up" class="btn btn-sm" data-i18n="WuiFsUp">上级</button><button id="fs-select-all" class="btn btn-sm btn-ghost" data-i18n="WuiFsSelectAll" hidden>全选视频</button></div>
     <div id="fs-list" class="fs-list" role="listbox"></div>
-    <div class="modal-foot">
-      <span id="fs-hint" class="sub"></span>
-      <button id="fs-select" class="btn btn-primary" data-i18n="WuiFsSelect">选择当前</button>
-    </div>
+    <div class="modal-foot"><span id="fs-hint" class="hint-text"></span><button id="fs-select" class="btn btn-primary" data-i18n="WuiFsSelect">选择</button></div>
   </div>
 </div>
-
-<footer class="foot">
-  <span data-i18n="WuiFoot">状态文档: state.json · 前后端仅以 JSON 通信 (HTTP + SSE)</span>
-  · NVIDIA RTX Studio Workstation · 三态共享同一 SSOT 状态树
-</footer>
 
 </body>
 </html>

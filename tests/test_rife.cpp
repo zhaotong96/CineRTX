@@ -760,3 +760,27 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
     releaseAll();
     RTX_CHECK(pass);
 }
+
+
+#include "rtx/shot_segmenter.h"
+
+RTX_TEST(test_shot_group_segmenter_hard_and_subtle_cuts) {
+    rtx::ShotGroupSegmenter seg;
+    std::array<uint32_t, 64> calm{};
+    calm.fill(10000);
+    const auto d0 = seg.evaluate(calm, 1920, 1080, 255);
+    RTX_CHECK(!d0.is_scene_cut);
+
+    // Subtle cut: left half of screen changes sharply (global avg diff ~0.11)
+    std::array<uint32_t, 64> subtle_cut{};
+    for (int row = 0; row < 8; ++row) {
+        for (int col = 0; col < 8; ++col) {
+            subtle_cut[row * 8 + col] = (col < 4) ? 1600000u : 20000u;
+        }
+    }
+    const auto d1 = seg.evaluate(subtle_cut, 1920, 1080, 255);
+    RTX_CHECK(d1.is_scene_cut);
+    RTX_CHECK(d1.reset_vsr_temporal);
+    RTX_CHECK(d1.force_encoder_idr);
+    RTX_CHECK_EQ(d1.shot_group_id, static_cast<uint64_t>(1));
+}
