@@ -13,7 +13,6 @@ DynLibrary::DynLibrary(DynLibrary&& other) noexcept
       last_error_(std::move(other.last_error_)) {
     other.handle_ = nullptr;
 }
-
 DynLibrary& DynLibrary::operator=(DynLibrary&& other) noexcept {
     if (this != &other) {
         close();
@@ -24,5 +23,4 @@ DynLibrary& DynLibrary::operator=(DynLibrary&& other) noexcept {
     }
     return *this;
 }
-
 }  // namespace rtx_shim

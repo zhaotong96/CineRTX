@@ -19,6 +19,7 @@ const EmbeddedShimApi kEmbeddedShimApi{
     &rtx_shim_decoder_submit,
     &rtx_shim_decoder_receive,
     &rtx_shim_decoder_flush,
+    &rtx_shim_decoder_reset,
     &rtx_shim_decoder_release_frame,
     &rtx_shim_decoder_download,
     &rtx_shim_decoder_get_stats,

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -24,16 +25,24 @@ namespace rtx {
 // Phase 7 (Task 7-B3): one source stream eligible for bitstream-level
 // passthrough into the output container (every audio stream plus the
 // subtitle streams the output container can carry natively).
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct PassthroughStreamInfo {
     int stream_index = -1;
     int codec_type = 0;  // 1 = audio (AVMEDIA_TYPE_AUDIO), 2 = subtitle
     int codec_id = 0;
     std::string codec_name;
     Rational time_base{1, 1000};
-    // FFmpeg AVCodecParameters clone owning the real extradata/layout.
+// FFmpeg AVCodecParameters clone owning the real extradata/layout.
     std::shared_ptr<void> opaque_codecpar;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct MediaInfo {
     std::string container;
     std::string video_codec;
@@ -49,38 +58,48 @@ struct MediaInfo {
     int subtitle_streams = 0;
     std::vector<AudioTrackInfo> audio_tracks;
     int primary_audio_index = -1;
-    // Phase 7 (Task 7-B3 / verdict §3.2): full multi-audio + subtitle
-    // passthrough set (supersedes the single primary_audio_index).
+// Phase 7 (Task 7-B3 / verdict §3.2): full multi-audio + subtitle
+// passthrough set (supersedes the single primary_audio_index).
     std::vector<PassthroughStreamInfo> passthrough_streams;
     bool hdr_source = false;
     std::string format_name;
 
-    // Codec configuration record exactly as stored in the source container
-    // (avcC / hvcC / AV1CodecConfigurationRecord).  Empty for Annex-B streams.
+// Codec configuration record exactly as stored in the source container
+// (avcC / hvcC / AV1CodecConfigurationRecord).  Empty for Annex-B streams.
     std::vector<uint8_t> extradata;
-    // True when packets produced/consumed by this side of the pipeline use
-    // Annex-B start codes.  NVDEC/NVENC speak Annex-B; MP4 stores length
-    // prefixed NAL units.
+// True when packets produced/consumed by this side of the pipeline use
+// Annex-B start codes.  NVDEC/NVENC speak Annex-B; MP4 stores length
+// prefixed NAL units.
     bool annex_b = false;
     ColorDescription color{};
     Hdr10Metadata hdr{};
+    std::array<int32_t, 9> display_matrix{};
+    bool has_display_matrix{false};
 };
 
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
+// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
 class IDemuxer {
 public:
     virtual ~IDemuxer() = default;
     virtual Result<MediaInfo> open(const std::filesystem::path& path) = 0;
     virtual Result<Packet> readPacket() = 0;
     virtual std::vector<std::string> warnings() const { return {}; }
-    // Index of the best audio stream, or -1 when the container has none.
+// Index of the best audio stream, or -1 when the container has none.
     virtual int audioStreamIndex() const noexcept { return -1; }
-    // Phase 7 scrubbing / Phase 8 checkpoint recovery: repositions the video
-    // stream to the latest key frame at or before `video_stream_pts` (PTS in
-    // the video stream's own time base).  Subsequent readPacket() calls
-    // deliver packets from that point.
+// Phase 7 scrubbing / Phase 8 checkpoint recovery: repositions the video
+// stream to the latest key frame at or before `video_stream_pts` (PTS in
+// the video stream's own time base).  Subsequent readPacket() calls
+// deliver packets from that point.
     virtual Result<void> seekToKeyframeBefore([[maybe_unused]] int64_t video_stream_pts) { return err(ErrorCode::Unsupported, "this demuxer cannot seek"); }
 };
 
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
+// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
 class IMuxer {
 public:
     virtual ~IMuxer() = default;
@@ -94,13 +113,15 @@ public:
 std::unique_ptr<IDemuxer> makeFfmpegDemuxer();
 std::unique_ptr<IMuxer> makeFfmpegMuxer();
 
-// ---------------------------------------------------------------------------
 // Phase 8 (Task 8-B1): broadcast-tier software decoder (ProRes / DNxHR).
 // NVDEC has no hardware support for these codecs, so the frames are decoded
 // with the statically linked FFmpeg decoders and converted to P010 planes in
 // host memory; the bridge then DMA-uploads them into device memory for the
 // normal VSR + TrueHDR + NVENC remaster path.
-// ---------------------------------------------------------------------------
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct DecodedVideoFrame {
     std::vector<uint8_t> y_plane;   // P010 luma (uint16 LE, 10-bit << 6)
     std::vector<uint8_t> uv_plane;  // interleaved UV (uint16 LE, << 6)
@@ -117,9 +138,7 @@ class IDemuxer;
 // Compile-time invariant: the media container layer is always present.
 constexpr bool ffmpegAvailable() noexcept { return true; }
 
-// ---------------------------------------------------------------------------
 // Zero-disk container I/O (ACT-STATIC-03)
-// ---------------------------------------------------------------------------
 std::unique_ptr<IDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes);
 std::unique_ptr<IMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
                                         std::string container_format = "matroska");

@@ -15,6 +15,10 @@
 
 namespace rtx {
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: 运行期动态加载 MIT rtx_shim.dll 并绑定 17 个版本化 C ABI 函数指针的独占句柄宿主，std::unique_ptr 无法同时封装模块句柄与全量导出符号表生命周期。
+// Invariant: 析构前自动卸载动态库句柄；open() 成功前所有 C 函数指针保持空值，loaded() 为 true 时全套必需入口非空。
 class NvidiaShim {
 public:
     NvidiaShim() = default;
@@ -22,8 +26,8 @@ public:
     NvidiaShim(const NvidiaShim&) = delete;
     NvidiaShim& operator=(const NvidiaShim&) = delete;
 
-    // Loads rtx_shim.dll / librtx_shim.so from RTX_SHIM_PATH or the executable
-    // directory and resolves the stage-1 codec entry points.
+// Loads rtx_shim.dll / librtx_shim.so from RTX_SHIM_PATH or the executable
+// directory and resolves the stage-1 codec entry points.
     bool open(std::string* error = nullptr);
     void close();
     bool loaded() const noexcept { return handle_ != nullptr || embedded_; }
@@ -38,6 +42,9 @@ public:
                             int64_t dts, int32_t flags) const;
     RtxResult decoderReceive(RtxDecoder* decoder, RtxFrameDesc* frame) const;
     RtxResult decoderFlush(RtxDecoder* decoder) const;
+// Phase 11.2 (ABI v3): non-terminal sequence reset -- GOP seek keeps the
+// decoder instance and its CUDA primary context alive.
+    RtxResult decoderReset(RtxDecoder* decoder) const;
     RtxResult decoderReleaseFrame(RtxDecoder* decoder, uint64_t slot_index) const;
     RtxResult decoderStats(RtxDecoder* decoder, RtxHwStats* stats) const;
     const char* decoderLastError(RtxDecoder* decoder) const;
@@ -72,6 +79,7 @@ private:
                                               int64_t, int32_t) = nullptr;
     RtxResult(RTX_SHIM_CALL* decoder_receive_)(RtxDecoder*, RtxFrameDesc*) = nullptr;
     RtxResult(RTX_SHIM_CALL* decoder_flush_)(RtxDecoder*) = nullptr;
+    RtxResult(RTX_SHIM_CALL* decoder_reset_)(RtxDecoder*) = nullptr;
     RtxResult(RTX_SHIM_CALL* decoder_release_)(RtxDecoder*, uint64_t) = nullptr;
     RtxResult(RTX_SHIM_CALL* decoder_stats_)(RtxDecoder*, RtxHwStats*) = nullptr;
     const char*(RTX_SHIM_CALL* decoder_last_error_)(RtxDecoder*) = nullptr;

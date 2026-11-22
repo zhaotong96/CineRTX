@@ -85,9 +85,9 @@ endif()
 if(NOT RTX_ZIG_EXECUTABLE)
     find_program(_rtx_native_compiler NAMES cl clang++ clang g++ gcc)
     if(NOT _rtx_native_compiler AND DEFINED ENV{VCToolsInstallDir})
-        # Visual Studio's CMake integration always defines VCToolsInstallDir
-        # and has already applied the developer environment, so cl.exe is
-        # usable even when PATH itself was trimmed.
+# Visual Studio's CMake integration always defines VCToolsInstallDir
+# and has already applied the developer environment, so cl.exe is
+# usable even when PATH itself was trimmed.
         file(TO_CMAKE_PATH "$ENV{VCToolsInstallDir}" _rtx_vc_tools)
         file(GLOB _rtx_cl_candidates "${_rtx_vc_tools}/bin/Host*/x64/cl.exe")
         if(_rtx_cl_candidates)

@@ -1,29 +1,38 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
-//
-// Runtime loader for the MIT-licensed rtx_ngx_bridge remaster contract.
-// The GPL core never touches an NVIDIA SDK header: it sees only the pure C ABI
-// in shim/ngx_bridge_abi.h.  This class resolves the append-only v2 ABI
-// (query_caps / create / destroy / remaster / get_remaster_stats / last_error)
-// and rejects any bridge whose rtx_ngx_bridge_abi_version is older than the
-// remaster contract.
-//
-// Two binding modes share that one ABI.  A sidecar rtx_ngx_bridge.dll is loaded
-// with LoadLibraryExW when present, which is the only mode permitted to carry
-// NVIDIA's proprietary nvsdk_ngx_s.lib (the mandatory Windows build).  Otherwise
-// the SDK-free bridge is linked into the image and RTX_EMBEDDED_NGX_BRIDGE binds
-// the same symbols directly, so the shipped product stays a single executable.
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
+#include <tuple>
 
 #include "shim/ngx_bridge_abi.h"
 
 namespace rtx {
 
+struct MediaInfo;
+class IVideoFrameSink;
+
+using PreviewSlotFlags = std::shared_ptr<std::array<std::atomic<std::uint32_t>, 3>>;
+
+using PreviewSlotBorrow =
+    std::tuple<void*, void*, std::uint32_t, PreviewSlotFlags>;
+
+using BorrowCallback = std::function<bool(std::uint32_t& slot, PreviewSlotBorrow& borrow)>;
+
+[[nodiscard]] std::unique_ptr<IVideoFrameSink> createHeadlessPreviewSink(
+    const MediaInfo& info, std::function<void()> on_frame, BorrowCallback& out_borrow);
+
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 封装 NGX/D3D12 桥接函数表、嵌入/动态模块句柄与 3 槽预览注册表的有状态装载宿主，std::unique_ptr 无法表达多函数指针表与活动桥接原子发布不变量。
+// Invariant: open()/close() 成对管理模块句柄与函数表；preview_slot_flags_ 通过 shared_ptr 共享所有权，避免 GPU 异步退役回调悬空访问。
 class NgxRemasterBridge {
 public:
     NgxRemasterBridge() = default;
@@ -31,11 +40,6 @@ public:
     NgxRemasterBridge(const NgxRemasterBridge&) = delete;
     NgxRemasterBridge& operator=(const NgxRemasterBridge&) = delete;
 
-    // Loads rtx_ngx_bridge.dll from RTX_NGX_BRIDGE_PATH, then
-    // <exe_dir>/plugins/nvidia_rtx/, then the executable directory, and
-    // verifies the ABI version plus the remaster entry points.  When the
-    // executable was built with RTX_EMBEDDED_NGX_BRIDGE the sidecar is optional:
-    // a missing or stale DLL falls back to the in-image bridge.
     bool open(std::string* error = nullptr);
     void close();
     bool loaded() const noexcept { return handle_ != nullptr || embedded_; }
@@ -48,16 +52,33 @@ public:
     RtxResult remaster(RtxNgxBridge* bridge, const RtxNgxRemasterInput* input,
                        RtxNgxRemasterOutput* output, RtxNgxRemasterStats* stats) const;
     RtxResult getRemasterStats(RtxNgxBridge* bridge, RtxNgxRemasterStats* stats) const;
-    // Phase 7 (ABI v3) extensions.  Resolved optionally so a stale sidecar
-    // still serves the base remaster contract; the callers handle RTX_ERR.
     RtxResult setLut3d(RtxNgxBridge* bridge, const uint16_t* lut_half4_data,
                        int32_t grid_size) const;
     RtxResult previewBuffer(RtxNgxBridge* bridge, uint32_t slot, uint64_t* device_ptr,
                             uint32_t* pitch) const;
     RtxResult downloadPreview(RtxNgxBridge* bridge, void* destination,
                               size_t destination_bytes) const;
-    // Phase 8 (Task 8-B1): upload a host P010 frame for the software-decode
-    // path (optional resolution, append-only ABI).
+    int32_t borrowPreview(RtxNgxBridge* bridge, uint32_t slot, void** out_d3d12_device,
+                          void** out_d3d12_resource, uint32_t* out_pitch) const;
+    bool hasBorrowPreviewApi() const noexcept { return borrow_preview_ != nullptr; }
+    int32_t playbackPack(RtxNgxBridge* bridge, uint64_t y_plane, uint64_t uv_plane,
+                         uint32_t y_pitch, uint32_t uv_pitch, uint32_t width, uint32_t height,
+                         int32_t format, int32_t full_range, int32_t matrix, uint32_t slot) const;
+    bool hasPlaybackPackApi() const noexcept { return playback_pack_ != nullptr; }
+
+    [[nodiscard]] bool acquirePreviewSlot(std::uint32_t* out_slot) noexcept;
+    void publishPreviewSlot(std::uint32_t slot) noexcept;
+    [[nodiscard]] PreviewSlotFlags previewSlotFlagsArray() noexcept;
+    [[nodiscard]] std::uint32_t latestPublishedSlot() const noexcept;
+    [[nodiscard]] bool borrowPreviewSlot(std::uint32_t slot, void** out_d3d12_device,
+                                         void** out_d3d12_resource,
+                                         std::uint32_t* out_pitch) noexcept;
+    static void publishActivePreviewBridge(NgxRemasterBridge& loader, RtxNgxBridge* bridge);
+    static void clearActivePreviewBridge(NgxRemasterBridge* loader) noexcept;
+    static bool borrowActivePreview(std::uint32_t slot, void** out_d3d12_device,
+                                    void** out_d3d12_resource, std::uint32_t* out_pitch);
+    [[nodiscard]] static std::uint32_t latestPreviewSlot();
+    [[nodiscard]] static PreviewSlotFlags previewSlotFlags();
     RtxResult uploadFrame(RtxNgxBridge* bridge, const void* y_plane, const void* uv_plane,
                           uint32_t y_pitch, uint32_t uv_pitch, int32_t width, int32_t height,
                           uint64_t* y_device, uint64_t* uv_device) const;
@@ -65,6 +86,9 @@ public:
                              uint32_t pitch, float alpha, uint64_t out_nv12) const;
     uint64_t getInterpBuffer(RtxNgxBridge* bridge, uint32_t width, uint32_t height) const;
     int32_t initRife(RtxNgxBridge* bridge, const char* engine_path, uint32_t width, uint32_t height) const;
+    int32_t initRifeEx(RtxNgxBridge* bridge, const char* engine_path,
+                       const RtxRifeInitConfig* config, uint64_t* out_trt_peak_bytes) const;
+    bool hasRifeExApi() const noexcept { return init_rife_ex_ != nullptr; }
     int32_t interpolateRife(RtxNgxBridge* bridge, uint64_t prev_nv12, uint64_t curr_nv12,
                            uint32_t pitch, float alpha, uint64_t out_nv12, int32_t full_range,
                            int32_t* scene_cut) const;
@@ -76,11 +100,12 @@ public:
     const char* lastError(RtxNgxBridge* bridge) const;
 
 private:
-#if defined(RTX_EMBEDDED_NGX_BRIDGE)
-    // Binds the v2 remaster contract to the bridge that was statically linked
-    // into this image.  Same C ABI, no LoadLibraryExW, no sidecar required.
-    bool bindEmbedded(std::string* error);
-#endif
+
+    static constexpr std::uint32_t kPreviewSlotCount = 3;
+
+    PreviewSlotFlags preview_slot_flags_ = std::make_shared<std::array<std::atomic<std::uint32_t>, kPreviewSlotCount>>();
+    std::atomic<std::uint32_t> preview_latest_slot_{0};
+    RtxNgxBridge* preview_bridge_ = nullptr;
 
     void* handle_ = nullptr;
     bool embedded_ = false;
@@ -98,12 +123,18 @@ private:
     RtxResult(RTX_SHIM_CALL* preview_buffer_)(RtxNgxBridge*, uint32_t, uint64_t*,
                                               uint32_t*) = nullptr;
     RtxResult(RTX_SHIM_CALL* download_preview_)(RtxNgxBridge*, void*, size_t) = nullptr;
+    int32_t(RTX_SHIM_CALL* borrow_preview_)(RtxNgxBridge*, uint32_t, void**, void**,
+                                            uint32_t*) = nullptr;
+    int32_t(RTX_SHIM_CALL* playback_pack_)(RtxNgxBridge*, uint64_t, uint64_t, uint32_t, uint32_t,
+                                           uint32_t, uint32_t, int32_t, int32_t, int32_t,
+                                           uint32_t) = nullptr;
     RtxResult(RTX_SHIM_CALL* upload_frame_)(RtxNgxBridge*, const void*, const void*, uint32_t,
                                             uint32_t, int32_t, int32_t, uint64_t*,
                                             uint64_t*) = nullptr;
     int32_t(RTX_SHIM_CALL* interpolate_nv12_)(RtxNgxBridge*, uint64_t, uint64_t, uint32_t, float, uint64_t) = nullptr;
     uint64_t(RTX_SHIM_CALL* get_interp_buffer_)(RtxNgxBridge*, uint32_t, uint32_t) = nullptr;
     int32_t(RTX_SHIM_CALL* init_rife_)(RtxNgxBridge*, const char*, uint32_t, uint32_t) = nullptr;
+    int32_t(RTX_SHIM_CALL* init_rife_ex_)(RtxNgxBridge*, const char*, const RtxRifeInitConfig*, uint64_t*) = nullptr;
     int32_t(RTX_SHIM_CALL* interpolate_rife_)(RtxNgxBridge*, uint64_t, uint64_t, uint32_t, float, uint64_t, int32_t, int32_t*) = nullptr;
     int32_t(RTX_SHIM_CALL* build_rife_engine_)(const char*, const char*, uint32_t, uint32_t, char*, uint32_t) = nullptr;
     void(RTX_SHIM_CALL* destroy_rife_)(RtxNgxBridge*) = nullptr;

@@ -16,6 +16,10 @@
 
 namespace rtx {
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct EmbeddedShimApi {
     uint32_t(RTX_SHIM_CALL* abi_version)();
     RtxResult(RTX_SHIM_CALL* probe)(RtxDiagnostics*);
@@ -26,6 +30,8 @@ struct EmbeddedShimApi {
                                              int64_t, int32_t);
     RtxResult(RTX_SHIM_CALL* decoder_receive)(RtxDecoder*, RtxFrameDesc*);
     RtxResult(RTX_SHIM_CALL* decoder_flush)(RtxDecoder*);
+// Phase 11.2 (ABI v3): non-terminal sequence reset for realtime playback.
+    RtxResult(RTX_SHIM_CALL* decoder_reset)(RtxDecoder*);
     RtxResult(RTX_SHIM_CALL* decoder_release_frame)(RtxDecoder*, uint64_t);
     RtxResult(RTX_SHIM_CALL* decoder_download)(RtxDecoder*, const RtxFrameDesc*, uint8_t*,
                                                size_t);

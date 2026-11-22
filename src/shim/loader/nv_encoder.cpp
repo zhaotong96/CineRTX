@@ -15,6 +15,7 @@
 #include <cstring>
 #include <new>
 #include <string>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -64,18 +65,16 @@ const GUID& presetGuid(int preset) {
             return NV_ENC_PRESET_P7_GUID;
     }
 }
-
 NV_ENC_TUNING_INFO tuningForPreset(int preset) {
-    // P1..P4 map to the latency-biased tuning, P5+ to quality.  A middle
-    // preset must never yield NV_ENC_TUNING_INFO_UNDEFINED: the
-    // GetEncodePresetConfigEx/InitializeEncoderEx path rejects it, which made
-    // presets 3 and 4 fail session creation outright on driver 617.14.
     if (preset >= 5) {
+// P1..P4 map to the latency-biased tuning, P5+ to quality.  A middle
+// preset must never yield NV_ENC_TUNING_INFO_UNDEFINED: the
+// GetEncodePresetConfigEx/InitializeEncoderEx path rejects it, which made
+// presets 3 and 4 fail session creation outright on driver 617.14.
         return NV_ENC_TUNING_INFO_HIGH_QUALITY;
     }
     return NV_ENC_TUNING_INFO_LOW_LATENCY;
 }
-
 RtxResult mapNvencStatus(NVENCSTATUS status) {
     switch (status) {
         case NV_ENC_SUCCESS:
@@ -103,16 +102,36 @@ RtxResult mapNvencStatus(NVENCSTATUS status) {
             return RTX_ERR_INTERNAL;
     }
 }
-
 NV_ENC_BUFFER_FORMAT bufferFormatFor(int32_t format) {
     return format == RTX_PIXEL_P010 ? NV_ENC_BUFFER_FORMAT_YUV420_10BIT
                                     : NV_ENC_BUFFER_FORMAT_NV12;
 }
-
 int bytesPerSample(int32_t format) { return format == RTX_PIXEL_P010 ? 2 : 1; }
 
 }  // namespace
 
+// Phase 11.4 (C-07): SDK 13.1 runtime constants & multi-buffer ring pool slot.
+inline constexpr uint32_t kNvEncBFrameRefModeHierarchical = 0x420u;
+inline constexpr uint32_t kNvEncTuningInfoUhq = 5u;
+
+// @rtx-type-justification
+// Category: Hardware-Layout
+// Why-Std-Fails: 绑定单个 NVENC 输出比特流句柄及其 WDDM 异步完成事件与输入时间戳的硬件槽位，用于多 B 帧重排环形池管理。
+// Invariant: bitstream 非空时与 completion_event（Win32 异步模式下）一一对应，在销毁编码器前统一回收。
+struct BitstreamSlot {
+    NV_ENC_OUTPUT_PTR bitstream = nullptr;
+#if defined(_WIN32)
+    HANDLE completion_event = nullptr;
+    NV_ENC_EVENT_PARAMS async_event{};
+    bool async_registered = false;
+#endif
+    int64_t submit_pts = 0;
+};
+
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct RtxEncoder {
     RtxEncoderConfig config{};
     Context cuda;
@@ -126,31 +145,36 @@ struct RtxEncoder {
     RtxHwStats stats{};
     std::string last_error;
 
-    // Host staging surface used only by rtx_shim_encoder_encode_host().
     CUdeviceptr staging = 0;
     size_t staging_pitch = 0;
     size_t staging_bytes = 0;
     int staging_width = 0;
+// Host staging surface used only by rtx_shim_encoder_encode_host().
     int staging_height = 0;
     int32_t staging_format = RTX_PIXEL_UNKNOWN;
 
-    // HDR metadata storage.  NVENC keeps the pointers until the picture is
-    // submitted, so they must outlive the nvEncEncodePicture call.
     MASTERING_DISPLAY_INFO mastering{};
     CONTENT_LIGHT_LEVEL cll{};
 
     uint32_t frame_index = 0;
+// HDR metadata storage.  NVENC keeps the pointers until the picture is
+// submitted, so they must outlive the nvEncEncodePicture call.
     bool eos_submitted = false;
     bool flushed = false;
     bool failed = false;
 
 #if defined(_WIN32)
-    // One auto-reset event per output bitstream buffer.  The session currently
-    // owns a single buffer, so one event covers it.
     HANDLE completion_event = nullptr;
     NV_ENC_EVENT_PARAMS async_event{};
     bool async_registered = false;
 #endif
+    std::vector<BitstreamSlot> bitstream_pool;
+    std::deque<size_t> pending_slots;
+    size_t next_slot = 0;
+    uint32_t driver_max_api_version = 0;
+    bool sdk_13_1_active = false;
+// One auto-reset event per output bitstream buffer.  The session currently
+// owns a single buffer, so one event covers it.
 
     bool asyncEncode() const noexcept {
 #if defined(_WIN32)
@@ -159,7 +183,6 @@ struct RtxEncoder {
         return false;
 #endif
     }
-
     bool asyncRequested() const noexcept {
 #if defined(_WIN32)
         return completion_event != nullptr;
@@ -167,7 +190,6 @@ struct RtxEncoder {
         return false;
 #endif
     }
-
     bool waitForCompletion() {
 #if defined(_WIN32)
         if (!async_registered) {
@@ -182,7 +204,6 @@ struct RtxEncoder {
 #endif
         return true;
     }
-
     std::string nvError(const char* operation, NVENCSTATUS status) const {
         std::string message = operation;
         message += " failed (NVENC status ";
@@ -197,13 +218,11 @@ struct RtxEncoder {
         }
         return message;
     }
-
     RtxResult fail(RtxResult result, const std::string& message) {
         last_error = message;
         failed = true;
         return result;
     }
-
     bool buildConfig(NV_ENC_CONFIG* out) {
         const bool ten_bit = config.input_format == RTX_PIXEL_P010;
         const bool hevc = config.codec == 0;
@@ -213,10 +232,14 @@ struct RtxEncoder {
             last_error = "stage-1 NVENC supports AV1, HEVC and H.264 sessions";
             return false;
         }
-
         const GUID& codec = av1 ? NV_ENC_CODEC_AV1_GUID
                                 : (hevc ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID);
-        const NV_ENC_TUNING_INFO tuning = tuningForPreset(config.preset);
+        NV_ENC_TUNING_INFO tuning = tuningForPreset(config.preset);
+        const char* uhq_env = std::getenv("RTX_NVENC_UHQ");
+        if (sdk_13_1_active && config.preset >= 7 && uhq_env != nullptr &&
+            (*uhq_env == '1' || *uhq_env == 'y' || *uhq_env == 'Y')) {
+            tuning = static_cast<NV_ENC_TUNING_INFO>(kNvEncTuningInfoUhq);
+        }
 
         NV_ENC_PRESET_CONFIG preset_config{};
         preset_config.version = NV_ENC_PRESET_CONFIG_VER;
@@ -248,6 +271,13 @@ struct RtxEncoder {
         out->gopLength = config.gop_length > 0 ? static_cast<uint32_t>(config.gop_length)
                                                : kDefaultGop;
         out->frameIntervalP = 1;  // IPP: one compressed picture per input frame.
+        const char* bframes_env = std::getenv("RTX_NVENC_BFRAMES");
+        if (bframes_env != nullptr && *bframes_env != '\0') {
+            const int bf = std::atoi(bframes_env);
+            if (bf > 0) {
+                out->frameIntervalP = static_cast<uint32_t>(1 + bf);
+            }
+        }
         out->frameFieldMode = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
         out->mvPrecision = NV_ENC_MV_PRECISION_DEFAULT;
 
@@ -263,7 +293,6 @@ struct RtxEncoder {
         if (bitrate < 500000u) {
             bitrate = 500000u;
         }
-
         NV_ENC_RC_PARAMS& rc = out->rcParams;
         const int32_t q_val = std::clamp(config.qp > 0 ? config.qp : 22, 0, 51);
         switch (config.rate_control) {
@@ -313,11 +342,8 @@ struct RtxEncoder {
         }
         rc.enableTemporalAQ = 0u;
         rc.enableLookahead = 0u;
-        rc.zeroReorderDelay = 1u;
+        rc.zeroReorderDelay = (out->frameIntervalP > 1) ? 0u : 1u;
         const bool hdr = config.hdr.enabled != 0;
-        // The shim carries H.265 colour code points.  Use them for both HDR
-        // and SDR sessions so the VUI matches the container flags copied from
-        // the source instead of always declaring BT.709 for SDR.
         const auto colourValue = [](int32_t configured, uint32_t fallback) {
             return configured > 0 ? static_cast<uint32_t>(configured) : fallback;
         };
@@ -329,6 +355,9 @@ struct RtxEncoder {
                                      : NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709);
         const uint32_t matrix =
             colourValue(config.hdr.matrix, hdr ? NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL
+// The shim carries H.265 colour code points.  Use them for both HDR
+// and SDR sessions so the VUI matches the container flags copied from
+// the source instead of always declaring BT.709 for SDR.
                                                : NV_ENC_VUI_MATRIX_COEFFS_BT709);
         const uint32_t full_range = config.hdr.range == 1 ? 1u : 0u;
 
@@ -336,11 +365,15 @@ struct RtxEncoder {
             NV_ENC_CONFIG_AV1& av1_config = out->encodeCodecConfig.av1Config;
             av1_config.chromaFormatIDC = 1;
             av1_config.level = NV_ENC_LEVEL_AV1_AUTOSELECT;
-            av1_config.tier = config.tier == 1 ? NV_ENC_TIER_AV1_1 : NV_ENC_TIER_AV1_0;
+            av1_config.tier = (config.tier == 1 || config.height > 2160)
+                                  ? NV_ENC_TIER_AV1_1
+                                  : NV_ENC_TIER_AV1_0;
             av1_config.idrPeriod = out->gopLength;
             av1_config.repeatSeqHdr = 1;
             av1_config.outputAnnexBFormat = 0;  // OBU format
-            av1_config.maxNumRefFramesInDPB = 4;
+            av1_config.maxNumRefFramesInDPB = (out->frameIntervalP > 1)
+                                                  ? std::clamp<uint32_t>(out->frameIntervalP, 4u, 8u)
+                                                  : 4u;
             av1_config.inputBitDepth = ten_bit ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
             av1_config.outputBitDepth = av1_config.inputBitDepth;
             av1_config.outputMasteringDisplay = hdr ? 1u : 0u;
@@ -357,11 +390,20 @@ struct RtxEncoder {
             NV_ENC_CONFIG_HEVC& hevc_config = out->encodeCodecConfig.hevcConfig;
             hevc_config.chromaFormatIDC = 1;
             hevc_config.level = NV_ENC_LEVEL_AUTOSELECT;
-            hevc_config.tier = config.tier == 1 ? NV_ENC_TIER_HEVC_HIGH : NV_ENC_TIER_HEVC_MAIN;
+            hevc_config.tier = (config.tier == 1 || config.height > 2160)
+                                   ? NV_ENC_TIER_HEVC_HIGH
+                                   : NV_ENC_TIER_HEVC_MAIN;
             hevc_config.idrPeriod = out->gopLength;
             hevc_config.repeatSPSPPS = 1;
             hevc_config.outputAUD = 1;
-            hevc_config.maxNumRefFramesInDPB = 4;
+            hevc_config.maxNumRefFramesInDPB = (out->frameIntervalP > 1)
+                                                   ? std::clamp<uint32_t>(out->frameIntervalP, 4u, 8u)
+                                                   : 4u;
+            if (out->frameIntervalP > 1) {
+                hevc_config.useBFramesAsRef = sdk_13_1_active
+                    ? static_cast<NV_ENC_BFRAME_REF_MODE>(kNvEncBFrameRefModeHierarchical)
+                    : NV_ENC_BFRAME_REF_MODE_MIDDLE;
+            }
             hevc_config.inputBitDepth = ten_bit ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
             hevc_config.outputBitDepth = hevc_config.inputBitDepth;
             hevc_config.outputMasteringDisplay = hdr ? 1u : 0u;
@@ -375,10 +417,6 @@ struct RtxEncoder {
                 static_cast<NV_ENC_VUI_TRANSFER_CHARACTERISTIC>(transfer);
             vui.colourMatrix = static_cast<NV_ENC_VUI_MATRIX_COEFFS>(matrix);
             if (hdr) {
-                // UHD HDR10 mandates top-left chroma siting (AVCHROMA_LOC_TOPLEFT
-                // == 2).  Leaving the MPEG-2 centre default makes players
-                // interpolate chroma half a sample off, which shows up as red
-                // and green edge bleeding on 4K masters.
                 vui.chromaSampleLocationFlag = 1;
                 vui.chromaSampleLocationTop = 2;
                 vui.chromaSampleLocationBot = 2;
@@ -390,6 +428,10 @@ struct RtxEncoder {
             h264_config.idrPeriod = out->gopLength;
             h264_config.repeatSPSPPS = 1;
             h264_config.outputAUD = 1;
+// UHD HDR10 mandates top-left chroma siting (AVCHROMA_LOC_TOPLEFT
+// == 2).  Leaving the MPEG-2 centre default makes players
+// interpolate chroma half a sample off, which shows up as red
+// and green edge bleeding on 4K masters.
             h264_config.maxNumRefFrames = 4;
             h264_config.inputBitDepth = NV_ENC_BIT_DEPTH_8;
             h264_config.outputBitDepth = NV_ENC_BIT_DEPTH_8;
@@ -402,7 +444,6 @@ struct RtxEncoder {
                 static_cast<NV_ENC_VUI_TRANSFER_CHARACTERISTIC>(transfer);
             vui.colourMatrix = static_cast<NV_ENC_VUI_MATRIX_COEFFS>(matrix);
         }
-
         if (hdr) {
             mastering.g.x = config.hdr.green_x;
             mastering.g.y = config.hdr.green_y;
@@ -419,7 +460,6 @@ struct RtxEncoder {
         }
         return true;
     }
-
     bool fetchSequenceHeader() {
         if (api.nvEncGetSequenceParams == nullptr || session == nullptr) {
             return false;
@@ -438,7 +478,6 @@ struct RtxEncoder {
         sequence_header.assign(buffer, buffer + size);
         return true;
     }
-
     NV_ENC_REGISTERED_PTR registerInput(uint64_t pointer, const RtxFrameDesc& frame) {
         const auto found = registered.find(pointer);
         if (found != registered.end()) {
@@ -461,7 +500,6 @@ struct RtxEncoder {
         registered.emplace(pointer, resource.registeredResource);
         return resource.registeredResource;
     }
-
     RtxResult encodeDeviceFrame(const RtxFrameDesc& frame, RtxPacketDesc* out) {
         if (frame.width <= 0 || frame.height <= 0 || frame.planes[0] == 0 ||
             frame.pitches[0] == 0) {
@@ -479,12 +517,10 @@ struct RtxEncoder {
         if (eos_submitted) {
             return RTX_ERR_IO;
         }
-
         NV_ENC_REGISTERED_PTR resource = registerInput(frame.planes[0], frame);
         if (resource == nullptr) {
             return fail(RTX_ERR_INTERNAL, last_error);
         }
-
         NV_ENC_MAP_INPUT_RESOURCE map{};
         map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
         map.registeredResource = resource;
@@ -492,14 +528,21 @@ struct RtxEncoder {
         if (status != NV_ENC_SUCCESS) {
             return fail(RTX_ERR_INTERNAL, nvError("NvEncMapInputResource", status));
         }
-
         NV_ENC_PIC_PARAMS picture{};
         picture.version = NV_ENC_PIC_PARAMS_VER;
         picture.inputWidth = static_cast<uint32_t>(frame.width);
         picture.inputHeight = static_cast<uint32_t>(frame.height);
         picture.inputPitch = frame.pitches[0];
         picture.inputBuffer = map.mappedResource;
-        picture.outputBitstream = bitstream;
+        const size_t slot_idx = bitstream_pool.empty() ? 0 : (next_slot % bitstream_pool.size());
+        NV_ENC_OUTPUT_PTR active_bs = (!bitstream_pool.empty() && bitstream_pool[slot_idx].bitstream != nullptr)
+                                          ? bitstream_pool[slot_idx].bitstream
+                                          : bitstream;
+        if (!bitstream_pool.empty()) {
+            bitstream_pool[slot_idx].submit_pts = frame.pts;
+            next_slot = (slot_idx + 1) % bitstream_pool.size();
+        }
+        picture.outputBitstream = active_bs;
         picture.bufferFmt = map.mappedBufferFmt;
         picture.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
         picture.inputTimeStamp = static_cast<uint64_t>(frame.pts);
@@ -519,16 +562,23 @@ struct RtxEncoder {
             picture.codecPicParams.av1PicParams.pMasteringDisplay = &mastering;
             picture.codecPicParams.av1PicParams.pMaxCll = &cll;
         }
-
         status = api.nvEncEncodePicture(session, &picture);
         RTX_TRACE("encoder: nvEncEncodePicture -> %d (pts %lld)", static_cast<int>(status),
                   static_cast<long long>(frame.pts));
+        if (status == NV_ENC_ERR_NEED_MORE_INPUT) {
+            api.nvEncUnmapInputResource(session, map.mappedResource);
+            if (!bitstream_pool.empty()) {
+                pending_slots.push_back(slot_idx);
+            }
+            ++stats.frames_in;
+            out->data = nullptr;
+            out->size = 0;
+            return RTX_ERR_NOT_FOUND;
+        }
         if (status != NV_ENC_SUCCESS) {
             api.nvEncUnmapInputResource(session, map.mappedResource);
             return fail(mapNvencStatus(status), nvError("NvEncEncodePicture", status));
         }
-        // The mapped input must stay alive until the hardware has consumed it,
-        // so the completion event is the unmap barrier in asynchronous mode.
         if (!waitForCompletion()) {
             api.nvEncUnmapInputResource(session, map.mappedResource);
             return fail(RTX_ERR_INTERNAL, last_error);
@@ -537,7 +587,16 @@ struct RtxEncoder {
 
         NV_ENC_LOCK_BITSTREAM lock{};
         lock.version = NV_ENC_LOCK_BITSTREAM_VER;
-        lock.outputBitstream = bitstream;
+        NV_ENC_OUTPUT_PTR read_bs = active_bs;
+        if (!pending_slots.empty() && !bitstream_pool.empty()) {
+            pending_slots.push_back(slot_idx);
+            const size_t ready_idx = pending_slots.front();
+            pending_slots.pop_front();
+            if (bitstream_pool[ready_idx].bitstream != nullptr) {
+                read_bs = bitstream_pool[ready_idx].bitstream;
+            }
+        }
+        lock.outputBitstream = read_bs;
         status = api.nvEncLockBitstream(session, &lock);
         if (status != NV_ENC_SUCCESS) {
             return fail(RTX_ERR_INTERNAL, nvError("NvEncLockBitstream", status));
@@ -548,10 +607,12 @@ struct RtxEncoder {
         } else {
             encoded.clear();
         }
+// The mapped input must stay alive until the hardware has consumed it,
+// so the completion event is the unmap barrier in asynchronous mode.
         const size_t size = encoded.size();
         const bool keyframe = lock.pictureType == NV_ENC_PIC_TYPE_IDR ||
                               lock.pictureType == NV_ENC_PIC_TYPE_I;
-        status = api.nvEncUnlockBitstream(session, bitstream);
+        status = api.nvEncUnlockBitstream(session, read_bs);
         if (status != NV_ENC_SUCCESS) {
             return fail(RTX_ERR_INTERNAL, nvError("NvEncUnlockBitstream", status));
         }
@@ -561,7 +622,6 @@ struct RtxEncoder {
         if (sequence_header.empty()) {
             (void)fetchSequenceHeader();
         }
-
         out->data = encoded.data();
         out->size = size;
         out->pts = frame.pts;
@@ -573,7 +633,6 @@ struct RtxEncoder {
         stats.bitstream_bytes += size;
         return RTX_OK;
     }
-
     bool ensureStaging(int width, int height, int32_t format) {
         if (staging != 0 && staging_width == width && staging_height == height &&
             staging_format == format) {
@@ -596,7 +655,6 @@ struct RtxEncoder {
         staging_format = format;
         return true;
     }
-
     void destroyRegistered() {
         if (session != nullptr && api.nvEncUnregisterResource != nullptr) {
             for (const auto& entry : registered) {
@@ -633,7 +691,6 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
         self->config.fps_num = 30;
         self->config.fps_den = 1;
     }
-
     std::string error;
     if (!self->cuda.open(&error, config->device_index)) {
         self->last_error = error;
@@ -646,6 +703,20 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
         self->last_error = error;
         delete self;
         return RTX_ERR_DLL_MISSING;
+    }
+    using GetMaxVerFn = NVENCSTATUS(NVENCAPI*)(uint32_t*);
+    const auto get_max_ver = reinterpret_cast<GetMaxVerFn>(
+        self->library.symbol("NvEncodeAPIGetMaxSupportedVersion"));
+    if (get_max_ver != nullptr) {
+        uint32_t max_ver = 0;
+        if (get_max_ver(&max_ver) == NV_ENC_SUCCESS) {
+            self->driver_max_api_version = max_ver;
+            const uint32_t maj = max_ver >> 4;
+            const uint32_t min = max_ver & 0xFu;
+            self->sdk_13_1_active = (maj > 13u) || (maj == 13u && min >= 1u);
+            RTX_TRACE("encoder: NvEncodeAPIGetMaxSupportedVersion -> %u.%u (sdk_13_1=%d)",
+                      maj, min, self->sdk_13_1_active ? 1 : 0);
+        }
     }
     const auto create_instance = reinterpret_cast<NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*)>(
         self->library.symbol("NvEncodeAPICreateInstance"));
@@ -677,7 +748,6 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
         delete self;
         return RTX_ERR_DRIVER_TOO_OLD;
     }
-
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS session{};
     session.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
     session.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
@@ -698,11 +768,6 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
     RTX_TRACE("encoder: nvEncOpenEncodeSessionEx -> ok");
 
 #if defined(_WIN32)
-    // WDDM asynchronous mode: completion is delivered through a kernel event
-    // instead of an internal driver wait, so nvEncEncodePicture returns as soon
-    // as the work is queued.  The event is created before initialisation (the
-    // flag is part of NV_ENC_INITIALIZE_PARAMS) and registered afterwards,
-    // because NvEncRegisterAsyncEvent requires an initialised encoder.
     if (self->api.nvEncRegisterAsyncEvent == nullptr ||
         self->api.nvEncUnregisterAsyncEvent == nullptr) {
         self->last_error = "nvEncodeAPI does not expose the asynchronous event API";
@@ -727,6 +792,11 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
     encode_config.version = NV_ENC_CONFIG_VER;
     RTX_TRACE("encoder: building the NV_ENC_CONFIG");
     if (!self->buildConfig(&encode_config)) {
+// WDDM asynchronous mode: completion is delivered through a kernel event
+// instead of an internal driver wait, so nvEncEncodePicture returns as soon
+// as the work is queued.  The event is created before initialisation (the
+// flag is part of NV_ENC_INITIALIZE_PARAMS) and registered afterwards,
+// because NvEncRegisterAsyncEvent requires an initialised encoder.
         delete self;
         return RTX_ERR_UNSUPPORTED;
     }
@@ -752,15 +822,50 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
     initialize.tuningInfo = tuningForPreset(config->preset);
     initialize.bufferFormat = bufferFormatFor(config->input_format);
 
+    if (self->api.nvEncGetEncodeCaps != nullptr) {
+        NV_ENC_CAPS_PARAM caps_param{};
+        caps_param.version = NV_ENC_CAPS_PARAM_VER;
+        int max_w = 0;
+        int max_h = 0;
+        caps_param.capsToQuery = NV_ENC_CAPS_WIDTH_MAX;
+        const NVENCSTATUS w_st = self->api.nvEncGetEncodeCaps(
+            self->session, initialize.encodeGUID, &caps_param, &max_w);
+        caps_param.capsToQuery = NV_ENC_CAPS_HEIGHT_MAX;
+        const NVENCSTATUS h_st = self->api.nvEncGetEncodeCaps(
+            self->session, initialize.encodeGUID, &caps_param, &max_h);
+        if ((w_st == NV_ENC_SUCCESS && max_w > 0 && config->width > max_w) ||
+            (h_st == NV_ENC_SUCCESS && max_h > 0 && config->height > max_h)) {
+            self->last_error = "NVENC caps exceeded: requested " +
+                               std::to_string(config->width) + "x" +
+                               std::to_string(config->height) + " vs device max " +
+                               std::to_string(max_w) + "x" + std::to_string(max_h);
+            RTX_TRACE("encoder: %s", self->last_error.c_str());
+            delete self;
+            return RTX_ERR_UNSUPPORTED;
+        }
+    }
+
     status = self->api.nvEncInitializeEncoder(self->session, &initialize);
-    RTX_TRACE("encoder: nvEncInitializeEncoder -> %d", static_cast<int>(status));
+    RTX_TRACE("encoder: nvEncInitializeEncoder (%ux%u) -> %d",
+              initialize.encodeWidth, initialize.encodeHeight, static_cast<int>(status));
     if (status != NV_ENC_SUCCESS) {
-        self->last_error = self->nvError("NvEncInitializeEncoder", status);
+        std::string detail = self->nvError("NvEncInitializeEncoder", status) +
+                             " [encode=" + std::to_string(initialize.encodeWidth) + "x" +
+                             std::to_string(initialize.encodeHeight) +
+                             ", status=" + std::to_string(static_cast<int>(status)) + "]";
+        if (self->api.nvEncGetLastErrorString != nullptr) {
+            const char* driver_msg = self->api.nvEncGetLastErrorString(self->session);
+            if (driver_msg != nullptr && driver_msg[0] != '\0') {
+                detail += " driver: ";
+                detail += driver_msg;
+            }
+        }
+        self->last_error = std::move(detail);
+        RTX_TRACE("encoder: init failed: %s", self->last_error.c_str());
         const RtxResult mapped = mapNvencStatus(status);
         delete self;
         return mapped == RTX_OK ? RTX_ERR_UNSUPPORTED : mapped;
     }
-
     NV_ENC_CREATE_BITSTREAM_BUFFER buffer{};
     buffer.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
     status = self->api.nvEncCreateBitstreamBuffer(self->session, &buffer);
@@ -770,6 +875,18 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
         return mapNvencStatus(status);
     }
     self->bitstream = buffer.bitstreamBuffer;
+    const size_t pool_cap = static_cast<size_t>(
+        (std::max)(4, 4 + static_cast<int>(encode_config.frameIntervalP) +
+                          static_cast<int>(encode_config.rcParams.lookaheadDepth)));
+    self->bitstream_pool.resize(pool_cap);
+    self->bitstream_pool[0].bitstream = self->bitstream;
+    for (size_t i = 1; i < pool_cap; ++i) {
+        NV_ENC_CREATE_BITSTREAM_BUFFER extra{};
+        extra.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+        if (self->api.nvEncCreateBitstreamBuffer(self->session, &extra) == NV_ENC_SUCCESS) {
+            self->bitstream_pool[i].bitstream = extra.bitstreamBuffer;
+        }
+    }
 
 #if defined(_WIN32)
     if (self->asyncRequested()) {
@@ -797,7 +914,6 @@ rtx_shim_encoder_create(const RtxEncoderConfig* config, RtxEncoder** encoder) {
     *encoder = self;
     return RTX_OK;
 }
-
 RTX_SHIM_API void RTX_SHIM_CALL rtx_shim_encoder_destroy(RtxEncoder* encoder) {
     if (encoder == nullptr) {
         return;
@@ -814,10 +930,21 @@ RTX_SHIM_API void RTX_SHIM_CALL rtx_shim_encoder_destroy(RtxEncoder* encoder) {
     }
 #endif
     encoder->destroyRegistered();
-    if (encoder->bitstream != nullptr && encoder->api.nvEncDestroyBitstreamBuffer != nullptr) {
-        encoder->api.nvEncDestroyBitstreamBuffer(encoder->session, encoder->bitstream);
-        encoder->bitstream = nullptr;
+    if (encoder->api.nvEncDestroyBitstreamBuffer != nullptr) {
+        for (size_t i = 1; i < encoder->bitstream_pool.size(); ++i) {
+            if (encoder->bitstream_pool[i].bitstream != nullptr) {
+                encoder->api.nvEncDestroyBitstreamBuffer(encoder->session,
+                                                         encoder->bitstream_pool[i].bitstream);
+                encoder->bitstream_pool[i].bitstream = nullptr;
+            }
+        }
+        if (encoder->bitstream != nullptr) {
+            encoder->api.nvEncDestroyBitstreamBuffer(encoder->session, encoder->bitstream);
+            encoder->bitstream = nullptr;
+        }
     }
+    encoder->bitstream_pool.clear();
+    encoder->pending_slots.clear();
     if (encoder->session != nullptr && encoder->api.nvEncDestroyEncoder != nullptr) {
         encoder->api.nvEncDestroyEncoder(encoder->session);
         encoder->session = nullptr;
@@ -828,7 +955,6 @@ RTX_SHIM_API void RTX_SHIM_CALL rtx_shim_encoder_destroy(RtxEncoder* encoder) {
     }
     delete encoder;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_encoder_encode(RtxEncoder* encoder, const RtxFrameDesc* frame, RtxPacketDesc* packet) {
     if (encoder == nullptr || frame == nullptr || packet == nullptr) {
@@ -839,7 +965,6 @@ rtx_shim_encoder_encode(RtxEncoder* encoder, const RtxFrameDesc* frame, RtxPacke
     }
     return encoder->encodeDeviceFrame(*frame, packet);
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_encoder_encode_host(RtxEncoder* encoder, const uint8_t* data, uint32_t pitch,
                              int32_t format, int64_t pts, RtxPacketDesc* packet) {
@@ -856,7 +981,6 @@ rtx_shim_encoder_encode_host(RtxEncoder* encoder, const uint8_t* data, uint32_t 
     if (!encoder->ensureStaging(encoder->config.width, encoder->config.height, format)) {
         return encoder->fail(RTX_ERR_OUT_OF_MEMORY, encoder->last_error);
     }
-
     const size_t sample_bytes = static_cast<size_t>(bytesPerSample(format));
     const size_t row_bytes = static_cast<size_t>(encoder->config.width) * sample_bytes;
     DriverTable& driver = encoder->cuda.driver();
@@ -898,7 +1022,6 @@ rtx_shim_encoder_encode_host(RtxEncoder* encoder, const uint8_t* data, uint32_t 
     device.slot_index = 0;
     return encoder->encodeDeviceFrame(device, packet);
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_encoder_flush(RtxEncoder* encoder, RtxPacketDesc* packet) {
     if (encoder == nullptr || packet == nullptr) {
@@ -907,20 +1030,12 @@ rtx_shim_encoder_flush(RtxEncoder* encoder, RtxPacketDesc* packet) {
     if (encoder->flushed) {
         return RTX_ERR_NOT_FOUND;
     }
-    // Every picture is awaited through its completion event, and the session
-    // uses frameIntervalP = 1 with zeroReorderDelay, so no delayed picture can
-    // be pending at EOS.  Locking the bitstream buffer again would block
-    // forever because the encoder produces no further output picture.  EOS
-    // only lets the encoder release its references; flush is a no-op that
-    // reports "nothing more to read".
     if (!encoder->eos_submitted) {
         NV_ENC_PIC_PARAMS picture{};
         picture.version = NV_ENC_PIC_PARAMS_VER;
         picture.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
         picture.outputBitstream = encoder->bitstream;
 #if defined(_WIN32)
-        // The asynchronous API rejects any picture without a completion event,
-        // including the EOS marker ("Completion event is NULL").
         if (encoder->async_registered) {
             picture.completionEvent = encoder->completion_event;
         }
@@ -937,6 +1052,42 @@ rtx_shim_encoder_flush(RtxEncoder* encoder, RtxPacketDesc* packet) {
         }
         encoder->eos_submitted = true;
     }
+    while (!encoder->pending_slots.empty()) {
+        const size_t drain_idx = encoder->pending_slots.front();
+        encoder->pending_slots.pop_front();
+        if (drain_idx >= encoder->bitstream_pool.size() ||
+            encoder->bitstream_pool[drain_idx].bitstream == nullptr) {
+            continue;
+        }
+        NV_ENC_OUTPUT_PTR drain_bs = encoder->bitstream_pool[drain_idx].bitstream;
+        NV_ENC_LOCK_BITSTREAM lock{};
+        lock.version = NV_ENC_LOCK_BITSTREAM_VER;
+        lock.outputBitstream = drain_bs;
+        if (encoder->api.nvEncLockBitstream(encoder->session, &lock) != NV_ENC_SUCCESS) {
+            continue;
+        }
+        const uint32_t bytes_len = lock.bitstreamSizeInBytes;
+        const bool keyframe = lock.pictureType == NV_ENC_PIC_TYPE_IDR ||
+                              lock.pictureType == NV_ENC_PIC_TYPE_I;
+        if (bytes_len > 0 && lock.bitstreamBufferPtr != nullptr) {
+            const uint8_t* ptr = static_cast<const uint8_t*>(lock.bitstreamBufferPtr);
+            encoder->encoded.assign(ptr, ptr + bytes_len);
+        } else {
+            encoder->encoded.clear();
+        }
+        (void)encoder->api.nvEncUnlockBitstream(encoder->session, drain_bs);
+        if (!encoder->encoded.empty()) {
+            packet->data = encoder->encoded.data();
+            packet->size = encoder->encoded.size();
+            packet->pts = static_cast<int64_t>(lock.outputTimeStamp);
+            packet->dts = encoder->bitstream_pool[drain_idx].submit_pts;
+            packet->duration = 0;
+            packet->keyframe = keyframe ? 1 : 0;
+            ++encoder->stats.frames_out;
+            encoder->stats.bitstream_bytes += encoder->encoded.size();
+            return RTX_OK;
+        }
+    }
     encoder->flushed = true;
     packet->data = nullptr;
     packet->size = 0;
@@ -945,13 +1096,20 @@ rtx_shim_encoder_flush(RtxEncoder* encoder, RtxPacketDesc* packet) {
     packet->duration = 0;
     packet->keyframe = 0;
     return RTX_ERR_NOT_FOUND;
+// Every picture is awaited through its completion event, and the session
+// uses frameIntervalP = 1 with zeroReorderDelay, so no delayed picture can
+// be pending at EOS.  Locking the bitstream buffer again would block
+// forever because the encoder produces no further output picture.  EOS
+// only lets the encoder release its references; flush is a no-op that
+// reports "nothing more to read".
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_encoder_get_sequence_header(RtxEncoder* encoder, uint8_t* buffer, size_t capacity,
                                      size_t* size) {
     if (encoder == nullptr || size == nullptr) {
         return RTX_ERR_INVALID_ARGUMENT;
+// The asynchronous API rejects any picture without a completion event,
+// including the EOS marker ("Completion event is NULL").
     }
     if (encoder->sequence_header.empty()) {
         (void)encoder->fetchSequenceHeader();
@@ -970,7 +1128,6 @@ rtx_shim_encoder_get_sequence_header(RtxEncoder* encoder, uint8_t* buffer, size_
     std::memcpy(buffer, encoder->sequence_header.data(), encoder->sequence_header.size());
     return RTX_OK;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_encoder_get_stats(RtxEncoder* encoder, RtxHwStats* stats) {
     if (encoder == nullptr || stats == nullptr) {
@@ -979,12 +1136,10 @@ rtx_shim_encoder_get_stats(RtxEncoder* encoder, RtxHwStats* stats) {
     *stats = encoder->stats;
     return RTX_OK;
 }
-
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_shim_encoder_last_error(RtxEncoder* encoder) {
     if (encoder == nullptr) {
         return "invalid RtxEncoder handle";
     }
     return encoder->last_error.c_str();
 }
-
 }  // extern "C"

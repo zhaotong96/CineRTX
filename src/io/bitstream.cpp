@@ -14,6 +14,10 @@ namespace {
 
 constexpr size_t kNoPosition = static_cast<size_t>(-1);
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 class BitReader {
 public:
     BitReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
@@ -35,7 +39,6 @@ public:
         }
         return value;
     }
-
     uint32_t ue() {
         int leading_zero_bits = 0;
         while (true) {
@@ -57,7 +60,6 @@ public:
         }
         return ((1u << leading_zero_bits) - 1u) + u(leading_zero_bits);
     }
-
     int32_t se() {
         const uint32_t code = ue();
         if (!ok_) {
@@ -66,7 +68,6 @@ public:
         return (code & 1u) != 0 ? static_cast<int32_t>((code + 1u) >> 1)
                                 : -static_cast<int32_t>(code >> 1);
     }
-
     void skipBits(size_t count) {
         while (count > 0) {
             const size_t chunk = count > 32 ? 32 : count;
@@ -74,7 +75,6 @@ public:
             count -= chunk;
         }
     }
-
 private:
     const uint8_t* data_ = nullptr;
     size_t size_ = 0;
@@ -91,11 +91,11 @@ std::vector<std::vector<uint8_t>> nalUnits(const uint8_t* data, size_t size) {
         return splitAnnexB(data, size);
     }
     if (data[0] == 1 && size >= 23) {
-        // HEVCDecoderConfigurationRecord: arrays of length-prefixed NALs.
         size_t position = 23;
         const int arrays = data[22];
         for (int array = 0; array < arrays && position + 3 <= size; ++array) {
             ++position;
+// HEVCDecoderConfigurationRecord: arrays of length-prefixed NALs.
             const int count = (data[position] << 8) | data[position + 1];
             position += 2;
             for (int i = 0; i < count && position + 2 <= size; ++i) {
@@ -126,7 +126,6 @@ std::vector<std::vector<uint8_t>> nalUnits(const uint8_t* data, size_t size) {
     }
     return units;
 }
-
 std::vector<uint8_t> rbspFromNal(const std::vector<uint8_t>& nal) {
     std::vector<uint8_t> rbsp;
     rbsp.reserve(nal.size());
@@ -141,7 +140,10 @@ std::vector<uint8_t> rbspFromNal(const std::vector<uint8_t>& nal) {
     }
     return rbsp;
 }
-
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct HevcSpsInfo {
     int profile_space = 0;
     int tier = 0;
@@ -192,7 +194,6 @@ bool parseHevcSps(const std::vector<uint8_t>& nal, HevcSpsInfo& info) {
             (void)reader.u(2);
         }
     }
-
     (void)reader.ue();  // sps_seq_parameter_set_id
     info.chroma_format_idc = static_cast<int>(reader.ue());
     if (info.chroma_format_idc == 3) {
@@ -210,7 +211,6 @@ bool parseHevcSps(const std::vector<uint8_t>& nal, HevcSpsInfo& info) {
     return reader.ok() && info.bit_depth_luma_minus8 >= 0 &&
            info.bit_depth_luma_minus8 <= 6;
 }
-
 bool skipProfileFields(BitReader& reader) {
     (void)reader.u(2);  // profile_space
     (void)reader.u(1);  // tier_flag
@@ -242,7 +242,6 @@ bool skipProfileFields(BitReader& reader) {
     (void)reader.u(1);  // inbld_flag / reserved
     return reader.ok();
 }
-
 bool skipProfileTierLevel(BitReader& reader, int max_sub_layers_minus1) {
     if (!skipProfileFields(reader)) {
         return false;
@@ -269,7 +268,6 @@ bool skipProfileTierLevel(BitReader& reader, int max_sub_layers_minus1) {
     }
     return reader.ok();
 }
-
 bool skipScalingListData(BitReader& reader) {
     for (int size_id = 0; size_id < 4; ++size_id) {
         for (int matrix_id = 0; matrix_id < 6; matrix_id += (size_id == 3 ? 3 : 1)) {
@@ -288,7 +286,6 @@ bool skipScalingListData(BitReader& reader) {
     }
     return reader.ok();
 }
-
 bool skipShortTermRps(BitReader& reader, size_t index, std::vector<int>& num_delta_pocs) {
     bool predicted = false;
     if (index > 0) {
@@ -331,7 +328,6 @@ bool skipShortTermRps(BitReader& reader, size_t index, std::vector<int>& num_del
     }
     return reader.ok();
 }
-
 bool parseHevcVuiColorFromSps(const std::vector<uint8_t>& nal, HevcVuiColor& color) {
     if (nal.size() < 3 || ((nal[0] >> 1) & 0x3F) != 33) {
         return false;
@@ -442,7 +438,6 @@ bool parseHevcVuiColorFromSps(const std::vector<uint8_t>& nal, HevcVuiColor& col
     }
     return reader.ok();
 }
-
 bool parseSeiPayloads(const std::vector<uint8_t>& nal, HevcSeiHdr10& hdr) {
     if (nal.size() < 3) {
         return false;
@@ -507,19 +502,16 @@ bool parseSeiPayloads(const std::vector<uint8_t>& nal, HevcSeiHdr10& hdr) {
     }
     return hdr.has_mastering_display || hdr.has_content_light;
 }
-
 void appendU16(std::vector<uint8_t>& out, size_t value) {
     out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
     out.push_back(static_cast<uint8_t>(value & 0xFF));
 }
-
 void appendBe32(std::vector<uint8_t>& out, uint32_t value) {
     out.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
     out.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
     out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
     out.push_back(static_cast<uint8_t>(value & 0xFF));
 }
-
 }  // namespace
 
 std::vector<std::vector<uint8_t>> splitAnnexB(std::span<const uint8_t> data) {
@@ -558,12 +550,10 @@ std::vector<std::vector<uint8_t>> splitAnnexB(std::span<const uint8_t> data) {
     }
     return units;
 }
-
 std::vector<std::vector<uint8_t>> splitAnnexB(const uint8_t* data, size_t size) {
     if (data == nullptr || size == 0) return {};
     return splitAnnexB(std::span<const uint8_t>(data, size));
 }
-
 bool looksLikeAnnexB(std::span<const uint8_t> data) {
     if (data.size() < 3) {
         return false;
@@ -571,12 +561,10 @@ bool looksLikeAnnexB(std::span<const uint8_t> data) {
     return (data[0] == 0 && data[1] == 0 && data[2] == 1) ||
            (data.size() >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1);
 }
-
 bool looksLikeAnnexB(const uint8_t* data, size_t size) {
     if (data == nullptr || size == 0) return false;
     return looksLikeAnnexB(std::span<const uint8_t>(data, size));
 }
-
 std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {
     if (looksLikeAnnexB(data, size)) {
         std::vector<uint8_t> out;
@@ -586,7 +574,6 @@ std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {
         }
         return out;
     }
-    // Already length-prefixed (or a single raw NAL).  Normalise single NALs.
     if (size >= 4) {
         const uint32_t first = (static_cast<uint32_t>(data[0]) << 24) |
                                (static_cast<uint32_t>(data[1]) << 16) |
@@ -601,13 +588,13 @@ std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {
     out.insert(out.end(), data, data + size);
     return out;
 }
-
 std::vector<uint8_t> lengthPrefixedToAnnexB(const uint8_t* data, size_t size) {
     if (looksLikeAnnexB(data, size)) {
         return std::vector<uint8_t>(data, data + size);
     }
     static const uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
     std::vector<uint8_t> out;
+// Already length-prefixed (or a single raw NAL).  Normalise single NALs.
     size_t position = 0;
     while (position + 4 <= size) {
         const size_t length = (static_cast<size_t>(data[position]) << 24) |
@@ -627,7 +614,6 @@ std::vector<uint8_t> lengthPrefixedToAnnexB(const uint8_t* data, size_t size) {
     }
     return out;
 }
-
 std::vector<uint8_t> extractParameterSets(const uint8_t* annexb, size_t size) {
     std::vector<uint8_t> out;
     static const uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
@@ -647,7 +633,6 @@ std::vector<uint8_t> extractParameterSets(const uint8_t* annexb, size_t size) {
     }
     return out;
 }
-
 std::vector<uint8_t> makeHevcConfigRecord(const uint8_t* annexb, size_t size) {
     std::vector<uint8_t> vps;
     std::vector<uint8_t> sps;
@@ -677,7 +662,6 @@ std::vector<uint8_t> makeHevcConfigRecord(const uint8_t* annexb, size_t size) {
     if (!parseHevcSps(sps, info)) {
         return {};
     }
-
     std::vector<uint8_t> out;
     out.reserve(64 + vps.size() + sps.size() + pps.size());
     out.push_back(1);  // configurationVersion
@@ -721,7 +705,6 @@ std::vector<uint8_t> makeHevcConfigRecord(const uint8_t* annexb, size_t size) {
     appendArray(pps, 34);
     return out;
 }
-
 std::vector<uint8_t> makeAvcConfigRecord(const uint8_t* annexb, size_t size) {
     std::vector<std::vector<uint8_t>> sps_units;
     std::vector<std::vector<uint8_t>> pps_units;
@@ -757,7 +740,6 @@ std::vector<uint8_t> makeAvcConfigRecord(const uint8_t* annexb, size_t size) {
     }
     return out;
 }
-
 std::vector<uint8_t> makeAv1ConfigRecord(const uint8_t* obu_data, size_t size, bool ten_bit) {
     if (obu_data == nullptr || size == 0) {
         return {};
@@ -774,14 +756,12 @@ std::vector<uint8_t> makeAv1ConfigRecord(const uint8_t* obu_data, size_t size, b
     out.insert(out.end(), obu_data, obu_data + size);
     return out;
 }
-
 int hevcConfigBitDepth(const uint8_t* record, size_t size) {
     if (record == nullptr || size < 18 || record[0] != 1) {
         return 0;
     }
     return 8 + (record[17] & 0x07);
 }
-
 int avcConfigBitDepth(const uint8_t* record, size_t size) {
     if (record == nullptr || size < 4 || record[0] != 1) {
         return 0;
@@ -789,7 +769,6 @@ int avcConfigBitDepth(const uint8_t* record, size_t size) {
     const int profile = record[1];
     return (profile == 110 || profile == 122 || profile == 244 || profile == 44) ? 10 : 8;
 }
-
 bool parseHevcVuiColor(const uint8_t* data, size_t size, HevcVuiColor& color) {
     for (const auto& unit : nalUnits(data, size)) {
         if (parseHevcVuiColorFromSps(unit, color)) {
@@ -798,12 +777,10 @@ bool parseHevcVuiColor(const uint8_t* data, size_t size, HevcVuiColor& color) {
     }
     return false;
 }
-
 bool parseHevcSeiHdr10(const uint8_t* data, size_t size, HevcSeiHdr10& hdr) {
     for (const auto& unit : nalUnits(data, size)) {
         parseSeiPayloads(unit, hdr);
     }
     return hdr.has_mastering_display || hdr.has_content_light;
 }
-
 }  // namespace rtx

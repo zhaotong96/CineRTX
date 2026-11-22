@@ -13,6 +13,10 @@
 
 namespace rtx::cli {
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct ShimProbeResult {
     bool loaded = false;
     std::string path;

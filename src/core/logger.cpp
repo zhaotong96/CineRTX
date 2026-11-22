@@ -32,7 +32,6 @@ constexpr std::string_view shortFileName(std::string_view path) noexcept {
     const size_t slash = path.find_last_of("/\\");
     return slash == std::string_view::npos ? path : path.substr(slash + 1);
 }
-
 #if defined(_WIN32)
 void emitDebugViewUtf8(std::string_view line) noexcept {
     if (line.empty()) {
@@ -67,24 +66,19 @@ void emitDebugViewUtf8(std::string_view line) noexcept {
 void setLogLevel(LogLevel min_level) noexcept {
     g_min_level.store(min_level, std::memory_order_relaxed);
 }
-
 LogLevel currentLogLevel() noexcept {
     return g_min_level.load(std::memory_order_relaxed);
 }
-
 void setConsoleLogEnabled(bool enabled) noexcept {
     g_console_enabled.store(enabled, std::memory_order_relaxed);
 }
-
 bool isConsoleLogEnabled() noexcept {
     return g_console_enabled.load(std::memory_order_relaxed);
 }
-
 void setLogCallback(LogSinkCallback callback) {
     std::lock_guard<std::mutex> lock(g_sink_mutex);
     g_callback = std::move(callback);
 }
-
 void logWrite(LogLevel level, std::string_view message, std::source_location loc) noexcept {
     const LogLevel threshold = g_min_level.load(std::memory_order_relaxed);
     if (level == LogLevel::Silent) {
@@ -93,7 +87,6 @@ void logWrite(LogLevel level, std::string_view message, std::source_location loc
     if (level == LogLevel::Debug && threshold > LogLevel::Debug) {
         return;
     }
-
     try {
         const std::string_view file = shortFileName(loc.file_name());
 #if defined(_WIN32)
@@ -113,7 +106,6 @@ void logWrite(LogLevel level, std::string_view message, std::source_location loc
         if (cb_copy) {
             cb_copy(level, message);
         }
-
         if (static_cast<uint8_t>(level) >= static_cast<uint8_t>(threshold) &&
             g_console_enabled.load(std::memory_order_relaxed)) {
             const std::string console_line = std::format(
@@ -123,8 +115,7 @@ void logWrite(LogLevel level, std::string_view message, std::source_location loc
             std::fflush(stderr);
         }
     } catch (...) {
-        // Logging must never throw across ABI or destructors.
     }
 }
-
 }  // namespace rtx
+// Logging must never throw across ABI or destructors.

@@ -23,6 +23,10 @@
 
 namespace {
 
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
+// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
 class BuilderLogger : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char* msg) noexcept override {
@@ -39,7 +43,6 @@ void setErrorMessage(char* err_buf, uint32_t err_cap, const std::string& msg) {
         err_buf[len] = '\0';
     }
 }
-
 bool buildBuiltinTemporalNetwork(
     nvinfer1::INetworkDefinition* network,
     std::vector<float>& backbone_weights,
@@ -51,14 +54,14 @@ bool buildBuiltinTemporalNetwork(
     nvinfer1::DataType io_dtype = nvinfer1::DataType::kFLOAT) {
     if (!network) return false;
 
-    // Input: [1, 7, -1, -1] (ch0..2 = img0 RGB, ch3..5 = img1 RGB, ch6 = timestep alpha)
-    // Multiply-gate topology with exact linear alpha response:
-    //   backbone = 0.5 * img0 + 0.5 * img1
-    //   branch_a = img1 - img0
-    //   branch_b = alpha - 0.5
-    //   detail   = branch_a * branch_b
-    //   output   = backbone + detail == img0 * (1 - alpha) + img1 * alpha
     nvinfer1::ITensor* in_tensor = network->addInput(
+// Input: [1, 7, -1, -1] (ch0..2 = img0 RGB, ch3..5 = img1 RGB, ch6 = timestep alpha)
+// Multiply-gate topology with exact linear alpha response:
+//   backbone = 0.5 * img0 + 0.5 * img1
+//   branch_a = img1 - img0
+//   branch_b = alpha - 0.5
+//   detail   = branch_a * branch_b
+//   output   = backbone + detail == img0 * (1 - alpha) + img1 * alpha
         "input", io_dtype, nvinfer1::Dims4{1, 7, -1, -1});
     if (!in_tensor) return false;
 
@@ -88,8 +91,8 @@ bool buildBuiltinTemporalNetwork(
         return conv;
     };
 
-    // Backbone 1x1 conv 7 -> 3: ch(c) = 0.5, ch(c+3) = 0.5, bias 0.
     backbone_weights.assign(3 * 7 * 1 * 1, 0.0f);
+// Backbone 1x1 conv 7 -> 3: ch(c) = 0.5, ch(c+3) = 0.5, bias 0.
     backbone_bias.assign(3, 0.0f);
     for (int c = 0; c < 3; ++c) {
         backbone_weights[c * 7 + c] = 0.5f;
@@ -99,8 +102,8 @@ bool buildBuiltinTemporalNetwork(
         add_1x1_conv("rife_synth_backbone", backbone_weights, backbone_bias);
     if (!backbone_conv) return false;
 
-    // Branch A 1x1 conv 7 -> 3: ch(c+3) = +1.0, ch(c) = -1.0, bias 0 (img1 - img0).
     branch_a_weights.assign(3 * 7 * 1 * 1, 0.0f);
+// Branch A 1x1 conv 7 -> 3: ch(c+3) = +1.0, ch(c) = -1.0, bias 0 (img1 - img0).
     branch_a_bias.assign(3, 0.0f);
     for (int c = 0; c < 3; ++c) {
         branch_a_weights[c * 7 + (c + 3)] = 1.0f;
@@ -110,8 +113,8 @@ bool buildBuiltinTemporalNetwork(
         add_1x1_conv("rife_synth_branch_a", branch_a_weights, branch_a_bias);
     if (!branch_a_conv) return false;
 
-    // Branch B 1x1 conv 7 -> 3: ch6 = +1.0, bias = -0.5 (alpha - 0.5).
     branch_b_weights.assign(3 * 7 * 1 * 1, 0.0f);
+// Branch B 1x1 conv 7 -> 3: ch6 = +1.0, bias = -0.5 (alpha - 0.5).
     branch_b_bias.assign(3, -0.5f);
     for (int c = 0; c < 3; ++c) {
         branch_b_weights[c * 7 + 6] = 1.0f;
@@ -120,8 +123,8 @@ bool buildBuiltinTemporalNetwork(
         add_1x1_conv("rife_synth_branch_b", branch_b_weights, branch_b_bias);
     if (!branch_b_conv) return false;
 
-    // detail = branch_a * branch_b (alpha-gated motion residual).
     nvinfer1::IElementWiseLayer* detail = network->addElementWise(
+// detail = branch_a * branch_b (alpha-gated motion residual).
         *branch_a_conv->getOutput(0), *branch_b_conv->getOutput(0),
         nvinfer1::ElementWiseOperation::kPROD);
     if (!detail) return false;
@@ -129,8 +132,8 @@ bool buildBuiltinTemporalNetwork(
     detail->setPrecision(io_dtype);
     detail->setOutputType(0, io_dtype);
 
-    // output = backbone + detail.
     nvinfer1::IElementWiseLayer* sum = network->addElementWise(
+// output = backbone + detail.
         *backbone_conv->getOutput(0), *detail->getOutput(0),
         nvinfer1::ElementWiseOperation::kSUM);
     if (!sum) return false;
@@ -144,9 +147,8 @@ bool buildBuiltinTemporalNetwork(
     out_tensor->setType(io_dtype);
     return true;
 }
-
-
-// ---------------------------------------------------------------------------
+void pbAppendVarint(std::vector<uint8_t>& out, uint64_t v) {
+    while (v >= 0x80u) {
 // Zero-Python C++26 ONNX Protobuf Dynamic Timestep Patcher (RW-P9-01)
 //
 // Upstream FuryTMP/RIFE_fp32.onnx exports /Cast_8 with a constant-folded
@@ -154,30 +156,23 @@ bool buildBuiltinTemporalNetwork(
 // 7-channel input tensor /Clip_output_0. This self-contained wire-format
 // patcher rewires /Cast_8 to /Slice_time + /Pad_time (channel 6:7) directly
 // in C++26 without requiring Python or external protobuf libraries.
-// ---------------------------------------------------------------------------
-void pbAppendVarint(std::vector<uint8_t>& out, uint64_t v) {
-    while (v >= 0x80u) {
         out.push_back(static_cast<uint8_t>((v & 0x7Fu) | 0x80u));
         v >>= 7u;
     }
     out.push_back(static_cast<uint8_t>(v));
 }
-
 void pbAppendTag(std::vector<uint8_t>& out, uint32_t field_num, uint32_t wire_type) {
     pbAppendVarint(out, (static_cast<uint64_t>(field_num) << 3u) | (wire_type & 0x7u));
 }
-
 void pbAppendBytes(std::vector<uint8_t>& out, uint32_t field_num, const void* data, size_t len) {
     pbAppendTag(out, field_num, 2u);
     pbAppendVarint(out, len);
     const auto* ptr = static_cast<const uint8_t*>(data);
     out.insert(out.end(), ptr, ptr + len);
 }
-
 void pbAppendString(std::vector<uint8_t>& out, uint32_t field_num, std::string_view s) {
     pbAppendBytes(out, field_num, s.data(), s.size());
 }
-
 bool pbReadVarint(const uint8_t* data, size_t size, size_t& pos, uint64_t& out_val) {
     out_val = 0;
     uint32_t shift = 0;
@@ -189,7 +184,6 @@ bool pbReadVarint(const uint8_t* data, size_t size, size_t& pos, uint64_t& out_v
     }
     return false;
 }
-
 bool pbSkipField(const uint8_t* data, size_t size, size_t& pos, uint32_t wire_type) {
     switch (wire_type) {
         case 0u: {
@@ -216,7 +210,6 @@ bool pbSkipField(const uint8_t* data, size_t size, size_t& pos, uint32_t wire_ty
             return false;
     }
 }
-
 std::vector<uint8_t> buildInt64Scalar1DTensorProto(std::string_view name, int64_t val) {
     std::vector<uint8_t> t;
     pbAppendTag(t, 1u, 0u);
@@ -228,7 +221,6 @@ std::vector<uint8_t> buildInt64Scalar1DTensorProto(std::string_view name, int64_
     pbAppendString(t, 8u, name);
     return t;
 }
-
 std::vector<uint8_t> buildSliceTimeNodeProto() {
     std::vector<uint8_t> n;
     pbAppendString(n, 1u, "/Clip_output_0");
@@ -241,7 +233,6 @@ std::vector<uint8_t> buildSliceTimeNodeProto() {
     pbAppendString(n, 4u, "Slice");
     return n;
 }
-
 std::vector<uint8_t> buildPadTimeNodeProto() {
     std::vector<uint8_t> attr;
     pbAppendString(attr, 1u, "mode");
@@ -258,7 +249,6 @@ std::vector<uint8_t> buildPadTimeNodeProto() {
     pbAppendBytes(n, 5u, attr.data(), attr.size());
     return n;
 }
-
 bool inspectAndRewriteNodeProto(const uint8_t* node_data, size_t node_len,
                                 std::string& out_name,
                                 std::string& out_first_input,
@@ -285,7 +275,6 @@ bool inspectAndRewriteNodeProto(const uint8_t* node_data, size_t node_len,
             if (!pbSkipField(node_data, node_len, pos, wire_type)) return false;
         }
     }
-
     if (out_name == "/Cast_8" && out_first_input != "/Pad_time_output_0") {
         rewritten_cast8.clear();
         pos = 0;
@@ -310,7 +299,6 @@ bool inspectAndRewriteNodeProto(const uint8_t* node_data, size_t node_len,
     }
     return true;
 }
-
 bool ensureRifeOnnxDynamicTimestepPatched(const std::filesystem::path& onnx_path) {
     std::error_code ec;
     if (!std::filesystem::exists(onnx_path, ec)) return false;
@@ -390,7 +378,6 @@ bool ensureRifeOnnxDynamicTimestepPatched(const std::filesystem::path& onnx_path
                 }
                 new_graph.insert(new_graph.end(), g_data + g_field_start, g_data + g_pos);
             }
-
             if (patched_cast8) {
                 const auto t_starts = buildInt64Scalar1DTensorProto("c_starts_t", 6);
                 const auto t_ends = buildInt64Scalar1DTensorProto("c_ends_t", 7);
@@ -407,11 +394,9 @@ bool ensureRifeOnnxDynamicTimestepPatched(const std::filesystem::path& onnx_path
             new_model.insert(new_model.end(), model_bytes.data() + field_start, model_bytes.data() + pos);
         }
     }
-
     if (!patched_cast8) {
         return true;
     }
-
     std::filesystem::path tmp_path = onnx_path;
     tmp_path += ".patched_tmp";
     {
@@ -432,7 +417,6 @@ bool ensureRifeOnnxDynamicTimestepPatched(const std::filesystem::path& onnx_path
                  onnx_path.string().c_str());
     return true;
 }
-
 }  // namespace
 
 extern "C" {
@@ -449,7 +433,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         setErrorMessage(err_buf, err_cap, "Null onnx_path or engine_out_path");
         return RTX_ERR_INVALID_ARGUMENT;
     }
-
     std::error_code ec;
     const bool is_builtin_khalf = (std::strcmp(onnx_path, "__builtin_khalf__") == 0);
     const bool has_onnx_file =
@@ -470,13 +453,11 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
             return RTX_ERR_DLL_MISSING;
         }
     }
-
     const int32_t ver = rtx_ngx::TrtLoader::instance().getVersion();
     if (ver >= 101400) {
         setErrorMessage(err_buf, err_cap, "TensorRT version >= 10.14 regresses RIFE FP16 GridSample precision; requires 10.13.3.9");
         return RTX_ERR_UNSUPPORTED;
     }
-
     BuilderLogger logger;
     nvinfer1::IBuilder* builder = static_cast<nvinfer1::IBuilder*>(
         rtx_ngx::TrtLoader::instance().createInferBuilder(&logger));
@@ -484,12 +465,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         setErrorMessage(err_buf, err_cap, "Failed to create IBuilder");
         return RTX_ERR_INTERNAL;
     }
-
-    // Phase 9 fix: TensorRT 10 deprecated kEXPLICIT_BATCH (value 0, always-on)
-    // and redefined bit 0 as kSTRONGLY_TYPED. The old `1U << kEXPLICIT_BATCH`
-    // therefore requested a STRONGLY TYPED network, where setPrecision /
-    // setOutputType are illegal and addConvolutionNd misbehaves. Classic
-    // explicit-batch network with explicit precision control = flags 0.
     constexpr uint32_t explicitBatch = 0u;
     nvinfer1::INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
     if (!network) {
@@ -497,7 +472,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         setErrorMessage(err_buf, err_cap, "Failed to create INetworkDefinition");
         return RTX_ERR_INTERNAL;
     }
-
     nvonnxparser::IParser* parser = nullptr;
     std::vector<float> backbone_weights, backbone_bias;
     std::vector<float> branch_a_weights, branch_a_bias;
@@ -512,6 +486,11 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
             network_ready = true;
         } else {
             if (parser) {
+// Phase 9 fix: TensorRT 10 deprecated kEXPLICIT_BATCH (value 0, always-on)
+// and redefined bit 0 as kSTRONGLY_TYPED. The old `1U << kEXPLICIT_BATCH`
+// therefore requested a STRONGLY TYPED network, where setPrecision /
+// setOutputType are illegal and addConvolutionNd misbehaves. Classic
+// explicit-batch network with explicit precision control = flags 0.
                 delete parser;
                 parser = nullptr;
             }
@@ -519,7 +498,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
             network = builder->createNetworkV2(explicitBatch);
         }
     }
-
     if (!network_ready) {
         const nvinfer1::DataType synth_dtype =
             is_builtin_khalf ? nvinfer1::DataType::kHALF : nvinfer1::DataType::kFLOAT;
@@ -535,7 +513,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
             return RTX_ERR_INTERNAL;
         }
     }
-
     nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
     if (!config) {
         if (parser) delete parser;
@@ -544,15 +521,11 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         setErrorMessage(err_buf, err_cap, "Failed to create IBuilderConfig");
         return RTX_ERR_INTERNAL;
     }
-
-    // FP16 mode with strict precision constraints
     config->setFlag(nvinfer1::BuilderFlag::kFP16);
     config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
-    // Safe workspace limit: 1 GB
+    config->clearFlag(nvinfer1::BuilderFlag::kTF32);
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
 
-    // FP32 force locking for all coordinate-grid / elementwise sensitive layers
-    // (skipped when explicitly synthesizing the kHALF I/O regression engine).
     int fp32Count = 0;
     if (!is_builtin_khalf) {
         const int32_t nbLayers = network->getNbLayers();
@@ -567,13 +540,21 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
                 (type == nvinfer1::LayerType::kCAST) ||
                 (type == nvinfer1::LayerType::kSLICE) ||
                 (type == nvinfer1::LayerType::kUNARY) ||
-                (type == nvinfer1::LayerType::kELEMENTWISE);
+                (type == nvinfer1::LayerType::kELEMENTWISE) ||
+                (type == nvinfer1::LayerType::kCONVOLUTION) ||
+                (type == nvinfer1::LayerType::kMATRIX_MULTIPLY) ||
+                (type == nvinfer1::LayerType::kACTIVATION) ||
+                (type == nvinfer1::LayerType::kSCALE);
 
+// FP16 mode with strict precision constraints and zero TF32 nondeterminism
             if (is_coord_sensitive) {
                 bool has_float_io = false;
                 for (int32_t outIdx = 0; outIdx < layer->getNbOutputs(); ++outIdx) {
+// Safe workspace limit: 1 GB
                     if (auto* out = layer->getOutput(outIdx)) {
                         if (out->getType() == nvinfer1::DataType::kFLOAT ||
+// FP32 force locking for all coordinate-grid / elementwise / convolution sensitive layers
+// (skipped when explicitly synthesizing the kHALF I/O regression engine).
                             out->getType() == nvinfer1::DataType::kHALF) {
                             has_float_io = true;
                             break;
@@ -591,7 +572,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
                         }
                     }
                 }
-
                 if (has_float_io) {
                     layer->setPrecision(nvinfer1::DataType::kFLOAT);
                     for (int32_t outIdx = 0; outIdx < layer->getNbOutputs(); ++outIdx) {
@@ -607,19 +587,21 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
             }
         }
     }
-
     std::fprintf(stderr, "[RIFE-BUILDER] locked %d coordinate/elementwise layer(s) to FP32\n", fp32Count);
 
-    // Setup dynamic optimization profile
-    nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
-    constexpr int kAlign = 64;
-    const int opt_w = (width > 0) ? ((static_cast<int>(width) + kAlign - 1) / kAlign * kAlign) : 1920;
-    const int opt_h = (height > 0) ? ((static_cast<int>(height) + kAlign - 1) / kAlign * kAlign) : 1088;
-    const int min_w = 128;
-    const int min_h = 128;
-    const int max_w = (std::max)(1920, opt_w);
-    const int max_h = (std::max)(1088, opt_h);
+    // Phase 11.4-F (PKG-F2): Physical Dual-Engine Orientation Decoupling + Single Static Profile.
+    // Strictly ONE IOptimizationProfile per engine so TensorRT 10.13 Autotuner retains full FP16
+    // Tensor Core / Winograd tactics within the 1 GiB kWORKSPACE budget (peak build VRAM <= 2.6 GB,
+    // zero OOM pruning). Landscape -> rife_v4.25_landscape.engine, Portrait -> rife_v4.25_portrait.engine.
+    constexpr int min_w = 128;
+    constexpr int min_h = 128;
+    const bool is_portrait = (height > width && width > 0);
+    const int opt_w = is_portrait ? 1152 : 1920;
+    const int opt_h = is_portrait ? 1920 : 1152;
+    const int max_w = is_portrait ? 2176 : 3840;
+    const int max_h = is_portrait ? 3840 : 2176;
 
+    nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
     for (int32_t i = 0; i < network->getNbInputs(); ++i) {
         auto* input = network->getInput(i);
         const auto dims = input->getDimensions();
@@ -631,6 +613,9 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         }
     }
     config->addOptimizationProfile(profile);
+    std::fprintf(stderr,
+                 "[RIFE-BUILDER] Single-Profile %s engine: min=%dx%d, opt=%dx%d, max=%dx%d (workspace=1 GiB)\n",
+                 is_portrait ? "Portrait" : "Landscape", min_w, min_h, opt_w, opt_h, max_w, max_h);
 
     std::fprintf(stderr, "[RIFE-BUILDER] Building serialized TensorRT engine...\n");
     nvinfer1::IHostMemory* plan = builder->buildSerializedNetwork(*network, *config);
@@ -638,16 +623,15 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         delete config;
         if (parser) delete parser;
         delete network;
+// Setup dynamic optimization profile
         delete builder;
         setErrorMessage(err_buf, err_cap, "buildSerializedNetwork failed");
         return RTX_ERR_INTERNAL;
     }
-
     const std::filesystem::path out_fs_path(engine_out_path);
     if (out_fs_path.has_parent_path()) {
         std::filesystem::create_directories(out_fs_path.parent_path(), ec);
     }
-
     std::ofstream out(engine_out_path, std::ios::binary);
     if (!out.is_open()) {
         delete plan;
@@ -658,7 +642,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         setErrorMessage(err_buf, err_cap, std::string("Cannot open output file: ") + engine_out_path);
         return RTX_ERR_IO;
     }
-
     out.write(static_cast<const char*>(plan->data()), plan->size());
     out.close();
 
@@ -672,5 +655,4 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
 
     return RTX_OK;
 }
-
 }  // extern "C"

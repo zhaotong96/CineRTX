@@ -59,10 +59,10 @@ function(_rtx_provision_tool tool_name url expected_sha exe_name out_var)
 
     if(_need_download)
         message(STATUS "[CineRTX-Bootstrap] Downloading ${tool_name} from ${url}")
-        # curl is tried first because it honours HTTPS_PROXY/HTTP_PROXY, which
-        # file(DOWNLOAD) does not. Visual Studio's CMake integration inherits
-        # those variables, so this is the only proxy-aware path available to an
-        # IDE-driven configure.
+# curl is tried first because it honours HTTPS_PROXY/HTTP_PROXY, which
+# file(DOWNLOAD) does not. Visual Studio's CMake integration inherits
+# those variables, so this is the only proxy-aware path available to an
+# IDE-driven configure.
         find_program(_rtx_curl_exe NAMES curl.exe curl)
         if(_rtx_curl_exe)
             execute_process(
@@ -131,9 +131,8 @@ set(_rtx_nasm_sha "3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa722
 set(_rtx_make_url "https://downloads.sourceforge.net/project/ezwinports/make-4.4.1-without-guile-w32-bin.zip")
 set(_rtx_make_sha "fb66a02b530f7466f6222ce53c0b602c5288e601547a034e4156a512dd895ee7")
 
-
-# 1. 确保 Git Submodule 源码已就绪
 if(NOT EXISTS "${_ffmpeg_submodule_dir}/configure")
+# 1. 确保 Git Submodule 源码已就绪
     find_package(Git QUIET)
     if(GIT_FOUND)
         message(STATUS "[CineRTX] Initializing FFmpeg submodule at third_party/ffmpeg...")
@@ -153,18 +152,18 @@ if(NOT EXISTS "${_ffmpeg_submodule_dir}/configure")
     endif()
 endif()
 
-# 2. 检查静态物料是否已构建且合规
 set(_need_build_ffmpeg FALSE)
+# 2. 检查静态物料是否已构建且合规
 set(_required_ffmpeg_libs avformat avcodec avutil swresample)
 
 if(WIN32)
-    # CRT provenance gate.  The product is linked with the static CRT (/MT);
-    # FFmpeg archives built with /MD carry /DEFAULTLIB:MSVCRT and unresolved
-    # __imp_* references that the linker cannot satisfy from libucrt.lib.  The
-    # stamp is written only after a successful build of the current supply
-    # chain, so an existing build tree populated by the old /MD recipe is
-    # rebuilt once instead of being silently reused.
     if(NOT EXISTS "${_ffmpeg_lib_dir}/.rtx-static-crt")
+# CRT provenance gate.  The product is linked with the static CRT (/MT);
+# FFmpeg archives built with /MD carry /DEFAULTLIB:MSVCRT and unresolved
+# __imp_* references that the linker cannot satisfy from libucrt.lib.  The
+# stamp is written only after a successful build of the current supply
+# chain, so an existing build tree populated by the old /MD recipe is
+# rebuilt once instead of being silently reused.
         set(_need_build_ffmpeg TRUE)
     endif()
 
@@ -178,8 +177,8 @@ if(WIN32)
             break()
         endif()
 
-        # 核心防伪熔断：动态库导入桩仅 ~130 KB，真静态归档库必 > 450 KB
         if(_lib_name STREQUAL "avformat" OR _lib_name STREQUAL "avcodec")
+# 核心防伪熔断：动态库导入桩仅 ~130 KB，真静态归档库必 > 450 KB
             file(SIZE "${_lib_file}" _lib_size_bytes)
             if(_lib_size_bytes LESS 450000)
                 set(_need_build_ffmpeg TRUE)
@@ -192,13 +191,13 @@ if(WIN32)
         set(_need_build_ffmpeg TRUE)
     endif()
 
-    # 3. 若尚未构建，自动触发本地手术刀级静态编译
     if(_need_build_ffmpeg)
+# 3. 若尚未构建，自动触发本地手术刀级静态编译
         message(STATUS "[CineRTX-FFmpeg] Surgical static FFmpeg libraries not found or invalid in ${_ffmpeg_dist_dir}.")
         message(STATUS "[CineRTX-FFmpeg] Triggering automated surgical static build from third_party/ffmpeg...")
 
-        # ---- 施工项 A-1: nasm / make 缺失时就地拉取便携版 ----
         find_program(NASM_EXE NAMES nasm.exe nasm)
+# ---- 施工项 A-1: nasm / make 缺失时就地拉取便携版 ----
         if(NOT NASM_EXE)
             _rtx_provision_tool(nasm "${_rtx_nasm_url}" "${_rtx_nasm_sha}" nasm.exe _nasm_provisioned)
             if(_nasm_provisioned)
@@ -226,15 +225,15 @@ if(WIN32)
         get_filename_component(_make_dir "${MAKE_EXE}" DIRECTORY)
         message(STATUS "[CineRTX-Bootstrap] make: ${MAKE_EXE}")
 
-        # 局部 PATH 注入: 仅对本次子进程生效，绝不触碰系统 PATH。
-        # 注意: PATH 值含 ';' (CMake 列表分隔符)，必须以带引号的单一实参传递。
         set(_child_path "${_nasm_dir};${_make_dir};$ENV{PATH}")
+# 局部 PATH 注入: 仅对本次子进程生效，绝不触碰系统 PATH。
+# 注意: PATH 值含 ';' (CMake 列表分隔符)，必须以带引号的单一实参传递。
         set(_zig_env "")
         set(_rtx_zig_for_child "")
         if(RTX_ZIG_EXECUTABLE)
-            # CMake 已选定 Zig 工具链: FFmpeg 必须使用同一 ABI，即使当前环境
-            # (例如 Visual Studio 的 CMake 集成) 同时提供了 cl.exe。
             set(_rtx_zig_for_child "${RTX_ZIG_EXECUTABLE}")
+# CMake 已选定 Zig 工具链: FFmpeg 必须使用同一 ABI，即使当前环境
+# (例如 Visual Studio 的 CMake 集成) 同时提供了 cl.exe。
         else()
             find_program(_cl_probe NAMES cl.exe cl)
             if(NOT _cl_probe)
@@ -250,16 +249,17 @@ if(WIN32)
             set(_zig_env "RTX_ZIG=${_rtx_zig_for_child}")
         endif()
 
-        # 规范化转义 POSIX 风格路径供 bash 使用
         file(TO_CMAKE_PATH "${_ffmpeg_submodule_dir}" _src_path)
+# 规范化转义 POSIX 风格路径供 bash 使用
         file(TO_CMAKE_PATH "${_ffmpeg_dist_dir}" _dist_path)
         file(TO_CMAKE_PATH "${_ffmpeg_build_dir}" _bld_path)
 
-        # Write helper scripts into _ffmpeg_scripts_dir (NEVER inside _ffmpeg_build_dir,
-        # because the build script executes `rm -rf "${BUILD_DIR}"` at startup!).
         file(MAKE_DIRECTORY "${_ffmpeg_scripts_dir}" "${_ffmpeg_build_dir}")
+# Write helper scripts into _ffmpeg_scripts_dir (NEVER inside _ffmpeg_build_dir,
+# because the build script executes `rm -rf "${BUILD_DIR}"` at startup!).
         file(WRITE "${_ffmpeg_scripts_dir}/build_ffmpeg_static_msvc.sh" [=[#!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
+
 # 文件路径: tools/build_ffmpeg_static_msvc.sh
 # 功能说明: 在 Windows MSVC 2022 (cl.exe / lib.exe) 工具链下编译手术刀级裁剪的 FFmpeg 7.1.1 静态归档库 (.lib)
 # 适用目标: CineRTX 单 EXE 自包含架构 (体积包络: 静态库合计 ~2.7 MB, 纯 LGPLv2.1+ 零外部第三方依赖)
@@ -281,7 +281,6 @@ if(WIN32)
 # 注意: 本脚本产出的 .lib 为真实 COFF 静态归档 (avformat/avcodec 均 > 450 KB)。
 # 若误用 ffmpeg-full_build-shared 附带的导入桩 (127-137 KB), CMake 侧的
 # RtxFfmpegStatic.cmake 会在配置阶段以 FATAL_ERROR 阻断构建。
-
 set -euo pipefail
 
 FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.1}"
@@ -303,6 +302,7 @@ fi
 rm -rf "${BUILD_DIR}" "${PREFIX_DIR}"
 mkdir -p "${BUILD_DIR}" "${PREFIX_DIR}"
 
+CYGPATH="$(command -v cygpath 2>/dev/null || true)"
 # FFmpeg's configure refuses out-of-tree builds when the source path contains
 # whitespace ("Out of tree builds are impossible with whitespace in source
 # path"), and make cannot represent blanks in prerequisite/include paths.  A
@@ -312,7 +312,6 @@ mkdir -p "${BUILD_DIR}" "${PREFIX_DIR}"
 # build_ffmpeg_static.bat only guarantees bash's own directory on PATH, so
 # cygpath is reachable through MSYS's fixed /usr/bin mount even when it is not
 # on PATH.  On non-MSYS hosts the tool is absent and this block is skipped.
-CYGPATH="$(command -v cygpath 2>/dev/null || true)"
 [[ -n "${CYGPATH}" ]] || CYGPATH=/usr/bin/cygpath.exe
 if [[ -x "${CYGPATH}" ]]; then
     SRC_DIR="$("${CYGPATH}" -s -m "${SRC_DIR}")"
@@ -326,13 +325,13 @@ if [[ -x "${CYGPATH}" ]]; then
 fi
 cd "${BUILD_DIR}"
 
+sed -i 's/\r$//' "${SRC_DIR}/configure" "${SRC_DIR}"/ffbuild/*.sh 2>/dev/null || true
 # 手术刀级 ./configure 配置指令：
 # 1. --toolchain=msvc 生成原生 COFF .lib 归档，传递 -MT -O2 -Ob2 -Gy -Gw 实现节区级死代码消除
 #    注意: 必须使用静态 CRT (-MT)，与 CineRTX 主工程的 CMAKE_MSVC_RUNTIME_LIBRARY 保持一致。
 #    若误用 -MD，归档会引用 __imp_* 并在 /MT 可执行文件链接时产生 LNK2001/LNK4217。
 # 2. --disable-everything --disable-autodetect 斩断一切隐式外部依赖与硬件探测
 # 3. 100% 禁用 CPU 视频编解码器、软缩放 (swscale)、滤镜图 (avfilter) 与系统网络/安全库 (network/schannel/mf)
-sed -i 's/\r$//' "${SRC_DIR}/configure" "${SRC_DIR}"/ffbuild/*.sh 2>/dev/null || true
 sh "${SRC_DIR}/configure" \
     --prefix="${PREFIX_DIR}" \
     --toolchain=msvc \
@@ -382,7 +381,7 @@ sh "${SRC_DIR}/configure" \
     --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,av1_metadata,extract_extradata,aac_adtstoasc,vp9_superframe,vp9_raw_reorder,null \
     --enable-parser=h264,hevc,av1,vp9,mpeg4video,aac,aac_latm,opus,mpegaudio,flac,ac3,vorbis \
     --enable-decoder=prores,dnxhd,dvvideo,aac,aac_fixed,aac_latm,opus,mp3,mp3float,flac,ac3,eac3,vorbis,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le,pcm_f32be,pcm_f64le,pcm_alaw,pcm_mulaw \
-    --enable-encoder=libsvtav1,libx265,libx264,aac,opus,eac3,ac3,flac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
+    --enable-encoder=aac,opus,eac3,ac3,flac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
     --extra-cflags="-MT -O2 -Ob2 -Gy -Gw -Zc:inline -utf-8 -D_WIN32_WINNT=0x0A00"
 
 posix_to_win() {
@@ -406,15 +405,15 @@ done
 
 echo "[CineRTX-FFmpeg] Compiling surgical static archives..."
 make -j"$(nproc)"
+make V=1 install
 # V=1 is load-bearing: in quiet mode ffbuild/common.mak rewrites INSTALL into
 # `@printf "INSTALL\t%s\n" $^; install -m 644 $^ "$dir"`, duplicating the whole
 # prerequisite list.  install-libavutil-headers then becomes a single ~11 KB
 # recipe line that make's `sh -c` invocation truncates, and install dies with
 # "target '.../liba' is not a directory".  See build_ffmpeg_static_zig.sh.
-make V=1 install
 
-# 清理 pkgconfig 与多余包装文件，确保产物目录绝对纯净
 rm -rf "${PREFIX_DIR}/lib/pkgconfig" "${PREFIX_DIR}/share"
+# 清理 pkgconfig 与多余包装文件，确保产物目录绝对纯净
 
 echo "[CineRTX-FFmpeg] Verifying static archive sizes (must NOT be ~130KB import stubs)..."
 for name in avformat avcodec avutil swresample; do
@@ -429,8 +428,8 @@ for name in avformat avcodec avutil swresample; do
     echo "  -> ${name}.lib: ${size_bytes} bytes"
 done
 
-# 导入桩熔断：真静态归档的 avformat/avcodec 必大于 450 KB
 for lib in avformat.lib avcodec.lib; do
+# 导入桩熔断：真静态归档的 avformat/avcodec 必大于 450 KB
     size_bytes=$(stat -c%s "${PREFIX_DIR}/lib/${lib}")
     if [[ "${size_bytes}" -lt 450000 ]]; then
         echo "ERROR: ${lib} is only ${size_bytes} bytes (< 450 KB) - this is a DLL import stub, not a static archive."
@@ -451,6 +450,7 @@ echo "[CineRTX-FFmpeg] Static libraries ready in ${PREFIX_DIR}/lib"
 ]=])
         file(WRITE "${_ffmpeg_scripts_dir}/build_ffmpeg_static_zig.sh" [=[#!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
+
 # 文件路径: tools/build_ffmpeg_static_zig.sh
 # 功能说明: 零宿主前置假设 (无 MSVC) 下的 FFmpeg 手术刀级静态编译支路：
 #           以 `zig cc -target x86_64-windows-gnu` 作为 MinGW-w64 交叉编译器，
@@ -470,7 +470,6 @@ echo "[CineRTX-FFmpeg] Static libraries ready in ${PREFIX_DIR}/lib"
 #
 # 注意: 本脚本产出的 .a 为真实静态归档 (avformat/avcodec 均 > 450 KB)，
 #       cmake/RtxFfmpegStatic.cmake 的导入桩防伪熔断门禁原样生效。
-
 set -euo pipefail
 
 SRC_DIR="${1:-./ffmpeg}"
@@ -499,6 +498,7 @@ fi
 rm -rf "${BUILD_DIR}" "${PREFIX_DIR}"
 mkdir -p "${BUILD_DIR}" "${PREFIX_DIR}"
 
+CYGPATH="$(command -v cygpath 2>/dev/null || true)"
 # FFmpeg's configure refuses out-of-tree builds when the source path contains
 # whitespace ("Out of tree builds are impossible with whitespace in source
 # path"), and make cannot represent blanks in prerequisite/include paths.  A
@@ -508,7 +508,6 @@ mkdir -p "${BUILD_DIR}" "${PREFIX_DIR}"
 # build_ffmpeg_static.bat only guarantees bash's own directory on PATH, so
 # cygpath is reachable through MSYS's fixed /usr/bin mount even when it is not
 # on PATH.  On non-MSYS hosts the tool is absent and this block is skipped.
-CYGPATH="$(command -v cygpath 2>/dev/null || true)"
 [[ -n "${CYGPATH}" ]] || CYGPATH=/usr/bin/cygpath.exe
 if [[ -x "${CYGPATH}" ]]; then
     SRC_DIR="$("${CYGPATH}" -s -m "${SRC_DIR}")"
@@ -522,6 +521,7 @@ if [[ -x "${CYGPATH}" ]]; then
 fi
 cd "${BUILD_DIR}"
 
+mkdir -p wrappers
 # ---- zig 包装器 -------------------------------------------------------------
 # FFmpeg configure 以不带引号的 $cc/$ar/... 展开调用工具，因此统一生成无空格
 # 依赖的 POSIX 包装脚本；zig 0.13 提供 ar/ranlib/objcopy/rc，但不提供 nm 与
@@ -531,7 +531,6 @@ cd "${BUILD_DIR}"
 #               x86_64-windows-gnu 目标无下划线前缀，空输出即产生正确的
 #               extern_prefix="" (已核实 FFmpeg 7.1 构建系统中 NM_CMD 不再被
 #               任何 .mak/Makefile 消费)。
-mkdir -p wrappers
 WRAPPER_DIR="$(pwd)/wrappers"
 
 make_wrapper() { # $1=name  $2...=argv
@@ -539,7 +538,8 @@ make_wrapper() { # $1=name  $2...=argv
     printf '#!/bin/sh\nexec %s "$@"\n' "$*" > "${WRAPPER_DIR}/${name}"
     chmod +x "${WRAPPER_DIR}/${name}"
 }
-
+make_cc_wrapper() { # $1=name  $2=subcommand(cc|c++)
+    cat > "${WRAPPER_DIR}/$1" <<EOF
 # 编译器包装器需额外过滤 configure 为 mingw32 注入的
 # `-Wl,--pic-executable,-e,mainCRTStartup`：zig 的 lld 驱动拒绝该参数
 # ("unsupported linker arg")，导致 configure 的全部链接探测失败、
@@ -547,28 +547,27 @@ make_wrapper() { # $1=name  $2...=argv
 # zig 自带 mingw-w64 math.h 的声明冲突。本构建 --disable-programs 且
 # 仅产出静态归档，可执行链接标志本就不会真正使用，剔除完全安全。
 # (包装器由 Git Bash 的 sh=bash 执行，可安全使用数组语法。)
-make_cc_wrapper() { # $1=name  $2=subcommand(cc|c++)
-    cat > "${WRAPPER_DIR}/$1" <<EOF
-#!/bin/sh
 _out=()
 for _a in "\$@"; do
+#!/bin/sh
     case "\$_a" in *--pic-executable*) ;; *) _out+=("\$_a") ;; esac
 done
 exec "${ZIG_WIN}" $2 -target x86_64-windows-gnu "\${_out[@]}"
 EOF
     chmod +x "${WRAPPER_DIR}/$1"
 }
-
-# 统一为带正斜杠的 Windows 路径 (msys sh 与原生进程均可直接 exec)
 ZIG_WIN="${ZIG//\\//}"
 
 make_cc_wrapper zcc   cc
+# 统一为带正斜杠的 Windows 路径 (msys sh 与原生进程均可直接 exec)
 make_cc_wrapper zcxx  c++
 make_wrapper zar      "\"${ZIG_WIN}\" ar"
 make_wrapper zranlib  "\"${ZIG_WIN}\" ranlib"
 printf '#!/bin/sh\nexit 0\n' > "${WRAPPER_DIR}/znm"
 chmod +x "${WRAPPER_DIR}/znm"
 
+export MSYS2_ARG_CONV_EXCL="*"
+sed -i 's/\r$//' "${SRC_DIR}/configure" "${SRC_DIR}"/ffbuild/*.sh 2>/dev/null || true
 # ---- 手术刀级 ./configure ----------------------------------------------------
 # 与 build_ffmpeg_static_msvc.sh 完全一致的裁剪清单；仅替换工具链相关部分：
 #   --toolchain=msvc --target-os=win64   ->  --enable-cross-compile
@@ -576,8 +575,6 @@ chmod +x "${WRAPPER_DIR}/znm"
 #   MSVC 专属 flags (-MD -O2 -Ob2 -Gy -Gw -Zc:inline -utf-8)
 #                                        ->  clang/GNU 风格 -O2
 #   新增 --disable-stripping (zig 0.13 无 strip 子命令)
-export MSYS2_ARG_CONV_EXCL="*"
-sed -i 's/\r$//' "${SRC_DIR}/configure" "${SRC_DIR}"/ffbuild/*.sh 2>/dev/null || true
 sh "${SRC_DIR}/configure" \
     --prefix="${PREFIX_DIR}" \
     --enable-cross-compile \
@@ -634,18 +631,18 @@ sh "${SRC_DIR}/configure" \
     --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,av1_metadata,extract_extradata,aac_adtstoasc,vp9_superframe,vp9_raw_reorder,null \
     --enable-parser=h264,hevc,av1,vp9,mpeg4video,aac,aac_latm,opus,mpegaudio,flac,ac3,vorbis \
     --enable-decoder=prores,dnxhd,dvvideo,aac,aac_fixed,aac_latm,opus,mp3,mp3float,flac,ac3,eac3,vorbis,alac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s24be,pcm_s32le,pcm_f32le,pcm_f32be,pcm_f64le,pcm_alaw,pcm_mulaw \
-    --enable-encoder=libsvtav1,libx265,libx264,aac,opus,eac3,ac3,flac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
+    --enable-encoder=aac,opus,eac3,ac3,flac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
     --extra-cflags="-O2 -D_WIN32_WINNT=0x0A00"
 
+posix_to_win() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -s -m "$1"
 # ---- 路径归一化 -------------------------------------------------------------
 # MSYS `pwd` 会以 POSIX 形态 (/c/...) 把源码树与包装器路径写入 Makefile 和
 # ffbuild/config.mak；便携版原生 make.exe 会将其误解为驱动器相对路径
 # (/c/x -> <当前驱动器>:\c\x) 而报 "No such file or directory"。
 # 这里统一改写为 Windows 正斜杠形态 (C:/...)：原生 make.exe 的 include 与
 # 依赖解析、以及经 sh.exe 执行的配方 (zig/nasm/install 均接受 C:/...) 全部兼容。
-posix_to_win() {
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -s -m "$1"
     elif [[ -x /usr/bin/cygpath.exe ]]; then
         /usr/bin/cygpath.exe -s -m "$1"
     else
@@ -662,15 +659,15 @@ for f in Makefile ffbuild/config.mak ffbuild/config.sh ffbuild/config.fate confi
     sed -i -e "s|${_src_posix}|${_src_win}|g" -e "s|${_bld_posix}|${_bld_win}|g" "${f}"
 done
 
+if ! grep -q '^#define HAVE_THREADS 1$' config.h; then
+    echo "ERROR: FFmpeg configured itself with HAVE_THREADS 0."
+    echo "       The static archives would be unusable from CineRTX's multi-threaded"
 # ---- 线程与原子性熔断 -------------------------------------------------------
 # configure 的任何链接探测失败都会让 FFmpeg 静默退化为 HAVE_THREADS 0 且回落到
 # compat/atomics/dummy (原子操作变成非原子空实现)。zig 的 lld 拒绝 mingw32 的
 # -Wl,--pic-executable 时正是如此 —— 上面的 zcc/zcxx 包装器已剔除该参数，但退化
 # 本身是无声的，而 CineRTX 的 PipelineScheduler 会从多个线程调用 libav*，链接
 # 这样的归档等于埋下数据竞争。因此在编译前硬性拒绝。
-if ! grep -q '^#define HAVE_THREADS 1$' config.h; then
-    echo "ERROR: FFmpeg configured itself with HAVE_THREADS 0."
-    echo "       The static archives would be unusable from CineRTX's multi-threaded"
     echo "       scheduler. Inspect ffbuild/config.log for the failing link probe."
     exit 1
 fi
@@ -683,6 +680,9 @@ echo "[CineRTX-FFmpeg-Zig] Thread/atomic fuse OK: $(grep -o 'HAVE_[A-Z0-9]*THREA
 
 echo "[CineRTX-FFmpeg-Zig] Compiling surgical static archives (zig cc -target x86_64-windows-gnu)..."
 "${MAKE_BIN}" -j"$(nproc)"
+"${MAKE_BIN}" V=1 install
+
+rm -rf "${PREFIX_DIR}/lib/pkgconfig" "${PREFIX_DIR}/share"
 # V=1 is load-bearing, not verbosity preference.  In quiet mode FFmpeg's
 # ffbuild/common.mak rewrites INSTALL into
 #   @printf "INSTALL\t%s\n" $^; install -m 644 $^ "$dir"
@@ -691,12 +691,9 @@ echo "[CineRTX-FFmpeg-Zig] Compiling surgical static archives (zig cc -target x8
 # truncated mid-way -- install then receives a source header as its target and
 # dies with "target '.../liba' is not a directory".  V=1 drops the printf
 # wrapper, halving the line to ~5.6 KB, which passes intact.
-"${MAKE_BIN}" V=1 install
-
-# 清理 pkgconfig 与多余包装文件，确保产物目录绝对纯净
-rm -rf "${PREFIX_DIR}/lib/pkgconfig" "${PREFIX_DIR}/share"
 
 echo "[CineRTX-FFmpeg-Zig] Verifying static archive sizes (must NOT be ~130KB import stubs)..."
+# 清理 pkgconfig 与多余包装文件，确保产物目录绝对纯净
 for name in avformat avcodec avutil swresample; do
     target_lib="${PREFIX_DIR}/lib/lib${name}.a"
     [[ -f "${target_lib}" ]] || { echo "ERROR: Missing ${target_lib}"; exit 1; }
@@ -704,10 +701,10 @@ for name in avformat avcodec avutil swresample; do
     echo "  -> lib${name}.a: ${size_bytes} bytes"
 done
 
-# 导入桩熔断：真静态归档的 avformat/avcodec 必大于 450 KB
 for lib in libavformat.a libavcodec.a; do
     size_bytes=$(stat -c%s "${PREFIX_DIR}/lib/${lib}")
     if [[ "${size_bytes}" -lt 450000 ]]; then
+# 导入桩熔断：真静态归档的 avformat/avcodec 必大于 450 KB
         echo "ERROR: ${lib} is only ${size_bytes} bytes (< 450 KB) - not a real static archive."
         exit 1
     fi
@@ -884,16 +881,16 @@ exit /b %errorlevel%
                 "starting Visual Studio or CMake.")
         endif()
 
-        # The archives now match the product's /MT runtime; record that fact so
-        # the next configure can trust this prefix without rebuilding.
         file(WRITE "${_ffmpeg_lib_dir}/.rtx-static-crt"
             "static CRT supply chain verified\n")
     endif()
+# The archives now match the product's /MT runtime; record that fact so
+# the next configure can trust this prefix without rebuilding.
 
-    # 4. 再次严密校验产物完整性与防伪门禁
     if(NOT EXISTS "${_ffmpeg_inc_dir}/libavformat/avformat.h")
         message(FATAL_ERROR "[CineRTX-FFmpeg] Missing headers at ${_ffmpeg_inc_dir}/libavformat/avformat.h")
     endif()
+# 4. 再次严密校验产物完整性与防伪门禁
 
     foreach(_lib_name IN LISTS _required_ffmpeg_libs)
         set(_lib_file "${_ffmpeg_lib_dir}/${_lib_name}.lib")
@@ -920,16 +917,16 @@ exit /b %errorlevel%
         )
     endforeach()
 
-    # 声明统一聚合靶标 rtx::ffmpeg_static，严格遵循符号依赖拓扑顺序
     add_library(rtx_ffmpeg_static INTERFACE)
     add_library(rtx::ffmpeg_static ALIAS rtx_ffmpeg_static)
 
+# 声明统一聚合靶标 rtx::ffmpeg_static，严格遵循符号依赖拓扑顺序
     target_include_directories(rtx_ffmpeg_static SYSTEM INTERFACE "${_ffmpeg_inc_dir}")
 
-    # 挂载四大静态库及 Win32 系统依赖库 (0 ws2_32.dll for Gate 4)
     target_link_libraries(rtx_ffmpeg_static INTERFACE
         rtx::ffmpeg_avformat
         rtx::ffmpeg_avcodec
+# 挂载四大静态库及 Win32 系统依赖库 (0 ws2_32.dll for Gate 4)
         rtx::ffmpeg_swresample
         rtx::ffmpeg_avutil
         bcrypt
@@ -947,25 +944,25 @@ exit /b %errorlevel%
         )
     endif()
 else()
-    # Linux GCC / Clang: the distribution packages are the supported supply
-    # chain.  CI installs pkg-config plus the four -dev packages; a host without
-    # them cannot configure, which is intended (the media layer is unconditional).
     find_package(PkgConfig QUIET)
     if(PKG_CONFIG_FOUND)
         pkg_check_modules(FFMPEG_STATIC QUIET libavformat libavcodec libswresample libavutil)
+# Linux GCC / Clang: the distribution packages are the supported supply
+# chain.  CI installs pkg-config plus the four -dev packages; a host without
+# them cannot configure, which is intended (the media layer is unconditional).
     endif()
 
     if(FFMPEG_STATIC_FOUND)
         add_library(rtx_ffmpeg_static INTERFACE)
         add_library(rtx::ffmpeg_static ALIAS rtx_ffmpeg_static)
         target_include_directories(rtx_ffmpeg_static SYSTEM INTERFACE ${FFMPEG_STATIC_INCLUDE_DIRS})
-        # Prefer the fully static link set when the distribution ships the .a
-        # archives.  Where it does not, the shared objects are linked and the
-        # binary is not self-contained; Gate 3.0 self-containment is a Windows
-        # product claim, not a Linux one.
         if(FFMPEG_STATIC_STATIC_LIBRARIES)
             target_link_libraries(rtx_ffmpeg_static INTERFACE ${FFMPEG_STATIC_STATIC_LIBRARIES} pthread m dl)
             message(STATUS "[CineRTX-FFmpeg] Linux: libav*.a present, linking statically")
+# Prefer the fully static link set when the distribution ships the .a
+# archives.  Where it does not, the shared objects are linked and the
+# binary is not self-contained; Gate 3.0 self-containment is a Windows
+# product claim, not a Linux one.
         else()
             target_link_libraries(rtx_ffmpeg_static INTERFACE ${FFMPEG_STATIC_LIBRARIES} pthread m dl)
             message(WARNING

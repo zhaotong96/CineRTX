@@ -22,19 +22,23 @@ struct AVIOContext;
 
 namespace rtx::io {
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 class MemoryAvioContext final {
 public:
-    // 32 KB I/O page: one L2-friendly chunk per refill, matching libavformat's
-    // default IO_BUFFER_SIZE class of workloads.
+// 32 KB I/O page: one L2-friendly chunk per refill, matching libavformat's
+// default IO_BUFFER_SIZE class of workloads.
     static constexpr size_t kPageSize = 32768;
 
-    // Read-only view over caller-owned bytes.  The span must outlive the
-    // context; the demuxer keeps the source vector alive for its own lifetime.
+// Read-only view over caller-owned bytes.  The span must outlive the
+// context; the demuxer keeps the source vector alive for its own lifetime.
     explicit MemoryAvioContext(std::span<const uint8_t> read_only_buf);
     explicit MemoryAvioContext(std::span<const std::byte> read_only_buf);
 
-    // Append/overwrite sink.  The vector is resized on demand and the context
-    // never takes ownership of it.
+// Append/overwrite sink.  The vector is resized on demand and the context
+// never takes ownership of it.
     explicit MemoryAvioContext(std::vector<uint8_t>* write_buf);
 
     ~MemoryAvioContext();
@@ -51,9 +55,9 @@ public:
     [[nodiscard]] size_t size() const noexcept;
     [[nodiscard]] bool isInitialized() const noexcept { return valid(); }
 
-    // Marks the stream as seekable (AVIO_SEEKABLE_NORMAL).  libavformat leaves
-    // avio_alloc_context() contexts non-seekable by default, and the mov /
-    // matroska muxers refuse to finalise a non-seekable target.
+// Marks the stream as seekable (AVIO_SEEKABLE_NORMAL).  libavformat leaves
+// avio_alloc_context() contexts non-seekable by default, and the mov /
+// matroska muxers refuse to finalise a non-seekable target.
     void setSeekable(bool seekable) noexcept;
 
 private:

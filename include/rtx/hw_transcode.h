@@ -9,6 +9,7 @@
 #pragma once
 
 #include "rtx/io.h"
+#include "rtx/render_graph.h"
 #include "rtx/rational.h"
 #include "rtx/status.h"
 #include "rtx/types.h"
@@ -17,12 +18,18 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <span>
+#include <stop_token>
 #include <string>
 
 namespace rtx {
 
 // Snapshot handed to the optional progress callback after every decoded/encoded frame.
 // Invoked from the transcoding thread; consumers must not block.
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct HwTranscodeProgress {
     int64_t frames_decoded = 0;
     int64_t frames_encoded = 0;
@@ -30,6 +37,10 @@ struct HwTranscodeProgress {
     double elapsed_ms = 0.0;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct HwTranscodeOptions {
     std::filesystem::path input_path;
     std::filesystem::path output_path;
@@ -45,15 +56,15 @@ struct HwTranscodeOptions {
     int qp = 22;                         // 0..51 (unified default 22 across CLI/GUI/WebUI)
     bool copy_audio = true;
     bool vsr_before_fg = true;           // true = VSR upscale before Frame Gen (vsr-first)
-    // Phase 7 (Task 7-B2): emit SMPTE ST 2094-40 (HDR10+) dynamic metadata
-    // per frame (AV1 OBU_METADATA / HEVC prefix SEI).
+// Phase 7 (Task 7-B2): emit SMPTE ST 2094-40 (HDR10+) dynamic metadata
+// per frame (AV1 OBU_METADATA / HEVC prefix SEI).
     bool hdr10plus = false;
-    // Phase 7 (Task 7-B1): Adobe .cube 3D LUT applied inside the fused pack
-    // kernel (empty = no LUT).
+// Phase 7 (Task 7-B1): Adobe .cube 3D LUT applied inside the fused pack
+// kernel (empty = no LUT).
     std::filesystem::path lut_path;
 
-    // Product remaster geometry. Decoded NV12/P010 frames always traverse
-    // the NGX bridge (preprocess -> VSR -> TrueHDR -> pack v2) before NVENC.
+// Product remaster geometry. Decoded NV12/P010 frames always traverse
+// the NGX bridge (preprocess -> VSR -> TrueHDR -> pack v2) before NVENC.
     int target_width = 3840;   // 4K UHD default (0 = native source resolution)
     int target_height = 2160;  // 4K UHD default (0 = native source resolution)
     bool vsr_enabled = true;
@@ -61,32 +72,36 @@ struct HwTranscodeOptions {
     int peak_nits = 1000;   // 400..4000, TrueHDR peak luminance in cd/m^2
     int geometry_mode = 0;  // 0 = AutoDirect (9:16 portrait aware), 1 = Pillarbox
 
-    // Explicit GPU binding for the NVDEC/NVENC sessions (0 = default device).
+// Explicit GPU binding for the NVDEC/NVENC sessions (0 = default device).
     int device_index = 0;
-    // GOP-segmented transcode start point. Seek to key frame at/before timestamp (ms).
+// GOP-segmented transcode start point. Seek to key frame at/before timestamp (ms).
     int64_t seek_start_ms = -1;
 
-    // Frame-rate up-conversion (FRUC) options (defaults to 60fps hardware optical flow).
+// Frame-rate up-conversion (FRUC) options (defaults to 60fps hardware optical flow).
     bool fruc_enabled = true;
     Rational target_fps{60, 1};  // Default 60 FPS target
     std::filesystem::path rife_engine_path;  // Route B: TensorRT RIFE (.engine)
 
     bool verbose = false;
 
-    // Polled once per frame by the container path. A set flag aborts the
-    // transcode cleanly (flushing already encoded frames and writing the
-    // container trailer) and returns ErrorCode::State ("transcode cancelled").
+// Polled once per frame by the container path. A set flag aborts the
+// transcode cleanly (flushing already encoded frames and writing the
+// container trailer) and returns ErrorCode::State ("transcode cancelled").
     const std::atomic<bool>* cancel = nullptr;
-    // Phase 7 realtime monitoring: the GUI publishes the A/B split position
-    // (0..1) through this atomic; the transcode loop samples it per frame.
+// Phase 7 realtime monitoring: the GUI publishes the A/B split position
+// (0..1) through this atomic; the transcode loop samples it per frame.
     const std::atomic<float>* split_ratio = nullptr;
-    // Phase 7 realtime monitoring: invoked from the transcode thread at most
-    // 15 times per second with the latest 960x540 R10G10B10A2 preview frame
-    // already staged in host memory (pitch in bytes, rows padded).
+// Phase 7 realtime monitoring: invoked from the transcode thread at most
+// 15 times per second with the latest 960x540 R10G10B10A2 preview frame
+// already staged in host memory (pitch in bytes, rows padded).
     std::function<void(const void* r10g10b10a2_data, std::uint32_t pitch)> preview;
     std::function<void(const HwTranscodeProgress&)> progress;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct HwTranscodeReport {
     std::string backend = "nvidia";
     std::string device;
@@ -128,18 +143,26 @@ struct HwTranscodeReport {
     int measured_max_cll_nits = 0;
     int measured_max_fall_nits = 0;
 
-    // Phase 8: dual-path FRUC statistics
+// Phase 8: dual-path FRUC statistics
     int64_t frames_interpolated = 0;
     int64_t fruc_scene_cuts = 0;
     int64_t fruc_failures = 0;
     std::string fruc_backend = "off";
 
-    // Emits a machine-readable JSON record.
+// Emits a machine-readable JSON record.
     std::string toJson() const;
 };
 
 Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& options);
 
-Result<void> runScrubPreview(const HwTranscodeOptions& options, int64_t seek_pts_ms);
+// Phase 11.3-S (S-1.1): 多段执行图连续导出入口（单 NVENC + 单 Muxer 不断流，硬切点强制 IDR）。
+[[nodiscard]] Result<HwTranscodeReport> runNvidiaRemasterRenderGraph(
+    const HwTranscodeOptions& options,
+    std::span<const RenderGraphSegment> segments,
+    std::span<const AudioGraphSegment> audio_segments = {},
+    std::stop_token stop_tok = {});
 
+// Phase 11.2 (Task 5-1 / C-02): runScrubPreview removed -- the fake-playback
+// scrub path performed a 15 Hz D2H readback that the zero-readback monitor
+// (MediaPlaybackSession + rtx_ngx_bridge_borrow_preview) replaces entirely.
 }  // namespace rtx

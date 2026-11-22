@@ -3,6 +3,7 @@
 
 #include "test_framework.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -15,7 +16,6 @@ extern "C" {
 #include <libavformat/avio.h>
 #include <libavutil/error.h>
 }
-
 #include "memory_avio.h"
 #include "rtx/hdr.h"
 #include "rtx/io.h"
@@ -30,9 +30,9 @@ RTX_TEST(io_ffmpeg_diagnostics) {
     std::unique_ptr<IMuxer> muxer = makeFfmpegMuxer();
     RTX_REQUIRE(muxer != nullptr);
 
-    // The media container layer is an unconditional static component: there is
-    // no build in which the diagnostic "not compiled" branch can be taken.
     RTX_CHECK(ffmpegAvailable());
+// The media container layer is an unconditional static component: there is
+// no build in which the diagnostic "not compiled" branch can be taken.
 
     test::TempDir directory;
     const Result<MediaInfo> opened = demuxer->open(directory.file("missing.mkv"));
@@ -48,13 +48,9 @@ RTX_TEST(io_ffmpeg_diagnostics) {
     RTX_CHECK(muxer->finalize().has_value());
     RTX_CHECK(muxer->finalize().has_value());
 }
-
-// ---------------------------------------------------------------------------
-// Zero-disk container I/O (ACT-STATIC-03)
-// ---------------------------------------------------------------------------
-
 RTX_TEST(io_memory_avio_read_seek) {
     std::vector<uint8_t> source(256);
+// Zero-disk container I/O (ACT-STATIC-03)
     for (size_t i = 0; i < source.size(); ++i) {
         source[i] = static_cast<uint8_t>(i);
     }
@@ -67,35 +63,34 @@ RTX_TEST(io_memory_avio_read_seek) {
     RTX_CHECK_EQ(avio_read(context.raw(), buffer, 16), 16);
     RTX_CHECK_EQ(buffer[0], static_cast<uint8_t>(0));
     RTX_CHECK_EQ(buffer[15], static_cast<uint8_t>(15));
-    // The *logical* position advances by 16; the underlying stream position has
-    // already been refilled to the end of the 32 KB page.
     RTX_CHECK_EQ(avio_tell(context.raw()), static_cast<int64_t>(16));
 
-    // libavformat's avio_seek() itself accepts only SEEK_SET/SEEK_CUR; the
-    // SEEK_END branch belongs to the callback and is probed separately below.
     RTX_CHECK_EQ(avio_seek(context.raw(), 32, SEEK_SET), static_cast<int64_t>(32));
+// The *logical* position advances by 16; the underlying stream position has
+// already been refilled to the end of the 32 KB page.
     RTX_CHECK_EQ(avio_read(context.raw(), buffer, 4), 4);
     RTX_CHECK_EQ(buffer[0], static_cast<uint8_t>(32));
+// libavformat's avio_seek() itself accepts only SEEK_SET/SEEK_CUR; the
+// SEEK_END branch belongs to the callback and is probed separately below.
     RTX_CHECK_EQ(avio_seek(context.raw(), -4, SEEK_CUR), static_cast<int64_t>(32));
     RTX_CHECK_EQ(avio_seek(context.raw(), 248, SEEK_SET), static_cast<int64_t>(248));
     RTX_CHECK_EQ(avio_read(context.raw(), buffer, 8), 8);
     RTX_CHECK_EQ(buffer[7], static_cast<uint8_t>(255));
     RTX_CHECK_EQ(avio_size(context.raw()), static_cast<int64_t>(256));
 
-    // Reading past the tail is a clean EOF, not an error.
     RTX_CHECK_EQ(avio_read(context.raw(), buffer, 8), AVERROR_EOF);
 
-    // A negative absolute seek is rejected by avio_seek().
     RTX_CHECK_EQ(avio_seek(context.raw(), -1, SEEK_SET), AVERROR(EINVAL));
+// Reading past the tail is a clean EOF, not an error.
 
-    // The underlying callback must still answer SEEK_END for the avio_size()
-    // fallback path used by non-seekable-looking custom contexts.
     io::MemoryAvioContext tail(std::span<const uint8_t>(source.data(), source.size()));
+// A negative absolute seek is rejected by avio_seek().
     RTX_REQUIRE(tail.valid());
     RTX_CHECK_EQ(tail.raw()->seek(tail.raw()->opaque, -8, SEEK_END),
+// The underlying callback must still answer SEEK_END for the avio_size()
+// fallback path used by non-seekable-looking custom contexts.
                  static_cast<int64_t>(248));
 }
-
 RTX_TEST(io_memory_avio_write) {
     std::vector<uint8_t> sink;
     io::MemoryAvioContext context(&sink);
@@ -109,35 +104,34 @@ RTX_TEST(io_memory_avio_write) {
     RTX_CHECK_EQ(sink[0], static_cast<uint8_t>(1));
     RTX_CHECK_EQ(sink[7], static_cast<uint8_t>(8));
 
-    // Overwrite in place: a muxer back-patches box sizes this way.
     RTX_CHECK_EQ(avio_seek(context.raw(), 4, SEEK_SET), static_cast<int64_t>(4));
     const uint8_t patch[2] = {0xAA, 0xBB};
     avio_write(context.raw(), patch, 2);
     avio_flush(context.raw());
+// Overwrite in place: a muxer back-patches box sizes this way.
     RTX_CHECK_EQ(sink.size(), static_cast<size_t>(8));
     RTX_CHECK_EQ(sink[4], static_cast<uint8_t>(0xAA));
     RTX_CHECK_EQ(sink[5], static_cast<uint8_t>(0xBB));
     RTX_CHECK_EQ(sink[6], static_cast<uint8_t>(7));
 
-    // Seeking past the tail extends the sink with zeroes (sparse write).
     RTX_CHECK_EQ(avio_seek(context.raw(), 16, SEEK_SET), static_cast<int64_t>(16));
     const uint8_t tail[1] = {0x5A};
     avio_write(context.raw(), tail, 1);
     avio_flush(context.raw());
+// Seeking past the tail extends the sink with zeroes (sparse write).
     RTX_CHECK_EQ(sink.size(), static_cast<size_t>(17));
     RTX_CHECK_EQ(sink[15], static_cast<uint8_t>(0));
     RTX_CHECK_EQ(sink[16], static_cast<uint8_t>(0x5A));
     RTX_CHECK_EQ(avio_size(context.raw()), static_cast<int64_t>(17));
 }
-
 RTX_TEST(io_memory_demux_parse) {
-    // A hand-built 16-bit PCM WAV: the demuxer must parse the container over a
-    // memory AVIOContext and then reject it for having no video stream.
     std::vector<uint8_t> wav;
     const auto appendLe32 = [&wav](uint32_t value) {
         wav.push_back(static_cast<uint8_t>(value & 0xFF));
         wav.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
         wav.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+// A hand-built 16-bit PCM WAV: the demuxer must parse the container over a
+// memory AVIOContext and then reject it for having no video stream.
         wav.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
     };
     const auto appendLe16 = [&wav](uint16_t value) {
@@ -166,7 +160,6 @@ RTX_TEST(io_memory_demux_parse) {
     for (uint32_t i = 0; i < samples; ++i) {
         appendLe16(static_cast<uint16_t>(i * 97));
     }
-
     std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(std::move(wav));
     RTX_REQUIRE(demuxer != nullptr);
     const Result<MediaInfo> opened = demuxer->open("memory.wav");
@@ -174,18 +167,14 @@ RTX_TEST(io_memory_demux_parse) {
     RTX_CHECK_EQ(opened.error().code, ErrorCode::InvalidArgument);
     RTX_CHECK_EQ(demuxer->readPacket().error().code, ErrorCode::State);
 
-    // Garbage must fail at the container level, proving the memory AVIO was
-    // really consumed instead of silently falling back to a file.
     std::unique_ptr<IDemuxer> garbage =
         makeMemoryDemuxer(std::vector<uint8_t>(512, 0x7F));
     RTX_REQUIRE(garbage != nullptr);
     RTX_CHECK_EQ(garbage->open("memory.bin").error().code, ErrorCode::Io);
 }
-
 RTX_TEST(io_memory_container_round_trip) {
-    // Fabricated hvcC configuration record (23 bytes).  Matroska stores it as
-    // CodecPrivate verbatim, so no real HEVC decoder is required anywhere in
-    // this test.
+// Garbage must fail at the container level, proving the memory AVIO was
+// really consumed instead of silently falling back to a file.
     std::vector<uint8_t> hvcc = {
         0x01,                                            // configurationVersion
         0x01,                                            // profile_space/tier/idc
@@ -193,6 +182,9 @@ RTX_TEST(io_memory_container_round_trip) {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,              // constraint flags
         0x78,                                            // level 4.0
         0xF0, 0x00,                                      // min spatial segmentation
+// Fabricated hvcC configuration record (23 bytes).  Matroska stores it as
+// CodecPrivate verbatim, so no real HEVC decoder is required anywhere in
+// this test.
         0xFC,                                            // parallelism type
         0xFD,                                            // chroma format 4:2:0
         0xF8,                                            // luma bit depth
@@ -214,8 +206,6 @@ RTX_TEST(io_memory_container_round_trip) {
     info.extradata = hvcc;
     info.annex_b = true;
 
-    // Annex-B shaped payload: the demuxer detects the start code and therefore
-    // skips the mp4toannexb bitstream filter.
     std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0C, 0x01,
                                     0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA};
 
@@ -223,6 +213,8 @@ RTX_TEST(io_memory_container_round_trip) {
     std::unique_ptr<IMuxer> muxer = makeMemoryMuxer(&container, "matroska");
     RTX_REQUIRE(muxer != nullptr);
     RTX_REQUIRE(muxer->open("memory.mkv", info, Hdr10Metadata{}).has_value());
+// Annex-B shaped payload: the demuxer detects the start code and therefore
+// skips the mp4toannexb bitstream filter.
     for (int index = 0; index < 2; ++index) {
         Packet packet;
         packet.data = payload;
@@ -253,8 +245,6 @@ RTX_TEST(io_memory_container_round_trip) {
     RTX_CHECK_EQ(restored.value().pts_flicks, static_cast<int64_t>(0));
     RTX_CHECK(restored.value().keyframe);
 
-    // The second packet must be projected from the container millisecond
-    // timebase onto the exact 705,600,000 Hz Flicks axis.
     const Result<Packet> second = demuxer->readPacket();
     RTX_REQUIRE(second.has_value());
     RTX_CHECK_EQ(second.value().pts, static_cast<int64_t>(40));
@@ -262,7 +252,8 @@ RTX_TEST(io_memory_container_round_trip) {
                  static_cast<int64_t>(kFlicksPerSecond * 40 / 1000));
     RTX_CHECK(!second.value().keyframe);
 }
-
+// The second packet must be projected from the container millisecond
+// timebase onto the exact 705,600,000 Hz Flicks axis.
 RTX_TEST(io_memory_bframe_pts_reordering) {
     std::vector<uint8_t> hvcc = {
         0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -285,11 +276,6 @@ RTX_TEST(io_memory_bframe_pts_reordering) {
     std::vector<uint8_t> payload = {0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0C, 0x01,
                                     0xAA, 0xBB, 0xCC, 0xDD};
 
-    // Typical IBBP GOP delivered in decoding (DTS) order with positive composition delay:
-    // Packet 0 (I): DTS 0, PTS 80 (PTS >= DTS)
-    // Packet 1 (P): DTS 40, PTS 200 (PTS >= DTS)
-    // Packet 2 (B): DTS 80, PTS 120 (PTS >= DTS, but PTS 120 < P-frame PTS 200!)
-    // Packet 3 (B): DTS 120, PTS 160 (PTS >= DTS, but PTS 160 < P-frame PTS 200!)
     const int64_t pts_order[] = {80, 200, 120, 160};
     const int64_t dts_order[] = {0, 40, 80, 120};
 
@@ -298,6 +284,11 @@ RTX_TEST(io_memory_bframe_pts_reordering) {
     RTX_REQUIRE(muxer != nullptr);
     RTX_REQUIRE(muxer->open("bframe.mkv", info, Hdr10Metadata{}).has_value());
 
+// Typical IBBP GOP delivered in decoding (DTS) order with positive composition delay:
+// Packet 0 (I): DTS 0, PTS 80 (PTS >= DTS)
+// Packet 1 (P): DTS 40, PTS 200 (PTS >= DTS)
+// Packet 2 (B): DTS 80, PTS 120 (PTS >= DTS, but PTS 120 < P-frame PTS 200!)
+// Packet 3 (B): DTS 120, PTS 160 (PTS >= DTS, but PTS 160 < P-frame PTS 200!)
     for (int i = 0; i < 4; ++i) {
         Packet packet;
         packet.data = payload;
@@ -322,36 +313,34 @@ RTX_TEST(io_memory_bframe_pts_reordering) {
         read_pts.push_back(pkt.value().pts);
         read_flicks.push_back(pkt.value().pts_flicks);
     }
-
-    // Assert that the native B-frame PTS sequence (non-monotonic) is preserved:
     RTX_CHECK_EQ(read_pts[0], 80);
     RTX_CHECK_EQ(read_pts[1], 200);
     RTX_CHECK_EQ(read_pts[2], 120);
     RTX_CHECK_EQ(read_pts[3], 160);
 
-    // Assert Flicks timebase values reflect exact non-monotonic B-frame order
     RTX_CHECK_EQ(read_flicks[0], static_cast<int64_t>(kFlicksPerSecond * 80 / 1000));
     RTX_CHECK_EQ(read_flicks[1], static_cast<int64_t>(kFlicksPerSecond * 200 / 1000));
     RTX_CHECK_EQ(read_flicks[2], static_cast<int64_t>(kFlicksPerSecond * 120 / 1000));
     RTX_CHECK_EQ(read_flicks[3], static_cast<int64_t>(kFlicksPerSecond * 160 / 1000));
+// Assert that the native B-frame PTS sequence (non-monotonic) is preserved:
 
-    // Specifically: Packet 2 (B-frame) PTS must precede Packet 1 (P-frame) PTS
     RTX_CHECK(read_flicks[2] < read_flicks[1]);
 }
-
 RTX_TEST(io_memory_audio_video_stream_copy_roundtrip) {
-    // Deterministic zero-file-dependency verification of video + audio stream
-    // copy passthrough over MemoryAvioContext (replaces tests/unit/test_audio_stream_copy.cpp).
     std::vector<uint8_t> hvcc = {
+// Assert Flicks timebase values reflect exact non-monotonic B-frame order
         0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x78, 0xF0, 0x00, 0xFC,
         0xFD, 0xF8, 0xF8, 0x00, 0x00, 0x0F, 0x00,
     };
 
+// Specifically: Packet 2 (B-frame) PTS must precede Packet 1 (P-frame) PTS
     AVCodecParameters* raw_audio_par = avcodec_parameters_alloc();
     RTX_REQUIRE(raw_audio_par != nullptr);
     raw_audio_par->codec_type = AVMEDIA_TYPE_AUDIO;
     raw_audio_par->codec_id = AV_CODEC_ID_PCM_S16LE;
+// Deterministic zero-file-dependency verification of video + audio stream
+// copy passthrough over MemoryAvioContext (replaces tests/unit/test_audio_stream_copy.cpp).
     raw_audio_par->sample_rate = 48000;
     raw_audio_par->ch_layout.nb_channels = 2;
     raw_audio_par->bits_per_coded_sample = 16;
@@ -445,8 +434,6 @@ RTX_TEST(io_memory_audio_video_stream_copy_roundtrip) {
     RTX_CHECK_EQ(video_read, 4);
     RTX_CHECK_EQ(audio_read, 4);
 }
-
-
 #include "rtx/cpu_video_encoder.h"
 #include "shim/rtx_shim_abi.h"
 
@@ -469,7 +456,6 @@ RTX_TEST(test_nvenc_cq_and_qp_config) {
     RTX_CHECK_EQ(qp_p, 24);
     RTX_CHECK_EQ(qp_b, 26);
 }
-
 RTX_TEST(test_cpu_crf_encoder_10bit_hdr10) {
     CpuEncoderConfig cfg{};
     cfg.codec = VideoCodec::AV1;
@@ -480,7 +466,6 @@ RTX_TEST(test_cpu_crf_encoder_10bit_hdr10) {
     cfg.hdr.enabled = true;
     auto enc = CpuVideoEncoder::create(cfg);
     if (!enc.has_value()) {
-        // Static FFmpeg without libsvtav1 in older cache; verify structured error
         RTX_CHECK(enc.error().code == ErrorCode::Unsupported || enc.error().code == ErrorCode::Internal);
         return;
     }
@@ -493,7 +478,61 @@ RTX_TEST(test_cpu_crf_encoder_10bit_hdr10) {
         for (const auto& p : *pkts) bytes_crf20 += p.data.size();
     }
     auto flushed = enc->flush();
+// Static FFmpeg without libsvtav1 in older cache; verify structured error
     RTX_REQUIRE(flushed.has_value());
     for (const auto& p : *flushed) bytes_crf20 += p.data.size();
     RTX_CHECK(bytes_crf20 > 0);
+}
+
+RTX_TEST(io_display_matrix_passthrough_roundtrip) {
+    // 90-degree clockwise rotation matrix (fixed-point 16.16 / 2.30, 36 bytes)
+    const std::array<int32_t, 9> kRot90 = {
+        0, 65536, 0,
+        -65536, 0, 0,
+        0, 0, 1073741824,
+    };
+
+    test::TempDir directory;
+    const std::filesystem::path mp4_path = directory.file("portrait_rot90.mp4");
+
+    MediaInfo out_info{};
+    out_info.container = "mp4";
+    out_info.format_name = "mp4";
+    out_info.codec = VideoCodec::H264;
+    out_info.video_codec = "h264";
+    out_info.width = 1920;
+    out_info.height = 1080;
+    out_info.bit_depth = 8;
+    out_info.bitrate = 2000000;
+    out_info.frame_rate = Rational{30, 1};
+    out_info.time_base = Rational{1, 90000};
+    out_info.annex_b = false;
+    // Minimal valid AVCC extradata (profile=66, level=30, 4-byte NAL length)
+    out_info.extradata = {0x01, 0x42, 0xC0, 0x1E, 0xFF, 0xE1, 0x00, 0x04, 0x67, 0x42, 0xC0, 0x1E,
+                          0x01, 0x00, 0x04, 0x68, 0xCE, 0x3C, 0x80};
+    out_info.display_matrix = kRot90;
+    out_info.has_display_matrix = true;
+
+    std::unique_ptr<IMuxer> muxer = makeFfmpegMuxer();
+    RTX_REQUIRE(muxer != nullptr);
+    RTX_REQUIRE(muxer->open(mp4_path, out_info, Hdr10Metadata{}).has_value());
+
+    Packet pkt{};
+    pkt.data = {0x00, 0x00, 0x00, 0x05, 0x65, 0x88, 0x84, 0x00, 0x10};
+    pkt.pts = 0;
+    pkt.dts = 0;
+    pkt.duration = 3000;
+    pkt.time_base = Rational{1, 90000};
+    pkt.keyframe = true;
+    RTX_REQUIRE(muxer->writePacket(pkt).has_value());
+    RTX_REQUIRE(muxer->finalize().has_value());
+
+    std::unique_ptr<IDemuxer> demuxer = makeFfmpegDemuxer();
+    RTX_REQUIRE(demuxer != nullptr);
+    auto reopened = demuxer->open(mp4_path);
+    RTX_REQUIRE(reopened.has_value());
+    RTX_CHECK(reopened->has_display_matrix);
+    for (size_t i = 0; i < kRot90.size(); ++i) {
+        RTX_CHECK_EQ(reopened->display_matrix[i], kRot90[i]);
+    }
 }

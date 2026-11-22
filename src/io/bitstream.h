@@ -52,6 +52,10 @@ int avcConfigBitDepth(const uint8_t* record, size_t size);
 // Colour description carried by the HEVC SPS VUI.  Values are ITU-T H.265
 // code points (1 = BT.709, 9 = BT.2020 non-constant luminance, 16 = PQ,
 // 18 = HLG, 2 = unspecified).
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct HevcVuiColor {
     bool has_colour_description = false;
     bool has_video_signal_type = false;
@@ -62,6 +66,10 @@ struct HevcVuiColor {
 };
 
 // Static HDR10 metadata carried by prefix SEI messages.
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct HevcSeiHdr10 {
     bool has_mastering_display = false;
     bool has_content_light = false;

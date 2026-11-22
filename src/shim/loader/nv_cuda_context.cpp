@@ -31,7 +31,6 @@ std::string cudaError(const DriverTable& driver, const char* operation, CUresult
     }
     return message;
 }
-
 }  // namespace
 
 Context::~Context() { close(); }
@@ -71,9 +70,9 @@ bool Context::open(std::string* error, int device_index) {
         }
         return false;
     }
-    // Phase 8 (Task 8-A1): bind the requested GPU explicitly instead of
-    // falling back to the process-global default device 0.
     const int requested_device = device_index < 0 ? 0 : device_index;
+// Phase 8 (Task 8-A1): bind the requested GPU explicitly instead of
+// falling back to the process-global default device 0.
     result = driver_.cuDeviceGet(&device_, requested_device);
     if (result != CUDA_SUCCESS) {
         if (error != nullptr) {
@@ -81,11 +80,11 @@ bool Context::open(std::string* error, int device_index) {
         }
         return false;
     }
-    // The default scheduler spins on the CPU while a stream is busy, which
-    // burns a core next to the D3D12 VSR/TrueHDR queue.  Set the blocking
-    // scheduler on the primary context before it is retained; an already
-    // active context keeps its flags, so a rejection is not fatal here.
     if (driver_.cuDevicePrimaryCtxSetFlags != nullptr) {
+// The default scheduler spins on the CPU while a stream is busy, which
+// burns a core next to the D3D12 VSR/TrueHDR queue.  Set the blocking
+// scheduler on the primary context before it is retained; an already
+// active context keeps its flags, so a rejection is not fatal here.
         const CUresult flags =
             driver_.cuDevicePrimaryCtxSetFlags(device_, kCtxSchedBlockingSync);
         RTX_TRACE("cuda: cuDevicePrimaryCtxSetFlags(0x%x) -> %s", kCtxSchedBlockingSync,
@@ -116,7 +115,6 @@ bool Context::open(std::string* error, int device_index) {
     }
     return true;
 }
-
 void Context::close() {
     if (context_ != nullptr && driver_.cuDevicePrimaryCtxRelease != nullptr) {
         driver_.cuDevicePrimaryCtxRelease(device_);
@@ -125,7 +123,6 @@ void Context::close() {
     device_ = 0;
     library_.close();
 }
-
 int Context::computeMajor() const {
     int value = 0;
     if (driver_.cuDeviceGetAttribute != nullptr) {
@@ -134,7 +131,6 @@ int Context::computeMajor() const {
     }
     return value;
 }
-
 int Context::computeMinor() const {
     int value = 0;
     if (driver_.cuDeviceGetAttribute != nullptr) {
@@ -143,7 +139,6 @@ int Context::computeMinor() const {
     }
     return value;
 }
-
 std::string Context::deviceName() const {
     char name[128] = {};
     if (driver_.cuDeviceGetName != nullptr) {
@@ -151,7 +146,6 @@ std::string Context::deviceName() const {
     }
     return name;
 }
-
 unsigned int Context::primaryFlags() const noexcept {
     unsigned int flags = 0;
     int active = 0;
@@ -160,11 +154,9 @@ unsigned int Context::primaryFlags() const noexcept {
     }
     return flags;
 }
-
 bool Context::blockingSync() const noexcept {
     return (primaryFlags() & kCtxSchedBlockingSync) != 0;
 }
-
 RtxResult mapResult(CUresult result) {
     switch (result) {
         case CUDA_SUCCESS:
@@ -184,5 +176,4 @@ RtxResult mapResult(CUresult result) {
             return RTX_ERR_INTERNAL;
     }
 }
-
 }  // namespace rtx_shim::cuda

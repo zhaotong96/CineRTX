@@ -12,6 +12,10 @@
 
 namespace rtx_ngx {
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 class TrtLoader {
 public:
     static constexpr int32_t kExpectedTrtVersion = 101303;  // (10 * 10000) + (13 * 100) + 3

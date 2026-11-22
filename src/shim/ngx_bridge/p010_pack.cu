@@ -460,14 +460,29 @@ extern "C" __global__ void rtx_rgba16f_to_p010_bt2020nc_v2(
     // preprocessed frame (src_surface), the right side the remastered PQ
     // signal.  Zero additional kernel launch, zero full-size surface read.
     if (preview_ptr != 0ull && preview_width > 0 && preview_height > 0 &&
-        (x0 & 3) == 0 && (y0 & 3) == 0) {
-        const int px = x0 >> 2;
-        const int py = y0 >> 2;
-        if (px < preview_width && py < preview_height) {
+        width > 0 && height > 0) {
+        // Phase 11.3-P: Aspect-preserving centered fit into preview_width x preview_height
+        // so both landscape (3840x2160) and portrait (2160x3840 / 1080x1920) frames render
+        // completely without bottom-half truncation or out-of-bounds writes.
+        const float scale_x = static_cast<float>(preview_width) / static_cast<float>(width);
+        const float scale_y = static_cast<float>(preview_height) / static_cast<float>(height);
+        const float fit_scale = (scale_x < scale_y) ? scale_x : scale_y;
+        const int dst_w = max(1, min(preview_width, __float2int_rn(static_cast<float>(width) * fit_scale)));
+        const int dst_h = max(1, min(preview_height, __float2int_rn(static_cast<float>(height) * fit_scale)));
+        const int off_x = (preview_width - dst_w) >> 1;
+        const int off_y = (preview_height - dst_h) >> 1;
+        const int px_rel = static_cast<int>((static_cast<long long>(x0) * dst_w) / width);
+        const int py_rel = static_cast<int>((static_cast<long long>(y0) * dst_h) / height);
+        const int prev_px = (x0 > 0) ? static_cast<int>((static_cast<long long>(x0 - 2) * dst_w) / width) : -1;
+        const int prev_py = (y0 > 0) ? static_cast<int>((static_cast<long long>(y0 - 2) * dst_h) / height) : -1;
+        const int px = off_x + px_rel;
+        const int py = off_y + py_rel;
+        if (px_rel != prev_px && py_rel != prev_py &&
+            px >= 0 && px < preview_width && py >= 0 && py < preview_height) {
             unsigned int packed_preview;
             if (split_x_norm >= 0.0f && split_x_norm < 1.0f &&
-                static_cast<float>(px) <
-                    split_x_norm * static_cast<float>(preview_width) &&
+                static_cast<float>(px_rel) <
+                    split_x_norm * static_cast<float>(dst_w) &&
                 src_surface != 0) {
                 // 4x4 box average of the original R10G10B10A2 signal.
                 const float3 a = readRgb10(src_surface, x0, y0, width, height);

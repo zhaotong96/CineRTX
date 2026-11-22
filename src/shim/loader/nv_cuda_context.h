@@ -15,6 +15,10 @@
 
 namespace rtx_shim::cuda {
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 class Context {
 public:
     Context() = default;
@@ -23,8 +27,8 @@ public:
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
 
-    // Phase 8 (Task 8-A1): `device_index` selects the GPU whose primary
-    // context is retained (0 = default device).
+// Phase 8 (Task 8-A1): `device_index` selects the GPU whose primary
+// context is retained (0 = default device).
     bool open(std::string* error = nullptr, int device_index = 0);
     void close();
 
@@ -38,8 +42,8 @@ public:
     int computeMajor() const;
     int computeMinor() const;
     std::string deviceName() const;
-    // Scheduler flags of the retained primary context (0 when the driver does
-    // not expose cuDevicePrimaryCtxGetState).
+// Scheduler flags of the retained primary context (0 when the driver does
+// not expose cuDevicePrimaryCtxGetState).
     unsigned int primaryFlags() const noexcept;
     bool blockingSync() const noexcept;
 

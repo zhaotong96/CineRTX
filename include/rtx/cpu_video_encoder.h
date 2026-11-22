@@ -13,6 +13,10 @@
 
 namespace rtx {
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct CpuEncoderConfig {
     VideoCodec codec = VideoCodec::AV1;  // AV1 (libsvtav1) | HEVC (libx265) | H264 (libx264)
     int width = 3840;
@@ -24,6 +28,10 @@ struct CpuEncoderConfig {
     Hdr10Metadata hdr{};
 };
 
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
+// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
 class CpuVideoEncoder {
 public:
     CpuVideoEncoder() = default;
@@ -36,8 +44,8 @@ public:
 
     [[nodiscard]] static Result<CpuVideoEncoder> create(const CpuEncoderConfig& cfg);
 
-    // Accepts a host-staged P010 frame, converts/maps to YUV420P10LE via AVX2/YMM,
-    // attaches HDR10 / HDR10+ side data, and drains encoded packets.
+// Accepts a host-staged P010 frame, converts/maps to YUV420P10LE via AVX2/YMM,
+// attaches HDR10 / HDR10+ side data, and drains encoded packets.
     [[nodiscard]] Result<std::vector<Packet>> encodeP010Frame(
         const uint16_t* y_plane, size_t y_pitch_bytes,
         const uint16_t* uv_plane, size_t uv_pitch_bytes,

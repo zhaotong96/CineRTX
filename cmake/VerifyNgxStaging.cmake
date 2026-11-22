@@ -10,8 +10,11 @@ if(NOT DEFINED PLUGIN_DIR OR PLUGIN_DIR STREQUAL "")
     message(FATAL_ERROR "NGX staging check invoked without PLUGIN_DIR")
 endif()
 
+# Phase 11.2-R: the bridge is compiled INTO CineRTX.exe (RTX_EMBEDDED_NGX_BRIDGE=1,
+# single-EXE deliverable), so the legacy sidecar rtx_ngx_bridge.dll is no longer a
+# staging artifact; only the NVIDIA runtime feature DLLs are mandatory here.
 set(_missing "")
-foreach(_name rtx_ngx_bridge.dll nvngx_vsr.dll nvngx_truehdr.dll)
+foreach(_name nvngx_vsr.dll nvngx_truehdr.dll)
     if(NOT EXISTS "${PLUGIN_DIR}/${_name}")
         list(APPEND _missing "${_name}")
     endif()

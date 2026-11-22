@@ -2,6 +2,8 @@
 // Copyright (C) 2026 RTX Transcode Engine contributors
 
 #include "hw_transcode_internal.h"
+#include "rtx/audio_mixer_avx2.h"
+#include "rtx/vram_scheduler.h"
 #include "rtx/logger.h"
 #include <cstdlib>
 #include <cstring>
@@ -16,42 +18,19 @@ RemasterPipeline::RemasterPipeline(const HwTranscodeOptions& options)
     report_.path = "vsr-remaster";
     report_.vsr_quality = options.vsr_quality;
 }
-
 RemasterPipeline::~RemasterPipeline() {
+    if (encode_worker_.joinable()) {
+        encode_worker_.join();
+    }
+    NgxRemasterBridge::clearActivePreviewBridge(&session_->bridgeLoader());
+// Phase 11.2 (C-02)：流水线销毁即注销活动预览源；GUI 的下一次借用将安全
+// 空转（borrowActivePreview 返回 false），共享环随桥析构由 interop 回收。
     releasePrevLease();
-    if (encode_thread_.joinable()) {
-        {
-            std::lock_guard<std::mutex> lock(pipeline_mutex_);
-            producer_done_ = true;
-        }
-        queue_ready_.notify_all();
-        encode_thread_.join();
-    }
-    if (rife_active_ && session_ && session_->bridgeLoader().hasRifeApi()) {
-        session_->bridgeLoader().destroyRife(session_->bridge());
-        rife_active_ = false;
-    }
-    for (int i = 0; i < 2; ++i) {
-        if (anchor_p010_[i] != 0 && cuda_.mem_free) {
-            cuda_.mem_free(anchor_p010_[i]);
-            anchor_p010_[i] = 0;
-        }
-        if (pinned_host_buf_[i] != nullptr) {
-            if (cuda_.mem_free_host) {
-                cuda_.mem_free_host(pinned_host_buf_[i]);
-            } else {
-                std::free(pinned_host_buf_[i]);
-            }
-            pinned_host_buf_[i] = nullptr;
-        }
-    }
 }
-
 bool RemasterPipeline::consumerStopped() const noexcept {
     const bool cancelled = (options_.cancel != nullptr && options_.cancel->load(std::memory_order_relaxed));
     return consumer_failed_ || cancelled;
 }
-
 void RemasterPipeline::reportProgress() {
     if (!options_.progress) return;
     options_.progress(HwTranscodeProgress{
@@ -61,7 +40,6 @@ void RemasterPipeline::reportProgress() {
         .elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - started_).count(),
     });
 }
-
 Result<void> RemasterPipeline::initDecodeAndDemuxStage() {
     if (options_.input_path.empty() || options_.output_path.empty()) {
         return err(ErrorCode::InvalidArgument, "remaster transcode requires input and output paths");
@@ -72,7 +50,6 @@ Result<void> RemasterPipeline::initDecodeAndDemuxStage() {
     if (options_.vsr_quality < 1 || options_.vsr_quality > 4) {
         return err(ErrorCode::InvalidArgument, "vsr_quality must be in 1..4");
     }
-
     auto session_res = NvidiaTranscodeSession::create(options_, true, report_, options_.target_width, options_.target_height);
     if (!session_res.has_value()) {
         return std::unexpected(session_res.error());
@@ -86,42 +63,73 @@ Result<void> RemasterPipeline::initDecodeAndDemuxStage() {
     }
     const MediaInfo& info = session_->info();
     if (target_w < info.width || target_h < info.height) {
-        return err(ErrorCode::InvalidArgument, "remaster target geometry must not be smaller than the source");
+        return err(ErrorCode::InvalidArgument,
+                   std::format("remaster target geometry ({}x{}) must not be smaller than the source ({}x{})",
+                               target_w, target_h, info.width, info.height));
     }
-
     const Rational& frame_rate = session_->frameRate();
     if (info.duration_ms > 0 && frame_rate.num > 0 && frame_rate.den > 0) {
         estimated_total_frames_ = info.duration_ms * frame_rate.num / (1000 * static_cast<int64_t>(frame_rate.den));
     }
     cuda_.init();
-    if (session_->previewReady()) {
-        preview_host_.assign(static_cast<size_t>(session_->previewPitch()) * 540u, 0);
-    }
+    NgxRemasterBridge::publishActivePreviewBridge(session_->bridgeLoader(), session_->bridge());
     return {};
 }
-
 Result<void> RemasterPipeline::initRemasterAndFgStage() {
     segmenter_.reset();
     const bool fruc_enabled = options_.fruc_enabled;
+// Phase 11.2 (C-02)：把本流水线的桥注册为监看消费者眼中的活动预览源；
+// 槽位空闲标志随发布清零，跨作业互不残留。
     const bool rife_requested = fruc_enabled && !options_.rife_engine_path.empty();
 
     if (rife_requested) {
         if (!session_->bridgeLoader().hasRifeApi()) {
             return err(ErrorCode::Unsupported, "loaded rtx_ngx_bridge.dll does not export the Phase 8 RIFE API (ABI < 4)");
         }
-        const uint32_t in_w = static_cast<uint32_t>(session_->info().width);
-        const uint32_t in_h = static_cast<uint32_t>(session_->info().height);
+        // Phase 11.4-F (PKG-G4): Dual-topology adaptive routing.
+        // Spatial upscale (e.g. 1080p -> 4K) forces true fg-first (native 1080p RIFE scale=1.0 + VSR 2x).
+        // Same-resolution 4K -> 4K enables physical scale=0.5f RIFE (1080p half-res flow + bilinear 4K).
+        const bool is_spatial_upscale =
+            (session_->info().width < session_->targetWidth() ||
+             session_->info().height < session_->targetHeight());
+        const bool use_fg_first = is_spatial_upscale || !options_.vsr_before_fg;
+        const uint32_t rife_w = static_cast<uint32_t>(
+            use_fg_first ? session_->info().width : session_->targetWidth());
+        const uint32_t rife_h = static_cast<uint32_t>(
+            use_fg_first ? session_->info().height : session_->targetHeight());
+        const float rife_scale =
+            (!use_fg_first && (rife_w >= 2560u || rife_h >= 2160u)) ? 0.5f : 1.0f;
         const std::string engine_path_str = options_.rife_engine_path.string();
-        const int32_t r_res = session_->bridgeLoader().initRife(session_->bridge(), engine_path_str.c_str(), in_w, in_h);
+        RtxRifeInitConfig rife_cfg{};
+        rife_cfg.struct_size = sizeof(RtxRifeInitConfig);
+        rife_cfg.width = rife_w;
+        rife_cfg.height = rife_h;
+        rife_cfg.scale = rife_scale;
+        rife_cfg.align_mod = 128u;
+        rife_cfg.reflect_padding = 1;
+        uint64_t trt_peak_bytes = 0;
+        const int32_t r_res = session_->bridgeLoader().initRifeEx(
+            session_->bridge(), engine_path_str.c_str(), &rife_cfg, &trt_peak_bytes);
         if (r_res != RTX_OK) {
             return err(mapShimResult(static_cast<RtxResult>(r_res)),
-                       describe("rtx_ngx_bridge_init_rife", static_cast<RtxResult>(r_res),
+                       describe("rtx_ngx_bridge_init_rife_ex", static_cast<RtxResult>(r_res),
                                 session_->bridgeLoader().lastError(session_->bridge())));
         }
-        rife_active_ = true;
-        report_.fruc_backend = "rife-trt";
-        fruc_out_buffer_ = session_->bridgeLoader().getInterpBuffer(session_->bridge(), in_w, in_h);
-        logInfo(std::format("FRUC Route B active: TensorRT RIFE ({})", engine_path_str));
+        rife_destroy_guard_ = decltype(rife_destroy_guard_)(
+            session_->bridge(), [this](void* bridge) {
+                if (session_ && session_->bridgeLoader().hasRifeApi()) {
+                    session_->bridgeLoader().destroyRife(static_cast<RtxNgxBridge*>(bridge));
+                }
+            });
+        report_.fruc_backend = (rife_scale <= 0.5f) ? "rife-trt-scale05" : "rife-trt";
+        fruc_out_buffer_ = session_->bridgeLoader().getInterpBuffer(session_->bridge(), rife_w, rife_h);
+        vram_scheduler_.setTrtPeakAllocationBytes(trt_peak_bytes);
+        vram_scheduler_.setCodecRefPoolBytes(static_cast<uint64_t>(rife_w) * rife_h * 3ull * 8ull);
+        logInfo(std::format("FRUC Route B active: TensorRT RIFE ({}, {}x{}, scale={:.1f}, topology={}, A=128, reflect101, trt_peak={} MiB, vram_budget={} MiB)",
+                            engine_path_str, rife_w, rife_h, rife_scale,
+                            use_fg_first ? "fg-first" : "4k-scale05",
+                            trt_peak_bytes / (1024ull * 1024ull),
+                            vram_scheduler_.dxgiBudgetBytes() / (1024ull * 1024ull)));
     } else if (fruc_enabled) {
         report_.fruc_backend = "nvof";
         fruc_out_buffer_ = session_->bridgeLoader().getInterpBuffer(
@@ -130,7 +138,6 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
     } else {
         logInfo("FRUC disabled: preserving source frame rate");
     }
-
     const Rational& out_fps = session_->frameRate();
     delta_out_flicks_ = (out_fps.num > 0 && out_fps.den > 0)
         ? (705600000LL * out_fps.den / out_fps.num)
@@ -138,52 +145,55 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
 
     const int target_w = session_->targetWidth();
     const int target_h = session_->targetHeight();
-    anchor_pitch_ = static_cast<uint32_t>(target_w * 2);
     const size_t frame_bytes = static_cast<size_t>(target_w) * target_h * 3;
-
-    if (options_.vsr_before_fg && cuda_.loaded && cuda_.mem_alloc) {
-        cuda_.mem_alloc(&anchor_p010_[0], frame_bytes);
-        cuda_.mem_alloc(&anchor_p010_[1], frame_bytes);
-    }
-
     if (options_.use_cpu_encoder) {
         pinned_buf_bytes_ = frame_bytes;
-        for (int i = 0; i < 2; ++i) {
-            if (cuda_.loaded && cuda_.mem_alloc_host) {
-                cuda_.mem_alloc_host(&pinned_host_buf_[i], frame_bytes);
+        const bool pinned = cuda_.loaded && cuda_.mem_alloc_host && cuda_.mem_free_host;
+        for (auto& buf : pinned_host_buf_) {
+            void* p = nullptr;
+            if (pinned) {
+                (void)cuda_.mem_alloc_host(&p, frame_bytes);
             } else {
-                pinned_host_buf_[i] = std::malloc(frame_bytes);
+                p = std::malloc(frame_bytes);
             }
+            if (p == nullptr) {
+                return err(ErrorCode::OutOfMemory,
+                           "cannot allocate the CPU-encoder P010 staging buffer");
+            }
+            buf = pinned ? wrapCudaPinnedHost(p, frame_bytes, cuda_.mem_free_host)
+                         : wrapSystemHeapHost(p, frame_bytes);
         }
     }
     return {};
 }
-
 Result<void> RemasterPipeline::initEncoderAndMuxerStage() {
-    encode_thread_ = std::thread([this]() {
-        for (;;) {
-            PendingEncodeItem item;
-            {
-                std::unique_lock<std::mutex> lock(pipeline_mutex_);
-                queue_ready_.wait(lock, [this] {
-                    return !encode_queue_.empty() || producer_done_ || consumerStopped();
-                });
-                if (consumerStopped()) return;
-                if (encode_queue_.empty()) {
-                    if (producer_done_) return;
-                    continue;
-                }
-                item = std::move(encode_queue_.front());
-                encode_queue_.pop_front();
+    encode_worker_ = std::jthread([this](std::stop_token st) { encodeWorkerBody(st); });
+    return {};
+}
+void RemasterPipeline::encodeWorkerBody(std::stop_token stop) {
+    for (;;) {
+        PendingEncodeItem item;
+        {
+            std::unique_lock<std::mutex> lock(pipeline_mutex_);
+            queue_ready_.wait(lock, stop, [this] {
+                return !encode_queue_.empty() || producer_done_ || consumerStopped();
+            });
+            if (stop.stop_requested()) return;
+            if (consumerStopped()) return;
+            if (encode_queue_.empty()) {
+                if (producer_done_) return;
+                continue;
             }
-
-            if (options_.use_cpu_encoder) {
-                const int target_w = session_->targetWidth();
-                const int target_h = session_->targetHeight();
-                const size_t y_bytes = static_cast<size_t>(target_w) * 2 * target_h;
-                const size_t uv_bytes = static_cast<size_t>(target_w) * 2 * (target_h / 2);
-                uint8_t* dst = static_cast<uint8_t*>(pinned_host_buf_[pinned_slot_ & 1u]);
-                pinned_slot_ ^= 1u;
+            item = std::move(encode_queue_.front());
+            encode_queue_.pop_front();
+        }
+        if (options_.use_cpu_encoder) {
+            const int target_w = session_->targetWidth();
+            const int target_h = session_->targetHeight();
+            const size_t y_bytes = static_cast<size_t>(target_w) * 2 * target_h;
+            const size_t uv_bytes = static_cast<size_t>(target_w) * 2 * (target_h / 2);
+            uint8_t* dst = static_cast<uint8_t*>(pinned_host_buf_[pinned_slot_ & 1u].first.get());
+            pinned_slot_ ^= 1u;
 
                 if (cuda_.loaded && cuda_.memcpy_dtoh) {
                     cuda_.memcpy_dtoh(dst, item.remaster_out.y_plane, y_bytes);
@@ -192,7 +202,6 @@ Result<void> RemasterPipeline::initEncoderAndMuxerStage() {
                     std::memcpy(dst, reinterpret_cast<const void*>(item.remaster_out.y_plane), y_bytes);
                     std::memcpy(dst + y_bytes, reinterpret_cast<const void*>(item.remaster_out.uv_plane), uv_bytes);
                 }
-
                 auto pkts = session_->cpuEncoder()->encodeP010Frame(
                     reinterpret_cast<const uint16_t*>(dst), target_w * 2,
                     reinterpret_cast<const uint16_t*>(dst + y_bytes), target_w * 2,
@@ -229,6 +238,7 @@ Result<void> RemasterPipeline::initEncoderAndMuxerStage() {
                 encode_frame.bit_depth = 10;
                 encode_frame.pts = item.pts;
                 encode_frame.slot_index = 0;
+                encode_frame.keyframe = item.force_keyframe ? 1 : 0;
                 const RtxResult encoded = session_->shim().encoderEncode(session_->encoder(), &encode_frame, &packet);
                 if (encoded != RTX_OK) {
                     std::lock_guard<std::mutex> lock(pipeline_mutex_);
@@ -247,7 +257,6 @@ Result<void> RemasterPipeline::initEncoderAndMuxerStage() {
                     return;
                 }
             }
-
             {
                 std::lock_guard<std::mutex> done_lock(pipeline_mutex_);
                 ++encodes_completed_;
@@ -256,10 +265,7 @@ Result<void> RemasterPipeline::initEncoderAndMuxerStage() {
             slot_free_.notify_all();
             reportProgress();
         }
-    });
-    return {};
 }
-
 Result<void> RemasterPipeline::queueEncodeItem(const RtxNgxRemasterOutput& out, int64_t pts,
                                               const std::vector<uint8_t>& hdr10plus, bool force_key) {
     if (session_->encoder() == nullptr && session_->cpuEncoder() == nullptr) {
@@ -271,7 +277,6 @@ Result<void> RemasterPipeline::queueEncodeItem(const RtxNgxRemasterOutput& out, 
         auto mux = session_->openMuxer();
         if (!mux.has_value()) return mux;
     }
-
     {
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
         encode_queue_.push_back(PendingEncodeItem{
@@ -286,14 +291,12 @@ Result<void> RemasterPipeline::queueEncodeItem(const RtxNgxRemasterOutput& out, 
     queue_ready_.notify_all();
     return {};
 }
-
 void RemasterPipeline::releasePrevLease() noexcept {
     if (has_prev_frame_ && session_) {
         session_->releaseDecodedFrame(prev_frame_.slot_index);
         has_prev_frame_ = false;
     }
 }
-
 Result<void> RemasterPipeline::flushBufferedAudioPackets() {
     if (!session_ || !session_->isMuxerOpen()) return {};
     std::deque<Packet> to_flush;
@@ -308,12 +311,10 @@ Result<void> RemasterPipeline::flushBufferedAudioPackets() {
     }
     return {};
 }
-
 Result<void> RemasterPipeline::remasterAndEnqueueFrame(
     const RtxFrameDesc& frame, int64_t pts_override, bool release_slot, bool force_reset_temporal) {
     const int64_t effective_pts = (pts_override >= 0) ? pts_override : frame.pts;
 
-    // 关键修复：必须在调用 bridgeLoader().remaster() 覆写 p010_ring[i % 3] 之前等待空闲槽位！
     {
         std::unique_lock<std::mutex> lock(pipeline_mutex_);
         slot_free_.wait(lock, [this] {
@@ -326,7 +327,6 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
             return consumer_failed_ ? consumer_error_ : err(ErrorCode::State, "transcode cancelled");
         }
     }
-
     const MediaInfo& info = session_->info();
     const bool reset_temporal = (frame_index_ == 0) || force_reset_temporal || last_was_cut_;
     last_was_cut_ = false;
@@ -334,6 +334,7 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
     RtxNgxRemasterInput in{};
     in.y_plane = frame.planes[0];
     in.uv_plane = frame.planes[1];
+// 关键修复：必须在调用 bridgeLoader().remaster() 覆写 p010_ring[i % 3] 之前等待空闲槽位！
     in.y_pitch = frame.pitches[0];
     in.uv_pitch = frame.pitches[1];
     in.format = frame.format;
@@ -343,25 +344,36 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
 
     bool preview_this_frame = false;
     if (options_.preview && session_->previewReady()) {
-        in.preview_rgba10_ptr = session_->previewDevicePointer(preview_slot_ & 1u);
-        in.preview_pitch = session_->previewPitch();
-        in.split_x_norm = options_.split_ratio != nullptr
-            ? std::clamp(options_.split_ratio->load(std::memory_order_relaxed), 0.0f, 1.0f) : 0.5f;
-        preview_slot_ ^= 1u;
-        preview_this_frame = true;
+        uint32_t acquired = 0;
+        if (session_->bridgeLoader().acquirePreviewSlot(&acquired)) {
+            in.preview_rgba10_ptr = session_->previewDevicePointer(acquired);
+            in.preview_pitch = session_->previewPitch();
+            in.split_x_norm = options_.split_ratio != nullptr
+                ? std::clamp(options_.split_ratio->load(std::memory_order_relaxed), 0.0f, 1.0f) : 0.5f;
+            preview_slot_ = acquired;
+            preview_this_frame = true;
+        } else {
+            in.preview_rgba10_ptr = 0;
+            in.preview_pitch = 0;
+            in.split_x_norm = -1.0f;
+        }
     }
-
     RtxNgxRemasterOutput out{};
     RtxNgxRemasterStats stats{};
     const RtxResult r = session_->bridgeLoader().remaster(session_->bridge(), &in, &out, &stats);
     if (release_slot && frame.slot_index != 0xFFFFFFFFu) {
+// Phase 11.2 (C-02): 防撕裂防阻塞调度。写入槽位前先经注册表探测原子世代
+// 标志，三槽均忙（视口尚未读完）则置 preview_rgba10_ptr = 0 跳过本次预览
+// 拷贝，绝不阻塞转码流水线。
         session_->releaseDecodedFrame(frame.slot_index);
     }
     if (r != RTX_OK) {
+        if (preview_this_frame) {
+            (*session_->bridgeLoader().previewSlotFlagsArray())[preview_slot_].store(0, std::memory_order_release);
+        }
         return err(mapShimResult(r), describe("rtx_ngx_bridge_remaster", r, nullptr),
                    session_->bridgeLoader().lastError(session_->bridge()));
     }
-
     const double pack_delta = static_cast<double>(stats.pack_kernel_ms - previous_stats_.pack_kernel_ms);
     previous_stats_ = stats;
     if (pack_delta > pack_max_ms_) pack_max_ms_ = pack_delta;
@@ -369,15 +381,8 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
     accumulated_max_fall_ = std::max<uint32_t>(accumulated_max_fall_, out.frame_avg_nits);
 
     if (preview_this_frame) {
-        const auto now = Clock::now();
-        const bool due = !last_preview_download_.has_value() ||
-                         std::chrono::duration<double>(now - *last_preview_download_).count() >= (1.0 / 15.0);
-        if (due && session_->downloadPreviewInto(preview_host_.data(), preview_host_.size()) == RTX_OK) {
-            last_preview_download_ = now;
-            options_.preview(preview_host_.data(), session_->previewPitch());
-        }
+        session_->bridgeLoader().publishPreviewSlot(preview_slot_);
     }
-
     std::vector<uint8_t> hdr10plus;
     if (options_.hdr10plus) {
         Hdr10PlusFrameStats fstats{};
@@ -385,6 +390,7 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
         fstats.maxscl_g_nits = std::max<uint32_t>(1u, out.frame_max_nits);
         fstats.maxscl_b_nits = std::max<uint32_t>(1u, out.frame_max_nits);
         fstats.average_maxrgb_nits = std::max<uint32_t>(1u, out.frame_avg_nits);
+// 归还本次失败的槽位：空闲标志不还，生产端会被永久卡死。
         const float ratio = out.frame_max_nits > 0
             ? static_cast<float>(out.frame_avg_nits) / static_cast<float>(out.frame_max_nits) : 0.5f;
         fstats.knee_point_x = 500;
@@ -393,13 +399,14 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
             ? SeiSynthesizer::hevcHdr10PlusPrefixSei(fstats)
             : SeiSynthesizer::av1Hdr10PlusMetadataObu(fstats);
     }
-
     auto q_res = queueEncodeItem(out, effective_pts, hdr10plus, reset_temporal);
     if (!q_res.has_value()) return q_res;
     ++frame_index_;
     return {};
 }
-
+// rtx_ngx_bridge_remaster 是同步调用（pack 流收尾已同步）：槽位缓冲对
+// 视口的 D3D12 队列完全可见，直接发布给 GUI 30 Hz 消费者。槽位空闲标志
+// 由视口的 Fence 退役回调（PreviewSlotTicket）归还，全流程 D2H == 0 B。
 Result<void> RemasterPipeline::synthesizeAndRemasterWindow(
     const RtxFrameDesc& prev_f, const RtxFrameDesc& curr_f, int64_t out_pts_90k, float alpha) {
     if (alpha <= 0.0001f) {
@@ -408,11 +415,10 @@ Result<void> RemasterPipeline::synthesizeAndRemasterWindow(
     if (alpha >= 0.9999f) {
         return remasterAndEnqueueFrame(curr_f, out_pts_90k, /*release_slot=*/false);
     }
-
     const uint32_t pitch = prev_f.pitches[0];
     const int input_full_range = (session_->info().color.range == ColorRange::Full) ? 1 : 0;
 
-    if (rife_active_) {
+    if (rife_destroy_guard_) {
         int32_t scene_cut = 0;
         const int32_t status = session_->bridgeLoader().interpolateRife(
             session_->bridge(), prev_f.planes[0], curr_f.planes[0], pitch,
@@ -441,7 +447,6 @@ Result<void> RemasterPipeline::synthesizeAndRemasterWindow(
         const RtxFrameDesc& fb = (alpha < 0.5f) ? prev_f : curr_f;
         return remasterAndEnqueueFrame(fb, out_pts_90k, /*release_slot=*/false);
     }
-
     const RtxResult status = session_->bridgeLoader().interpolateNv12(
         session_->bridge(), prev_f.planes[0], curr_f.planes[0], pitch, alpha, fruc_out_buffer_);
     if (status == RTX_OK) {
@@ -456,8 +461,17 @@ Result<void> RemasterPipeline::synthesizeAndRemasterWindow(
     ++report_.fruc_failures;
     return remasterAndEnqueueFrame(prev_f, out_pts_90k, /*release_slot=*/false);
 }
-
 Result<void> RemasterPipeline::handleDecodedFrame(const RtxFrameDesc& frame) {
+    {
+        const uint64_t working_set =
+            static_cast<uint64_t>(session_->targetWidth()) *
+            static_cast<uint64_t>(session_->targetHeight()) * 16ull;
+        if (vram_scheduler_.observeFrame(0ull, working_set)) {
+            logWarn(std::format("[VRAM-SCHED] Tier transitioned to {} (pressure={:.1f}%)",
+                                pipelineTierName(vram_scheduler_.currentTier()),
+                                vram_scheduler_.lastPressureRatio() * 100.0));
+        }
+    }
     constexpr int64_t kFlicksPerTick90k = 7840;
     if (!options_.fruc_enabled || fruc_out_buffer_ == 0) {
         return remasterAndEnqueueFrame(frame, -1, /*release_slot=*/true);
@@ -494,7 +508,6 @@ Result<void> RemasterPipeline::handleDecodedFrame(const RtxFrameDesc& frame) {
     has_prev_frame_ = true;
     return {};
 }
-
 Result<void> RemasterPipeline::drainEndOfStream() {
     constexpr int64_t kFlicksPerTick90k = 7840;
     if (options_.fruc_enabled && fruc_out_buffer_ != 0 && has_prev_frame_) {
@@ -511,35 +524,30 @@ Result<void> RemasterPipeline::drainEndOfStream() {
     }
     return {};
 }
-
 Result<void> RemasterPipeline::flushAndFinalizePipeline() {
     {
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
         producer_done_ = true;
     }
     queue_ready_.notify_all();
-    if (encode_thread_.joinable()) {
-        encode_thread_.join();
-    }
+    encode_worker_.join();
     releasePrevLease();
     if (consumer_failed_) {
         return consumer_error_;
     }
-
     auto flushed_enc = session_->flushEncoder(report_);
     if (!flushed_enc.has_value()) return flushed_enc;
 
     auto flushed_aud = flushBufferedAudioPackets();
     if (!flushed_aud.has_value()) return flushed_aud;
 
-    if (rife_active_ && report_.fruc_failures > 0 && report_.frames_interpolated == 0) {
+    if (rife_destroy_guard_ && report_.fruc_failures > 0 && report_.frames_interpolated == 0) {
         (void)session_->finalize(report_, started_);
         return err(ErrorCode::Internal,
                    std::format("RIFE frame interpolation failed on all {} intermediate frame(s): {}",
                                report_.fruc_failures,
                                session_->bridgeLoader().lastError(session_->bridge())));
     }
-
     auto finalized = session_->finalize(report_, started_);
     if (!finalized.has_value()) return finalized;
 
@@ -556,7 +564,6 @@ Result<void> RemasterPipeline::flushAndFinalizePipeline() {
     report_.measured_max_fall_nits = session_->measuredMaxFallNits();
     return {};
 }
-
 Result<HwTranscodeReport> RemasterPipeline::run() {
     auto d_res = initDecodeAndDemuxStage();
     if (!d_res.has_value()) return std::unexpected(d_res.error());
@@ -611,7 +618,6 @@ Result<HwTranscodeReport> RemasterPipeline::run() {
             }
             continue;
         }
-
         int64_t pts = pkt.pts == std::numeric_limits<int64_t>::min() ? packet_pts : rescaleQ(pkt.pts, input_tb, clock_tb);
         int64_t dts = pkt.dts == std::numeric_limits<int64_t>::min() ? pts : rescaleQ(pkt.dts, input_tb, clock_tb);
         RtxResult subm = session_->shim().decoderSubmit(session_->decoder(), pkt.data.data(), pkt.data.size(), pts, dts, pkt.keyframe ? 1 : 0);
@@ -619,7 +625,6 @@ Result<HwTranscodeReport> RemasterPipeline::run() {
             pipe_status = err(mapShimResult(subm), describe("cuvidParseVideoData", subm, session_->shim().decoderLastError(session_->decoder())));
             break;
         }
-
         for (;;) {
             if (consumerStopped()) { pipe_status = err(ErrorCode::State, "transcode cancelled"); break; }
             if (options_.frame_limit > 0 && report_.frames_decoded >= options_.frame_limit) break;
@@ -639,7 +644,6 @@ Result<HwTranscodeReport> RemasterPipeline::run() {
         if (!pipe_status.has_value()) break;
         packet_pts += frame_ticks;
     }
-
     if (pipe_status.has_value()) {
         session_->shim().decoderFlush(session_->decoder());
         for (;;) {
@@ -652,7 +656,6 @@ Result<HwTranscodeReport> RemasterPipeline::run() {
             reportProgress();
         }
     }
-
     if (pipe_status.has_value()) {
         pipe_status = drainEndOfStream();
     }
@@ -662,6 +665,223 @@ Result<HwTranscodeReport> RemasterPipeline::run() {
     if (!pipe_status.has_value()) return std::unexpected(pipe_status.error());
     if (!fin.has_value()) return std::unexpected(fin.error());
     return report_;
+}
+
+Result<void> RemasterPipeline::runRenderGraph(std::span<const RenderGraphSegment> segments,
+                                              std::span<const AudioGraphSegment> audio_segments,
+                                              std::stop_token stop_tok) {
+    if (segments.empty()) {
+        return err(ErrorCode::InvalidArgument, "render graph: empty segment list");
+    }
+    if (options_.input_path.empty()) {
+        options_.input_path = std::filesystem::path(segments.front().source_path);
+    }
+
+    auto d_res = initDecodeAndDemuxStage();
+    if (!d_res.has_value()) return d_res;
+    auto r_res = initRemasterAndFgStage();
+    if (!r_res.has_value()) return r_res;
+    auto e_res = initEncoderAndMuxerStage();
+    if (!e_res.has_value()) return e_res;
+
+    using Ticks90k = std::chrono::duration<int64_t, std::ratio<1, 90000>>;
+    const Rational clock_tb{1, 90000};
+    const Clock::time_point loop_start = Clock::now();
+
+    std::string active_source = segments.front().source_path;
+    std::unique_ptr<IDemuxer> owned_demux;
+    IDemuxer* active_demux = session_->demuxer();
+    MediaInfo active_info = session_->info();
+
+    auto destroyExtraDecoder = [sh = &session_->shim()](RtxDecoder* d) {
+        if (d != nullptr) sh->decoderDestroy(d);
+    };
+    std::unique_ptr<RtxDecoder, decltype(destroyExtraDecoder)> owned_decoder(nullptr, destroyExtraDecoder);
+    RtxDecoder* active_decoder = session_->decoder();
+
+    int64_t last_emitted_pts_90k = -1;
+    Result<void> pipe_status;
+
+    for (std::size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+        const RenderGraphSegment& segment = segments[seg_idx];
+        if (stop_tok.stop_requested() || consumerStopped()) {
+            pipe_status = err(ErrorCode::State, "transcode cancelled");
+            break;
+        }
+        if (segment.source_path != active_source) {
+            auto next_demux = makeFfmpegDemuxer();
+            if (!next_demux) {
+                pipe_status = err(ErrorCode::Internal, "render graph: failed to allocate segment demuxer");
+                break;
+            }
+            auto opened = next_demux->open(std::filesystem::path(segment.source_path));
+            if (!opened.has_value()) {
+                pipe_status = std::unexpected(opened.error());
+                break;
+            }
+            RtxDecoderConfig dec_cfg{};
+            dec_cfg.codec = shimCodec(opened->codec);
+            dec_cfg.width = opened->width;
+            dec_cfg.height = opened->height;
+            dec_cfg.bit_depth = opened->bit_depth;
+            dec_cfg.output_format = opened->bit_depth > 8 ? RTX_PIXEL_P010 : RTX_PIXEL_NV12;
+            dec_cfg.clock_rate = 90000;
+            dec_cfg.max_surfaces = 32;
+            dec_cfg.pool_slots = 16;
+            dec_cfg.device_index = options_.device_index;
+            RtxDecoder* raw_dec = nullptr;
+            const RtxResult created = session_->shim().decoderCreate(&dec_cfg, &raw_dec);
+            if (created != RTX_OK || raw_dec == nullptr) {
+                pipe_status = err(mapShimResult(created),
+                                  describe("rtx_shim_decoder_create(segment)", created, nullptr));
+                break;
+            }
+            owned_demux = std::move(next_demux);
+            active_demux = owned_demux.get();
+            active_info = *opened;
+            owned_decoder.reset(raw_dec);
+            active_decoder = owned_decoder.get();
+            active_source = segment.source_path;
+        } else if (seg_idx > 0) {
+            (void)session_->shim().decoderReset(active_decoder);
+        }
+
+        const Rational input_tb = active_info.time_base.valid() ? active_info.time_base : clock_tb;
+        if (segment.source_in_flicks > 0) {
+            const int64_t seek_pts = rescaleQ(segment.source_in_flicks, kTimeBaseFlicks, input_tb);
+            (void)active_demux->seekToKeyframeBefore(seek_pts);
+        }
+
+        const Rational& fps = active_info.frame_rate.valid() && active_info.frame_rate.num > 0
+                                  ? active_info.frame_rate
+                                  : session_->frameRate();
+        const int64_t frame_ticks = (fps.num > 0 && fps.den > 0)
+            ? std::max<int64_t>(1, static_cast<int64_t>(90000) * fps.den / fps.num) : 3000;
+        int64_t fallback_pts = rescaleQ(segment.source_in_flicks, kTimeBaseFlicks, clock_tb);
+        bool first_frame_of_segment = true;
+        bool seg_done = false;
+
+        auto emitFrame = [&](const RtxFrameDesc& fdesc) -> Result<void> {
+            const int64_t frame_src_flicks = absoluteTimestampToFlicks(fdesc.pts, clock_tb);
+            if (frame_src_flicks < segment.source_in_flicks) {
+                session_->shim().decoderReleaseFrame(active_decoder, fdesc.slot_index);
+                return {};
+            }
+            if (frame_src_flicks >= segment.source_out_flicks) {
+                session_->shim().decoderReleaseFrame(active_decoder, fdesc.slot_index);
+                seg_done = true;
+                return {};
+            }
+            const int64_t frame_flicks_offset = frame_src_flicks - segment.source_in_flicks;
+            int64_t pts_90k = std::chrono::duration_cast<Ticks90k>(
+                Flicks{segment.timeline_in_flicks + frame_flicks_offset}).count();
+            if (last_emitted_pts_90k >= 0 && pts_90k <= last_emitted_pts_90k) {
+                pts_90k = last_emitted_pts_90k + 1;
+            }
+            last_emitted_pts_90k = pts_90k;
+
+            // 段首帧强制重置 VSR 时域历史并在硬切点强制注入 IDR 关键帧（C-05 闭环）。
+            const bool reset_temporal = first_frame_of_segment;
+            if (first_frame_of_segment && segment.force_keyframe) {
+                last_was_cut_ = true;
+            }
+            first_frame_of_segment = false;
+
+            const bool release_via_session = (active_decoder == session_->decoder());
+            Result<void> res = remasterAndEnqueueFrame(fdesc, pts_90k, release_via_session, reset_temporal);
+            if (!release_via_session && fdesc.slot_index != 0xFFFFFFFFu) {
+                session_->shim().decoderReleaseFrame(active_decoder, fdesc.slot_index);
+            }
+            ++report_.frames_decoded;
+            reportProgress();
+            return res;
+        };
+
+        while (!seg_done) {
+            if (stop_tok.stop_requested() || consumerStopped()) {
+                pipe_status = err(ErrorCode::State, "transcode cancelled");
+                break;
+            }
+            auto pkt_res = active_demux->readPacket();
+            if (!pkt_res.has_value()) {
+                if (pkt_res.error().code == ErrorCode::NotFound) break;
+                pipe_status = std::unexpected(pkt_res.error());
+                break;
+            }
+            ++report_.packets_read;
+            const Packet& pkt = pkt_res.value();
+            if (active_info.primary_audio_index >= 0 && pkt.stream_index == active_info.primary_audio_index) {
+                continue;
+            }
+            const int64_t pts = pkt.pts == std::numeric_limits<int64_t>::min()
+                                    ? fallback_pts
+                                    : rescaleQ(pkt.pts, input_tb, clock_tb);
+            const int64_t dts = pkt.dts == std::numeric_limits<int64_t>::min()
+                                    ? pts
+                                    : rescaleQ(pkt.dts, input_tb, clock_tb);
+            const RtxResult subm = session_->shim().decoderSubmit(
+                active_decoder, pkt.data.data(), pkt.data.size(), pts, dts, pkt.keyframe ? 1 : 0);
+            if (subm != RTX_OK) {
+                pipe_status = err(mapShimResult(subm),
+                                  describe("cuvidParseVideoData(segment)", subm,
+                                           session_->shim().decoderLastError(active_decoder)));
+                break;
+            }
+            for (;;) {
+                RtxFrameDesc fdesc{};
+                const RtxResult rec = session_->shim().decoderReceive(active_decoder, &fdesc);
+                if (rec == RTX_OK) {
+                    if (auto emitted = emitFrame(fdesc); !emitted.has_value()) {
+                        pipe_status = emitted;
+                        break;
+                    }
+                    if (seg_done) break;
+                    continue;
+                }
+                if (rec == RTX_ERR_NOT_FOUND) break;
+                pipe_status = err(mapShimResult(rec),
+                                  describe("rtx_shim_decoder_receive(segment)", rec,
+                                           session_->shim().decoderLastError(active_decoder)));
+                break;
+            }
+            if (!pipe_status.has_value()) break;
+            fallback_pts += frame_ticks;
+        }
+        if (!pipe_status.has_value()) break;
+
+        if (!seg_done) {
+            session_->shim().decoderFlush(active_decoder);
+            for (;;) {
+                RtxFrameDesc fdesc{};
+                const RtxResult rec = session_->shim().decoderReceive(active_decoder, &fdesc);
+                if (rec != RTX_OK) break;
+                if (auto emitted = emitFrame(fdesc); !emitted.has_value()) {
+                    pipe_status = emitted;
+                    break;
+                }
+                if (seg_done) break;
+            }
+        }
+        if (!pipe_status.has_value()) break;
+    }
+
+    report_.main_loop_ms = std::chrono::duration<double, std::milli>(Clock::now() - loop_start).count();
+    auto fin = flushAndFinalizePipeline();
+    if (!pipe_status.has_value()) return pipe_status;
+    return fin;
+}
+
+Result<HwTranscodeReport> runNvidiaRemasterRenderGraph(
+    const HwTranscodeOptions& options,
+    std::span<const RenderGraphSegment> segments,
+    std::span<const AudioGraphSegment> audio_segments,
+    std::stop_token stop_tok) {
+    RemasterPipeline pipeline(options);
+    auto res = pipeline.runRenderGraph(segments, audio_segments, stop_tok);
+    if (!res.has_value()) {
+        return std::unexpected(res.error());
+    }
+    return pipeline.report();
 }
 
 } // namespace rtx

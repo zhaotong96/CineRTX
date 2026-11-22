@@ -20,6 +20,10 @@ namespace rtx_ngx {
 
 class D3D12Interop;
 
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
+// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
 class NgxD3D12Bridge {
 public:
     NgxD3D12Bridge();
@@ -32,16 +36,16 @@ public:
 
     bool ready() const noexcept { return initialized_; }
 
-    // Waits for the CUDA signal on the shared fence, evaluates VSR and/or
-    // TrueHDR and signals input_fence_value + 1 on the same fence.
+// Waits for the CUDA signal on the shared fence, evaluates VSR and/or
+// TrueHDR and signals input_fence_value + 1 on the same fence.
     bool process(uint64_t input_fence_value, std::string* error, bool reset_temporal = false);
 
-    // Completes the outstanding submission before the bridge is flushed or
-    // destroyed, so no command list outlives its allocator.
+// Completes the outstanding submission before the bridge is flushed or
+// destroyed, so no command list outlives its allocator.
     bool flush(std::string* error);
 
-    // Per-frame luma statistics for the content-adaptive TrueHDR law.  The
-    // values are consumed by the next process() call.
+// Per-frame luma statistics for the content-adaptive TrueHDR law.  The
+// values are consumed by the next process() call.
     void set_frame_stats(const RtxNgxFrameStats& stats);
 
     const std::string& diagnostics() const noexcept { return diagnostics_; }
@@ -77,6 +81,10 @@ private:
     int input_height_ = 0;
     int output_width_ = 0;
     int output_height_ = 0;
+    int output_offset_x_ = 0;
+    int output_offset_y_ = 0;
+    int scaled_width_ = 0;
+    int scaled_height_ = 0;
     int vsr_quality_ = 1;
     unsigned int node_mask_ = 1;
 

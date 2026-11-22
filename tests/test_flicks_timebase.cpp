@@ -16,9 +16,9 @@
 using namespace rtx;
 
 RTX_TEST(flicks_exact_division) {
-    // 1 flick = 1 / 705,600,000 s.  Every frame period and every audio sample
-    // period below must divide it with a zero remainder, which is the property
-    // the whole drift budget rests on.
+// 1 flick = 1 / 705,600,000 s.  Every frame period and every audio sample
+// period below must divide it with a zero remainder, which is the property
+// the whole drift budget rests on.
     RTX_CHECK_EQ(kFlicksPerSecond, static_cast<uint64_t>(705600000));
 
     const Rational video_rates[] = {kFps24,  Rational{24000, 1001}, Rational{25, 1},
@@ -31,12 +31,11 @@ RTX_TEST(flicks_exact_division) {
         RTX_CHECK_EQ(kFlicksPerSecond * denominator % numerator, static_cast<uint64_t>(0));
         const uint64_t period = kFlicksPerSecond * denominator / numerator;
         RTX_CHECK(period > 0);
-        // One frame period (den/num seconds) expressed in Flicks must be exact.
+// One frame period (den/num seconds) expressed in Flicks must be exact.
         const int64_t period_flicks =
             rescaleToFlicks(1, Rational{rate.den, rate.num});
         RTX_CHECK_EQ(period_flicks, static_cast<int64_t>(period));
     }
-
     const uint32_t audio_rates[] = {8000, 44100, 48000, 96000, 192000};
     for (uint32_t rate : audio_rates) {
         RTX_CHECK_EQ(kFlicksPerSecond % rate, static_cast<uint64_t>(0));
@@ -44,13 +43,12 @@ RTX_TEST(flicks_exact_division) {
         RTX_CHECK_EQ(period_flicks, static_cast<int64_t>(kFlicksPerSecond / rate));
     }
 }
-
 RTX_TEST(flicks_drift_24h) {
-    // 24 hours of 29.97 fps video: 2,588,860 frames.  The remainder-carrying
-    // rescale must accumulate exactly zero error, so the residual stays far
-    // below the 1.42 ns budget.
     constexpr int64_t kHours = 24;
     constexpr uint64_t kSecondsPerHour = 3600;
+// 24 hours of 29.97 fps video: 2,588,860 frames.  The remainder-carrying
+// rescale must accumulate exactly zero error, so the residual stays far
+// below the 1.42 ns budget.
     const Rational time_base{1001, 30000};  // MKV-style 29.97 time base
     const uint64_t frames = kHours * kSecondsPerHour * 30000u / 1001u;
 
@@ -61,66 +59,62 @@ RTX_TEST(flicks_drift_24h) {
         last = drift.rescaleToFlicks(pts, static_cast<uint32_t>(time_base.num),
                                      static_cast<uint32_t>(time_base.den));
     }
-
-    // Exact expectation in 128-bit terms: (frames-1) * 1001 / 30000 seconds.
     const uint64_t expected = (frames - 1) * 1001ull * kFlicksPerSecond / 30000ull;
     const int64_t difference = last - static_cast<int64_t>(expected);
     RTX_CHECK(difference >= -1 && difference <= 1);
+// Exact expectation in 128-bit terms: (frames-1) * 1001 / 30000 seconds.
 
-    // 1 flick = 1.417 ns; a one-flick residual is the analytic floor.
     const double drift_ns = static_cast<double>(difference) * (1.0e9 / 705600000.0);
     RTX_CHECK(drift_ns <= 1.42);
 }
-
+// 1 flick = 1.417 ns; a one-flick residual is the analytic floor.
 RTX_TEST(flicks_negative_and_zero) {
     FlicksDriftCompensator drift;
     RTX_CHECK_EQ(drift.rescaleToFlicks(0, 1, 1000), static_cast<int64_t>(0));
     RTX_CHECK_EQ(drift.rescaleToFlicks(1000, 1, 1000), static_cast<int64_t>(kFlicksPerSecond));
     RTX_CHECK_EQ(drift.rescaleToFlicks(-1000, 1, 1000),
                  -static_cast<int64_t>(kFlicksPerSecond));
-    // A zero denominator is rejected rather than dividing by zero.
     RTX_CHECK_EQ(drift.rescaleToFlicks(1000, 1, 0), static_cast<int64_t>(0));
 
-    // The stateless helper must agree with the compensator on exact multiples.
     RTX_CHECK_EQ(rescaleToFlicks(1000, Rational{1, 1000}),
                  static_cast<int64_t>(kFlicksPerSecond));
+// A zero denominator is rejected rather than dividing by zero.
     RTX_CHECK_EQ(rescaleToFlicks(-1000, Rational{1, 1000}),
                  -static_cast<int64_t>(kFlicksPerSecond));
+// The stateless helper must agree with the compensator on exact multiples.
     RTX_CHECK_EQ(rescaleToFlicks(0, Rational{1, 90000}), static_cast<int64_t>(0));
-    // An invalid time base yields 0 instead of trapping.
     RTX_CHECK_EQ(rescaleToFlicks(100, Rational{1, 0}), static_cast<int64_t>(0));
 }
-
 RTX_TEST(flicks_monotonic_guard) {
     FlicksMonotonicGuard guard;
+// An invalid time base yields 0 instead of trapping.
     RTX_CHECK_EQ(guard.apply(100), static_cast<int64_t>(100));
     RTX_CHECK_EQ(guard.apply(200), static_cast<int64_t>(200));
-    // A regression is repaired to last + 1, one flick (1.4 ns) later.
     RTX_CHECK_EQ(guard.apply(150), static_cast<int64_t>(201));
     RTX_CHECK_EQ(guard.repairs(), static_cast<uint64_t>(1));
-    // An exact duplicate is also a regression: the timeline must be strictly
-    // increasing, not merely non-decreasing.
     RTX_CHECK_EQ(guard.apply(201), static_cast<int64_t>(202));
     RTX_CHECK_EQ(guard.repairs(), static_cast<uint64_t>(2));
     RTX_CHECK(guard.primed());
+// A regression is repaired to last + 1, one flick (1.4 ns) later.
     RTX_CHECK_EQ(guard.last(), static_cast<int64_t>(202));
 
+// An exact duplicate is also a regression: the timeline must be strictly
+// increasing, not merely non-decreasing.
     guard.reset();
     RTX_CHECK(!guard.primed());
     RTX_CHECK_EQ(guard.apply(-5), static_cast<int64_t>(-5));
     RTX_CHECK_EQ(guard.repairs(), static_cast<uint64_t>(0));
 }
-
 RTX_TEST(flicks_fruc_sliding_window_math) {
     constexpr int64_t kFlicks = 705600000LL;
 
-    // 1. 24 fps -> 48 fps (2x)
     {
         const int64_t delta_in = kFlicks / 24;   // 29,400,000
         const int64_t delta_out = kFlicks / 48;  // 14,700,000
         RTX_CHECK_EQ(delta_in, 29400000LL);
         RTX_CHECK_EQ(delta_out, 14700000LL);
 
+// 1. 24 fps -> 48 fps (2x)
         int64_t next_out = 0;
         int frames_emitted = 0;
         int zero_copy_count = 0;
@@ -145,8 +139,6 @@ RTX_TEST(flicks_fruc_sliding_window_math) {
         RTX_CHECK_EQ(zero_copy_count, 24);
         RTX_CHECK_EQ(interp_count, 24);
     }
-
-    // 2. 24 fps -> 60 fps (2.5x)
     {
         const int64_t delta_in = kFlicks / 24;   // 29,400,000
         const int64_t delta_out = kFlicks / 60;  // 11,760,000
@@ -154,6 +146,7 @@ RTX_TEST(flicks_fruc_sliding_window_math) {
         RTX_CHECK_EQ(delta_out, 11760000LL);
 
         int64_t next_out = 0;
+// 2. 24 fps -> 60 fps (2.5x)
         int frames_emitted = 0;
         std::vector<float> alphas;
 
@@ -168,7 +161,6 @@ RTX_TEST(flicks_fruc_sliding_window_math) {
             }
         }
         RTX_CHECK_EQ(frames_emitted, 60);
-        // Verify periodic alpha pattern: 0.0, 0.4, 0.8, 0.2, 0.6
         RTX_CHECK(std::abs(alphas[0] - 0.0f) < 0.001f);
         RTX_CHECK(std::abs(alphas[1] - 0.4f) < 0.001f);
         RTX_CHECK(std::abs(alphas[2] - 0.8f) < 0.001f);
@@ -176,12 +168,8 @@ RTX_TEST(flicks_fruc_sliding_window_math) {
         RTX_CHECK(std::abs(alphas[4] - 0.6f) < 0.001f);
         RTX_CHECK(std::abs(alphas[5] - 0.0f) < 0.001f);
     }
+// Verify periodic alpha pattern: 0.0, 0.4, 0.8, 0.2, 0.6
 }
-
-// ---------------------------------------------------------------------------
-// Rational exact arithmetic contract (merged from test_rational.cpp)
-// ---------------------------------------------------------------------------
-
 RTX_TEST(rational_normalization) {
     RTX_CHECK_EQ((Rational{2, 4}.num), 1);
     RTX_CHECK_EQ((Rational{2, 4}.den), 2);
@@ -190,11 +178,11 @@ RTX_TEST(rational_normalization) {
     RTX_CHECK_EQ((Rational{2, -4}.num), -1);
     RTX_CHECK_EQ((Rational{2, -4}.den), 2);
     RTX_CHECK_EQ((Rational{0, 5}.num), 0);
+// Rational exact arithmetic contract (merged from test_rational.cpp)
     RTX_CHECK_EQ((Rational{0, 5}.den), 1);
     RTX_CHECK((Rational{1, 1}.valid()));
     RTX_CHECK((!Rational{1, 0}.valid()));
 }
-
 RTX_TEST(rational_parse_and_format) {
     const Result<Rational> exact = Rational::parse("24000/1001");
     RTX_REQUIRE(exact.has_value());
@@ -216,7 +204,6 @@ RTX_TEST(rational_parse_and_format) {
     RTX_CHECK(!Rational::parse("-23.976").has_value());
     RTX_CHECK_EQ(Rational::parse("1/0").error().code, ErrorCode::InvalidArgument);
 }
-
 RTX_TEST(rational_arithmetic) {
     RTX_CHECK((Rational{1, 2} == Rational{2, 4}));
     RTX_CHECK((Rational{1, 2} + Rational{1, 3} == Rational{5, 6}));
@@ -225,7 +212,6 @@ RTX_TEST(rational_arithmetic) {
     RTX_CHECK((Rational{2, 3} / Rational{4, 5} == Rational{5, 6}));
     RTX_CHECK((Rational{1, 2}.inverse() == Rational{2, 1}));
 }
-
 RTX_TEST(rational_from_double) {
     const Rational fps = Rational::fromDouble(29.97, 100000);
     RTX_CHECK(fps.valid());
@@ -234,7 +220,6 @@ RTX_TEST(rational_from_double) {
     RTX_CHECK_EQ(Rational::fromDouble(-0.5, 100).den, 2);
     RTX_CHECK_EQ(Rational::fromDouble(std::numeric_limits<double>::infinity(), 100).den, 1);
 }
-
 RTX_TEST(rational_rescale_rounding) {
     const Rational thirds{1, 3};
     const Rational halves{1, 2};
@@ -249,9 +234,7 @@ RTX_TEST(rational_rescale_rounding) {
     RTX_CHECK_EQ(rescaleQ(24, Rational{24, 1}.inverse(), kTimeBase90k), 90000);
     RTX_CHECK_EQ(rescaleQ(1, kTimeBase90k, kTimeBase90k), 1);
 }
-
 RTX_TEST(rational_exact_comparison_and_equivalence) {
-    // 1. Un-normalized representation mathematical equivalence
     Rational half1;
     half1.num = 1;
     half1.den = 2;
@@ -266,11 +249,10 @@ RTX_TEST(rational_exact_comparison_and_equivalence) {
     RTX_CHECK(half2 == half3);
     RTX_CHECK(half1 == half3);
     RTX_CHECK_EQ((half1 <=> half2), std::strong_ordering::equal);
+// 1. Un-normalized representation mathematical equivalence
     RTX_CHECK_EQ((half2 <=> half3), std::strong_ordering::equal);
     RTX_CHECK_EQ((half1 <=> half3), std::strong_ordering::equal);
 
-    // 2. Strict ordering without float precision loss on 64-bit boundaries
-    // In IEEE 754 double, both would be rounded to 1.0, failing float <=> comparison.
     constexpr int64_t kM = std::numeric_limits<int64_t>::max() / 4;
     Rational r1;
     r1.num = kM;
@@ -285,7 +267,8 @@ RTX_TEST(rational_exact_comparison_and_equivalence) {
     RTX_CHECK_EQ((r1 <=> r2), std::strong_ordering::less);
     RTX_CHECK_EQ((r2 <=> r1), std::strong_ordering::greater);
 
-    // 3. Negative fractions & negative denominators
+// 2. Strict ordering without float precision loss on 64-bit boundaries
+// In IEEE 754 double, both would be rounded to 1.0, failing float <=> comparison.
     Rational neg1;
     neg1.num = -1;
     neg1.den = 3;
@@ -300,8 +283,8 @@ RTX_TEST(rational_exact_comparison_and_equivalence) {
     neg_smaller.den = 2;  // -0.5 < -0.333
     RTX_CHECK(neg_smaller < neg1);
     RTX_CHECK_EQ((neg_smaller <=> neg1), std::strong_ordering::less);
+// 3. Negative fractions & negative denominators
 
-    // 4. Zero and identity
     Rational zero1{0, 1};
     Rational zero2{0, 99};
     RTX_CHECK(zero1 == zero2);
@@ -309,3 +292,4 @@ RTX_TEST(rational_exact_comparison_and_equivalence) {
     RTX_CHECK(zero1 < r1);
     RTX_CHECK(zero1 > neg1);
 }
+// 4. Zero and identity

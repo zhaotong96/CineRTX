@@ -22,7 +22,6 @@ bool resolveOne(const DynLibrary& library, const char* name, Fn& target,
     target = reinterpret_cast<Fn>(address);
     return true;
 }
-
 std::string missingMessage(const char* component, const std::vector<std::string>& missing) {
     std::ostringstream out;
     out << component << " is missing required exports:";
@@ -31,7 +30,6 @@ std::string missingMessage(const char* component, const std::vector<std::string>
     }
     return out.str();
 }
-
 }  // namespace
 
 namespace cuda {
@@ -60,10 +58,10 @@ bool DriverTable::resolve(const DynLibrary& library, std::string* error) {
     resolveOne(library, "cuGetErrorName", cuGetErrorName, missing);
     resolveOne(library, "cuGetErrorString", cuGetErrorString, missing);
 
-    // Interop entry points are optional for probing; they are required before
-    // the zero-copy path is declared available.
     std::vector<std::string> optional;
     resolveOne(library, "cuDevicePrimaryCtxSetFlags", cuDevicePrimaryCtxSetFlags, optional);
+// Interop entry points are optional for probing; they are required before
+// the zero-copy path is declared available.
     resolveOne(library, "cuDevicePrimaryCtxGetState", cuDevicePrimaryCtxGetState, optional);
     resolveOne(library, "cuMemAlloc_v2", cuMemAlloc, optional);
     resolveOne(library, "cuMemFree_v2", cuMemFree, optional);
@@ -106,20 +104,17 @@ bool DriverTable::resolve(const DynLibrary& library, std::string* error) {
     }
     return true;
 }
-
 bool DriverTable::readyForProbe() const {
     return cuInit != nullptr && cuDriverGetVersion != nullptr && cuDeviceGetCount != nullptr &&
            cuDeviceGet != nullptr && cuDeviceGetName != nullptr && cuDeviceTotalMem != nullptr &&
            cuDeviceGetAttribute != nullptr && cuDeviceGetLuid != nullptr;
 }
-
 bool DriverTable::readyForInterop() const {
     return readyForProbe() && cuImportExternalMemory != nullptr &&
            cuExternalMemoryGetMappedMipmappedArray != nullptr &&
            cuImportExternalSemaphore != nullptr && cuSignalExternalSemaphoresAsync != nullptr &&
            cuWaitExternalSemaphoresAsync != nullptr && cuSurfObjectCreate != nullptr;
 }
-
 const char* resultName(CUresult result) {
     switch (result) {
         case CUDA_SUCCESS:
@@ -144,7 +139,6 @@ const char* resultName(CUresult result) {
             return "CUDA_ERROR_UNKNOWN";
     }
 }
-
 }  // namespace rtx_shim::cuda
 
 namespace nvenc {
@@ -164,10 +158,7 @@ bool Table::resolve(const DynLibrary& library, std::string* error) {
     }
     return true;
 }
-
 }  // namespace rtx_shim::nvenc
-
-
 
 namespace ngx {
 
@@ -198,7 +189,6 @@ bool Table::resolve(const DynLibrary& library, std::string* error) {
     }
     return true;
 }
-
 }  // namespace rtx_shim::ngx
 
 }  // namespace rtx_shim

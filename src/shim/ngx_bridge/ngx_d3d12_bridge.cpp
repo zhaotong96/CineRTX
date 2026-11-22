@@ -71,26 +71,23 @@ template <typename T>
 T* as(void* pointer) {
     return static_cast<T*>(pointer);
 }
-
 std::string ngxResultText(const char* call, NVSDK_NGX_Result result) {
     char text[160] = {};
     std::snprintf(text, sizeof(text), "%s failed (NVSDK_NGX_Result 0x%08X)", call,
                   static_cast<unsigned int>(result));
     return text;
 }
-
 bool fileExists(const std::wstring& path) {
     const DWORD attributes = GetFileAttributesW(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES &&
            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
-
-// NGX wants a writable application-data directory.  Prefer
-// %LOCALAPPDATA%\RTXTranscode\ngx, fall back to %TEMP%, and finally to the
-// plugin directory the caller deployed the feature DLLs into.
 std::wstring makeAppDataDirectory(const std::wstring& fallback) {
     auto prepare = [](const wchar_t* base, const wchar_t* suffix) -> std::wstring {
         if (base == nullptr || base[0] == L'\0') {
+// NGX wants a writable application-data directory.  Prefer
+// %LOCALAPPDATA%\RTXTranscode\ngx, fall back to %TEMP%, and finally to the
+// plugin directory the caller deployed the feature DLLs into.
             return std::wstring();
         }
         std::wstring directory(base);
@@ -118,7 +115,6 @@ std::wstring makeAppDataDirectory(const std::wstring& fallback) {
     }
     return fallback;
 }
-
 }  // namespace
 
 NgxD3D12Bridge::NgxD3D12Bridge() = default;
@@ -140,21 +136,38 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     input_height_ = config.input_height;
     output_width_ = config.output_width;
     output_height_ = config.output_height;
+    scaled_width_ = (config.scaled_width > 0 && config.scaled_width <= output_width_)
+                        ? config.scaled_width
+                        : output_width_;
+    scaled_height_ = (config.scaled_height > 0 && config.scaled_height <= output_height_)
+                         ? config.scaled_height
+                         : output_height_;
+    output_offset_x_ = (config.output_offset_x >= 0 &&
+                        config.output_offset_x + scaled_width_ <= output_width_)
+                           ? config.output_offset_x
+                           : 0;
+    output_offset_y_ = (config.output_offset_y >= 0 &&
+                        config.output_offset_y + scaled_height_ <= output_height_)
+                           ? config.output_offset_y
+                           : 0;
     vsr_quality_ = std::clamp(config.vsr_quality, 1, 4);
     node_mask_ = config.luid_node_mask != 0 ? config.luid_node_mask : 1u;
-    // Phase 6.1 微瑕 3: vsr_quality == 0 is the explicit "VSR disabled" signal;
-    // a larger output canvas alone no longer silently re-enables VSR.
     needs_vsr_ = (config.vsr_quality > 0) &&
-                 (output_width_ > input_width_ || output_height_ > input_height_);
+                 (scaled_width_ > input_width_ || scaled_height_ > input_height_);
     needs_truehdr_ = config.enable_truehdr != 0;
     needs_mid_ = needs_vsr_;
+// Phase 6.1 微瑕 3: vsr_quality == 0 is the explicit "VSR disabled" signal;
+// a larger output canvas alone no longer silently re-enables VSR.
     if (!needs_vsr_ && !needs_truehdr_) {
         *error = "the NGX configuration requests neither VSR upscaling nor TrueHDR";
         return false;
     }
     if (needs_vsr_ &&
-        (output_width_ < input_width_ || output_height_ < input_height_)) {
-        *error = "VSR output geometry is smaller than the input";
+        (scaled_width_ < input_width_ || scaled_height_ < input_height_)) {
+        *error = "VSR output subrect (" + std::to_string(scaled_width_) + "x" +
+                 std::to_string(scaled_height_) + " on " + std::to_string(output_width_) + "x" +
+                 std::to_string(output_height_) + ") is smaller than input (" +
+                 std::to_string(input_width_) + "x" + std::to_string(input_height_) + ")";
         return false;
     }
     if (input_width_ <= 0 || input_height_ <= 0 || output_width_ <= 0 ||
@@ -162,19 +175,18 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
         *error = "the NGX configuration has non-positive geometry";
         return false;
     }
-
     const bool golden = config.contrast == 0 && config.saturation == 0 &&
                         config.middle_gray == 0;
     base_contrast_ = golden ? 125 : std::clamp(config.contrast, 0, 200);
     base_saturation_ = golden ? 75 : std::clamp(config.saturation, 0, 200);
     base_middle_gray_ = golden ? 44 : std::clamp(config.middle_gray, 10, 100);
-    // Phase 6.1 微瑕 1: the peak-luminance option now flows through, so the
-    // bridge honours the full 400..4000 cd/m^2 range the ABI contract allows.
     max_luminance_ = config.max_luminance == 0 ? 1000
                                                : std::clamp(config.max_luminance, 400, 4000);
     contrast_ = base_contrast_;
     saturation_ = base_saturation_;
     middle_gray_ = base_middle_gray_;
+// Phase 6.1 微瑕 1: the peak-luminance option now flows through, so the
+// bridge honours the full 400..4000 cd/m^2 range the ABI contract allows.
     smooth_contrast_ = static_cast<double>(contrast_);
     smooth_saturation_ = static_cast<double>(saturation_);
     smooth_middle_gray_ = static_cast<double>(middle_gray_);
@@ -191,7 +203,6 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
         *error = "nvngx_truehdr.dll is missing from the NGX plugin directory";
         return false;
     }
-
     ID3D12Device* device = as<ID3D12Device>(interop.device());
     if (device == nullptr) {
         *error = "the interop device is missing";
@@ -239,17 +250,16 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     if (FAILED(list->Close())) {
         return fail("closing the initial NGX command list failed");
     }
-    // The reference implementation makes sure the queue and allocator are live
-    // before NGX takes over the device.
     {
         ID3D12CommandList* lists[] = {list};
         as<ID3D12CommandQueue>(interop.queue())->ExecuteCommandLists(1, lists);
     }
     std::string flush_error;
     if (!interop.flush_queue(&flush_error)) {
+// The reference implementation makes sure the queue and allocator are live
+// before NGX takes over the device.
         return fail("initial NGX queue submission failed: " + flush_error);
     }
-
     NVSDK_NGX_FeatureCommonInfo common{};
     wchar_t const* paths[1] = {plugin_dir_.c_str()};
     common.PathListInfo.Path = paths;
@@ -297,7 +307,6 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     if (!interop.flush_queue(&flush_error)) {
         return fail("NGX feature creation submission failed: " + flush_error);
     }
-
     char text[256] = {};
     std::snprintf(text, sizeof(text),
                   "NGX ready: %dx%d -> %dx%d, VSR quality %d, TrueHDR %s, mid texture %s",
@@ -307,7 +316,6 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     initialized_ = true;
     return true;
 }
-
 bool NgxD3D12Bridge::create_features(std::string* error) {
     NVSDK_NGX_Parameter* params = as<NVSDK_NGX_Parameter>(ngx_params_);
     ID3D12GraphicsCommandList* list = as<ID3D12GraphicsCommandList>(command_list_);
@@ -354,7 +362,12 @@ bool NgxD3D12Bridge::create_features(std::string* error) {
         if (NVSDK_NGX_FAILED(status)) {
             *error = ngxResultText(truehdr ? "NGX_D3D12_CREATE_TRUEHDR_EXT"
                                            : "NGX_D3D12_CREATE_VSR_EXT",
-                                   status);
+                                   status) +
+                     " [" + std::to_string(input_width_) + "x" + std::to_string(input_height_) +
+                     " -> " + std::to_string(output_width_) + "x" + std::to_string(output_height_) +
+                     ", subrect=" + std::to_string(scaled_width_) + "x" +
+                     std::to_string(scaled_height_) + "@" + std::to_string(output_offset_x_) + "," +
+                     std::to_string(output_offset_y_) + "]";
             return false;
         }
         return true;
@@ -368,7 +381,6 @@ bool NgxD3D12Bridge::create_features(std::string* error) {
     }
     return true;
 }
-
 bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, bool reset_temporal) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!initialized_ || interop_ == nullptr) {
@@ -381,9 +393,6 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
     if (interop_->pollDeviceLost(error)) {
         return false;
     }
-    // A single command allocator can only be reset once the GPU retired the
-    // previous list.  The queue itself is capped at two submissions, but the
-    // allocator needs the stricter guarantee.
     if (!interop_->wait_for_fence_value(pending_signal_, kFenceTimeout, error)) {
         return false;
     }
@@ -393,14 +402,15 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
     if (!interop_->queue_wait_fence(input_fence_value, error)) {
         return false;
     }
-
     ID3D12CommandAllocator* allocator = as<ID3D12CommandAllocator>(allocator_);
+// A single command allocator can only be reset once the GPU retired the
+// previous list.  The queue itself is capped at two submissions, but the
+// allocator needs the stricter guarantee.
     ID3D12GraphicsCommandList* list = as<ID3D12GraphicsCommandList>(command_list_);
     if (FAILED(allocator->Reset()) || FAILED(list->Reset(allocator, nullptr))) {
         *error = "resetting the NGX command list failed";
         return false;
     }
-
     ID3D12Resource* input = as<ID3D12Resource>(interop_->input().resource);
     ID3D12Resource* output = as<ID3D12Resource>(interop_->output().resource);
     ID3D12Resource* mid = needs_mid_ ? as<ID3D12Resource>(interop_->mid().resource) : nullptr;
@@ -418,9 +428,6 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
         state = next;
     };
 
-    // The evaluator can fail after some barriers were recorded.  Put every
-    // touched resource back into COMMON, close the list and keep the queue
-    // timeline monotonic so a retry or a clean destroy stays valid.
     bool eval_ok = true;
     std::string eval_error;
 
@@ -433,6 +440,9 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
         }
         ID3D12Resource* target = needs_mid_ ? mid : output;
         int& target_state = needs_mid_ ? mid_state : output_state;
+// The evaluator can fail after some barriers were recorded.  Put every
+// touched resource back into COMMON, close the list and keep the queue
+// timeline monotonic so a retry or a clean destroy stays valid.
         move(target, target_state, uav);
         NVSDK_NGX_D3D12_VSR_Eval_Params eval{};
         eval.pInput = input;
@@ -440,16 +450,23 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
         eval.InputSubrectBase = {0, 0};
         eval.InputSubrectSize = {static_cast<unsigned int>(input_width_),
                                  static_cast<unsigned int>(input_height_)};
-        eval.OutputSubrectBase = {0, 0};
-        eval.OutputSubrectSize = {static_cast<unsigned int>(output_width_),
-                                  static_cast<unsigned int>(output_height_)};
+        eval.OutputSubrectBase = {static_cast<unsigned int>(output_offset_x_),
+                                  static_cast<unsigned int>(output_offset_y_)};
+        eval.OutputSubrectSize = {static_cast<unsigned int>(scaled_width_),
+                                  static_cast<unsigned int>(scaled_height_)};
         eval.QualityLevel = static_cast<NVSDK_NGX_VSR_QualityLevel>(vsr_quality_);
         const NVSDK_NGX_Result status = NGX_D3D12_EVALUATE_VSR_EXT(
             list, as<NVSDK_NGX_Handle>(vsr_handle_), as<NVSDK_NGX_Parameter>(ngx_params_),
             &eval);
         if (NVSDK_NGX_FAILED(status)) {
             eval_ok = false;
-            eval_error = ngxResultText("NGX_D3D12_EVALUATE_VSR_EXT", status);
+            eval_error = ngxResultText("NGX_D3D12_EVALUATE_VSR_EXT", status) +
+                         " [" + std::to_string(input_width_) + "x" + std::to_string(input_height_) +
+                         " -> " + std::to_string(output_width_) + "x" +
+                         std::to_string(output_height_) + ", subrect=" +
+                         std::to_string(scaled_width_) + "x" + std::to_string(scaled_height_) +
+                         "@" + std::to_string(output_offset_x_) + "," +
+                         std::to_string(output_offset_y_) + "]";
         } else {
             uav_barrier(target);
             if (needs_mid_) {
@@ -457,7 +474,6 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
             }
         }
     }
-
     if (eval_ok && needs_vsr_ && !needs_truehdr_ && sdr_pso_ != nullptr) {
         move(mid, mid_state, srv);
         move(output, output_state, uav);
@@ -475,7 +491,6 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
         list->Dispatch((output_width_ + 15) / 16, (output_height_ + 15) / 16, 1);
         uav_barrier(output);
     }
-
     if (eval_ok && needs_truehdr_) {
         ID3D12Resource* source = needs_mid_ ? mid : input;
         move(output, output_state, uav);
@@ -483,8 +498,6 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
         eval.pInput = source;
         eval.pOutput = output;
         eval.InputSubrectTL = {0, 0};
-        // The helper writes Dimensions.Width/Height into TrueHDR.InRight /
-        // InBottom, which the SDK treats as absolute bottom-right coordinates.
         eval.InputSubrectBR = {
             static_cast<unsigned int>(needs_mid_ ? output_width_ : input_width_),
             static_cast<unsigned int>(needs_mid_ ? output_height_ : input_height_)};
@@ -499,13 +512,14 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
             list, as<NVSDK_NGX_Handle>(truehdr_handle_),
             as<NVSDK_NGX_Parameter>(ngx_params_), &eval);
         if (NVSDK_NGX_FAILED(status)) {
+// The helper writes Dimensions.Width/Height into TrueHDR.InRight /
+// InBottom, which the SDK treats as absolute bottom-right coordinates.
             eval_ok = false;
             eval_error = ngxResultText("NGX_D3D12_EVALUATE_TRUEHDR_EXT", status);
         } else {
             uav_barrier(output);
         }
     }
-
     if (eval_ok) {
         move(output, output_state, common);
         if (needs_mid_) {
@@ -513,15 +527,12 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
         }
         move(input, input_state, common);
     } else {
-        // Reverse order of use so the restored states are valid even though the
-        // feature never wrote its target.
         if (needs_mid_ && mid_state != common) {
             move(mid, mid_state, common);
         }
         move(output, output_state, common);
         move(input, input_state, common);
     }
-
     if (FAILED(list->Close())) {
         *error = "closing the NGX command list failed";
         initialized_ = false;
@@ -531,6 +542,8 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
     as<ID3D12CommandQueue>(interop_->queue())->ExecuteCommandLists(1, lists);
 
     uint64_t signal = input_fence_value + 1;
+// Reverse order of use so the restored states are valid even though the
+// feature never wrote its target.
     if (signal <= interop_->timeline_value()) {
         signal = interop_->timeline_value() + 1;
     }
@@ -548,7 +561,6 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
     }
     return true;
 }
-
 bool NgxD3D12Bridge::apply_pending_stats(std::string* error) {
     (void)error;
     if (!has_pending_stats_) {
@@ -589,7 +601,6 @@ bool NgxD3D12Bridge::apply_pending_stats(std::string* error) {
         saturation = base_saturation - (base_saturation - saturation_min) *
                                            std::min(1.0, (p - kHighP) / kHighPSpan);
     }
-
     if (!stats_initialized_ || pending_stats_.scene_cut != 0) {
         smooth_contrast_ = contrast;
         smooth_middle_gray_ = middle_gray;
@@ -608,7 +619,6 @@ bool NgxD3D12Bridge::apply_pending_stats(std::string* error) {
     saturation_ = std::clamp(static_cast<int>(std::lround(smooth_saturation_)), 0, 200);
     return true;
 }
-
 bool NgxD3D12Bridge::flush(std::string* error) {
     std::lock_guard<std::mutex> lock(mutex_);
     trace("flush: begin");
@@ -622,13 +632,11 @@ bool NgxD3D12Bridge::flush(std::string* error) {
     trace("flush: done");
     return true;
 }
-
 void NgxD3D12Bridge::set_frame_stats(const RtxNgxFrameStats& stats) {
     std::lock_guard<std::mutex> lock(mutex_);
     pending_stats_ = stats;
     has_pending_stats_ = true;
 }
-
 void NgxD3D12Bridge::transition(void* resource, int before, int after) {
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -639,7 +647,6 @@ void NgxD3D12Bridge::transition(void* resource, int before, int after) {
     barrier.Transition.StateAfter = static_cast<D3D12_RESOURCE_STATES>(after);
     as<ID3D12GraphicsCommandList>(command_list_)->ResourceBarrier(1, &barrier);
 }
-
 void NgxD3D12Bridge::uav_barrier(void* resource) {
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -647,7 +654,6 @@ void NgxD3D12Bridge::uav_barrier(void* resource) {
     barrier.UAV.pResource = as<ID3D12Resource>(resource);
     as<ID3D12GraphicsCommandList>(command_list_)->ResourceBarrier(1, &barrier);
 }
-
 bool NgxD3D12Bridge::create_sdr_blit(std::string* error) {
     release_sdr_blit();
     ID3D12Device* device = as<ID3D12Device>(device_);
@@ -693,7 +699,6 @@ bool NgxD3D12Bridge::create_sdr_blit(std::string* error) {
     const unsigned int inc_size =
         device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    // Descriptor 0: SRV for mid texture (R8G8B8A8_UNORM)
     D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
     srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -701,7 +706,6 @@ bool NgxD3D12Bridge::create_sdr_blit(std::string* error) {
     srv_desc.Texture2D.MipLevels = 1;
     device->CreateShaderResourceView(as<ID3D12Resource>(interop_->mid().resource), &srv_desc, cpu_handle);
 
-    // Descriptor 1: UAV for output texture (RGBA16F)
     cpu_handle.ptr += inc_size;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc{};
     uav_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -710,7 +714,6 @@ bool NgxD3D12Bridge::create_sdr_blit(std::string* error) {
 
     return true;
 }
-
 void NgxD3D12Bridge::release_sdr_blit() {
     if (sdr_pso_ != nullptr) {
         as<ID3D12PipelineState>(sdr_pso_)->Release();
@@ -719,14 +722,15 @@ void NgxD3D12Bridge::release_sdr_blit() {
     if (sdr_root_signature_ != nullptr) {
         as<ID3D12RootSignature>(sdr_root_signature_)->Release();
         sdr_root_signature_ = nullptr;
+// Descriptor 0: SRV for mid texture (R8G8B8A8_UNORM)
     }
     if (sdr_descriptor_heap_ != nullptr) {
         as<ID3D12DescriptorHeap>(sdr_descriptor_heap_)->Release();
         sdr_descriptor_heap_ = nullptr;
     }
 }
-
 void NgxD3D12Bridge::release_features() {
+// Descriptor 1: UAV for output texture (RGBA16F)
     release_sdr_blit();
     if (vsr_handle_ != nullptr) {
         trace("release: VSR feature");
@@ -740,8 +744,6 @@ void NgxD3D12Bridge::release_features() {
         truehdr_handle_ = nullptr;
         trace("release: TrueHDR feature done");
     }
-    // The programming guide requires parameter maps to be destroyed before
-    // shutdown; doing it afterwards hangs on driver 617.14.
     if (ngx_params_ != nullptr) {
         trace("release: DestroyParameters");
         (void)NVSDK_NGX_D3D12_DestroyParameters(as<NVSDK_NGX_Parameter>(ngx_params_));
@@ -749,19 +751,10 @@ void NgxD3D12Bridge::release_features() {
         trace("release: DestroyParameters done");
     }
     if (ngx_initialized_) {
-        // NVSDK_NGX_D3D12_Shutdown1 is deliberately not called.  On driver
-        // 617.14 with the static stub it never returns: the stack settles in
-        // _nvngx!Shutdown1 -> nvapi64 -> NvTelemetryAPI64 waiting on a
-        // telemetry teardown that never signals (reproduced with both the
-        // device and nullptr, before any evaluation).  Feature handles and
-        // parameter maps are released above, so the only cost is that the
-        // NGX runtime stays initialised until process exit.  One bridge lives
-        // for the whole job, so this does not accumulate per frame.
         trace("release: Shutdown1 not called (driver 617.14 telemetry deadlock)");
         ngx_initialized_ = false;
     }
 }
-
 void NgxD3D12Bridge::release() {
     std::lock_guard<std::mutex> lock(mutex_);
     trace("destroy: begin");
@@ -773,11 +766,11 @@ void NgxD3D12Bridge::release() {
     release_features();
     trace("destroy: features released");
     if (command_list_ != nullptr) {
-        // Never submit a half-recorded command list during teardown; just close it
-        // if it was left open so D3D12 does not complain on Release().
         ID3D12GraphicsCommandList* list = as<ID3D12GraphicsCommandList>(command_list_);
         (void)list->Close();
         as<ID3D12GraphicsCommandList>(command_list_)->Release();
+// The programming guide requires parameter maps to be destroyed before
+// shutdown; doing it afterwards hangs on driver 617.14.
         command_list_ = nullptr;
     }
     if (allocator_ != nullptr) {
@@ -785,9 +778,18 @@ void NgxD3D12Bridge::release() {
         allocator_ = nullptr;
     }
     device_ = nullptr;
+// NVSDK_NGX_D3D12_Shutdown1 is deliberately not called.  On driver
+// 617.14 with the static stub it never returns: the stack settles in
+// _nvngx!Shutdown1 -> nvapi64 -> NvTelemetryAPI64 waiting on a
+// telemetry teardown that never signals (reproduced with both the
+// device and nullptr, before any evaluation).  Feature handles and
+// parameter maps are released above, so the only cost is that the
+// NGX runtime stays initialised until process exit.  One bridge lives
+// for the whole job, so this does not accumulate per frame.
     interop_ = nullptr;
     initialized_ = false;
     trace("destroy: done");
 }
-
 }  // namespace rtx_ngx
+// Never submit a half-recorded command list during teardown; just close it
+// if it was left open so D3D12 does not complain on Release().

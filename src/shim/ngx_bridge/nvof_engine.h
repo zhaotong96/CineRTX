@@ -153,6 +153,10 @@ typedef struct _NV_OF_CUDA_BUFFER_STRIDE_INFO {
     uint32_t numPlanes;
 } NV_OF_CUDA_BUFFER_STRIDE_INFO;
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct NV_OF_CUDA_API_FUNCTION_LIST {
     NV_OF_STATUS(__stdcall* nvCreateOpticalFlowCuda)(void* cuContext, NvOFHandle* hOf);
     NV_OF_STATUS(__stdcall* nvOFInit)(NvOFHandle hOf, const NV_OF_INIT_PARAMS* initParams);
@@ -176,6 +180,10 @@ struct NV_OF_CUDA_API_FUNCTION_LIST {
 typedef NV_OF_STATUS(__stdcall* PFNNvOFAPICreateInstanceCuda)(
     uint32_t apiVer, NV_OF_CUDA_API_FUNCTION_LIST* functionList);
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 class NvofEngine {
 public:
     NvofEngine();
@@ -189,8 +197,8 @@ public:
     bool init(void* cuContext, uint32_t width, uint32_t height, void* stream, std::string* error);
     bool isLoaded() const noexcept;
 
-    // Executes hardware optical flow estimation on input frames (prev_nv12, curr_nv12).
-    // Outputs forward flow, backward flow, and cost device pointers.
+// Executes hardware optical flow estimation on input frames (prev_nv12, curr_nv12).
+// Outputs forward flow, backward flow, and cost device pointers.
     bool execute(uint64_t prev_nv12, uint64_t curr_nv12, uint32_t pitch, void* stream,
                  uint64_t* out_fwd_flow, uint64_t* out_bwd_flow, uint64_t* out_cost,
                  std::string* error);

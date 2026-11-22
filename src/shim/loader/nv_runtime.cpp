@@ -27,7 +27,6 @@ namespace {
 std::filesystem::path utf8ToPath(const std::string& value) {
     return std::filesystem::path(std::u8string(value.begin(), value.end()));
 }
-
 std::string pathToUtf8(const std::filesystem::path& path) {
 #if defined(_WIN32)
     const std::u8string value = path.u8string();
@@ -36,7 +35,6 @@ std::string pathToUtf8(const std::filesystem::path& path) {
     return path.string();
 #endif
 }
-
 std::string executableDirectory() {
 #if defined(_WIN32)
     wchar_t buffer[32768] = {};
@@ -56,20 +54,17 @@ std::string executableDirectory() {
         .string();
 #endif
 }
-
 bool fileExists(const std::string& path) {
     std::error_code error;
     return !path.empty() && std::filesystem::is_regular_file(utf8ToPath(path), error);
 }
+bool openSdkLibrary(DynLibrary& library, const std::string& name, bool system_fallback,
+                    std::string* error) {
 
+    const std::string application_directory = executableDirectory();
 // SDK DLLs are allowed to live beside the executable or in a directory the
 // operator explicitly registered through RTX_NVIDIA_DIR.  They are never picked
 // up from the current working directory or from an unqualified PATH entry.
-bool openSdkLibrary(DynLibrary& library, const std::string& name, bool system_fallback,
-                    std::string* error) {
-    
-
-    const std::string application_directory = executableDirectory();
     if (!application_directory.empty()) {
         const std::filesystem::path candidate =
             utf8ToPath(application_directory) / name;
@@ -77,7 +72,6 @@ bool openSdkLibrary(DynLibrary& library, const std::string& name, bool system_fa
             return true;
         }
     }
-
     if (system_fallback) {
         return library.openSystemLibrary(name, error);
     }
@@ -86,7 +80,6 @@ bool openSdkLibrary(DynLibrary& library, const std::string& name, bool system_fa
     }
     return false;
 }
-
 std::string platformLibraryName(const char* windows_name, [[maybe_unused]] const char* posix_name) {
 #if defined(_WIN32)
     return windows_name;
@@ -94,11 +87,9 @@ std::string platformLibraryName(const char* windows_name, [[maybe_unused]] const
     return posix_name;
 #endif
 }
-
 std::string errorOr(const std::string& value, const char* fallback) {
     return value.empty() ? std::string(fallback) : value;
 }
-
 }  // namespace
 
 bool openNvidiaLibrary(DynLibrary& library, const char* windows_name,
@@ -107,14 +98,12 @@ bool openNvidiaLibrary(DynLibrary& library, const char* windows_name,
     return openSdkLibrary(library, platformLibraryName(windows_name, posix_name),
                           system_fallback, error);
 }
-
 ComponentStatus& NvidiaRuntime::addComponent(const std::string& name) {
     components_.push_back(ComponentStatus{});
     ComponentStatus& component = components_.back();
     component.name = name;
     return component;
 }
-
 bool NvidiaRuntime::loadCuda(std::string* error) {
     ComponentStatus& component = addComponent("CUDA driver");
     std::string message;
@@ -132,7 +121,6 @@ bool NvidiaRuntime::loadCuda(std::string* error) {
     }
     return true;
 }
-
 bool NvidiaRuntime::loadNvenc(std::string* error) {
     ComponentStatus& component = addComponent("NVENC");
     std::string message;
@@ -164,7 +152,6 @@ bool NvidiaRuntime::loadNvenc(std::string* error) {
     }
     return true;
 }
-
 bool NvidiaRuntime::loadNvcuvid(std::string* error) {
     ComponentStatus& component = addComponent("NVDEC (cuvid)");
     std::string message;
@@ -183,7 +170,6 @@ bool NvidiaRuntime::loadNvcuvid(std::string* error) {
     }
     return true;
 }
-
 bool NvidiaRuntime::loadNgx(std::string* error) {
 #if defined(_WIN32)
     const char* primary = "nvsdk_ngx_d.dll";
@@ -195,23 +181,22 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
     const char* feature_names[] = {"libnvngx_vsr.so", "libnvngx_truehdr.so"};
 #endif
 
-    // The proprietary host stub is linked into rtx_ngx_bridge, not into this
-    // shim, so nvsdk_ngx_d.dll is not a deliverable.  The feature DLLs are the
-    // real signal that the plugin is deployed; look where the bridge looks.
     std::vector<std::string> directories;
-    
+
     const std::string application_directory = executableDirectory();
     if (!application_directory.empty()) {
         const std::filesystem::path root = utf8ToPath(application_directory);
         directories.push_back(pathToUtf8(root / "plugins" / "nvidia_rtx"));
         directories.push_back(application_directory);
     }
-
     std::string feature_directory;
     bool features_complete = false;
     for (const std::string& directory : directories) {
         bool complete = true;
         for (const char* feature : feature_names) {
+// The proprietary host stub is linked into rtx_ngx_bridge, not into this
+// shim, so nvsdk_ngx_d.dll is not a deliverable.  The feature DLLs are the
+// real signal that the plugin is deployed; look where the bridge looks.
             const std::filesystem::path candidate = utf8ToPath(directory) / feature;
             complete = complete && fileExists(pathToUtf8(candidate));
         }
@@ -221,7 +206,6 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
             break;
         }
     }
-
     std::string message;
     bool opened = openSdkLibrary(ngx_, primary, false, &message);
     if (!opened && std::string(fallback) != primary) {
@@ -239,11 +223,9 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
         }
         return false;
     }
-
     if (opened && feature_directory.empty()) {
         feature_directory = pathToUtf8(utf8ToPath(ngx_.path()).parent_path());
     }
-
     for (const char* feature : feature_names) {
         ComponentStatus& feature_component = addComponent(feature);
         const std::filesystem::path candidate =
@@ -255,7 +237,6 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
         feature_component.note =
             feature_component.present ? "feature DLL present" : "feature DLL missing";
     }
-
     ComponentStatus& component = addComponent("RTX Video SDK (NGX)");
     component.present = true;
     component.path = opened ? ngx_.path() : feature_directory;
@@ -276,5 +257,4 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
     }
     return true;
 }
-
 }  // namespace rtx_shim

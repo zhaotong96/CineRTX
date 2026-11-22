@@ -2,6 +2,7 @@
 // Copyright (C) 2026 RTX Transcode Engine contributors
 
 #include "hw_transcode_internal.h"
+#include "rtx/vram_scheduler.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -19,7 +20,6 @@ int32_t shimCodec(VideoCodec codec) {
         default:               return RTX_CODEC_UNKNOWN;
     }
 }
-
 int32_t encoderCodec(VideoCodec codec) {
     switch (codec) {
         case VideoCodec::HEVC: return 0;
@@ -28,7 +28,6 @@ int32_t encoderCodec(VideoCodec codec) {
         default:               return -1;
     }
 }
-
 ErrorCode mapShimResult(RtxResult r) {
     switch (r) {
         case RTX_OK: return ErrorCode::Ok;
@@ -46,7 +45,6 @@ ErrorCode mapShimResult(RtxResult r) {
         default: return ErrorCode::Internal;
     }
 }
-
 const char* shimResultName(RtxResult r) {
     switch (r) {
         case RTX_OK: return "RTX_OK";
@@ -66,13 +64,11 @@ const char* shimResultName(RtxResult r) {
         default: return "RTX_ERR_UNKNOWN";
     }
 }
-
 std::string describe(const char* op, RtxResult res, const char* detail) {
     std::string m = std::string(op) + " failed: " + shimResultName(res);
     if (detail && detail[0]) { m += " ("; m += detail; m += ")"; }
     return m;
 }
-
 RtxHdrMetadata toShimHdr(const Hdr10Metadata& hdr) {
     RtxHdrMetadata out{};
     out.enabled = hdr.enabled ? 1 : 0;
@@ -95,7 +91,6 @@ RtxHdrMetadata toShimHdr(const Hdr10Metadata& hdr) {
     out.target_nits = hdr.target_nits;
     return out;
 }
-
 void applyHdrDefaults(Hdr10Metadata& hdr) {
     if (!hdr.enabled) return;
     const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(TrueHdrParameters{});
@@ -112,7 +107,6 @@ void applyHdrDefaults(Hdr10Metadata& hdr) {
     if (hdr.cll.max_cll == 0) { hdr.cll.max_cll = d.cll.max_cll; hdr.cll.max_fall = d.cll.max_fall; }
     if (hdr.target_nits == 0) hdr.target_nits = d.target_nits;
 }
-
 Rational chooseFrameRate(const HwTranscodeOptions& options, const MediaInfo& info) {
     const Rational src_fps = (info.frame_rate.valid() && info.frame_rate.num > 0) ? info.frame_rate : Rational{24, 1};
     if (options.fruc_enabled) {
@@ -121,7 +115,6 @@ Rational chooseFrameRate(const HwTranscodeOptions& options, const MediaInfo& inf
     }
     return src_fps;
 }
-
 std::string jsonEscape(const std::string& value) {
     std::string output; output.reserve(value.size());
     for (const char raw : value) {
@@ -136,7 +129,6 @@ std::string jsonEscape(const std::string& value) {
     }
     return output;
 }
-
 std::string HwTranscodeReport::toJson() const {
     return std::format(
         "{{\n  \"backend\": \"{}\", \"device\": \"{}\", \"path\": \"{}\", \"input_container\": \"{}\", \"output_container\": \"{}\", \"input_codec\": \"{}\", \"output_codec\": \"{}\",\n"
@@ -153,7 +145,6 @@ std::string HwTranscodeReport::toJson() const {
         remaster_frame_ms, remaster_pack_kernel_max_ms, remaster_pack_launches, vsr_quality,
         measured_max_cll_nits, measured_max_fall_nits, frames_interpolated, fruc_scene_cuts, fruc_failures, jsonEscape(fruc_backend));
 }
-
 Result<std::unique_ptr<NvidiaTranscodeSession>> NvidiaTranscodeSession::create(
     const HwTranscodeOptions& options, bool is_remaster,
     HwTranscodeReport& report, int target_w, int target_h) {
@@ -164,18 +155,6 @@ Result<std::unique_ptr<NvidiaTranscodeSession>> NvidiaTranscodeSession::create(
     }
     return session;
 }
-
-NvidiaTranscodeSession::~NvidiaTranscodeSession() {
-    muxer_.reset();
-    cpu_encoder_.reset();
-    encoder_.reset();
-    decoder_.reset();
-    bridge_.reset();
-    demuxer_.reset();
-    shim_.close();
-    bridge_loader_.close();
-}
-
 Result<void> NvidiaTranscodeSession::configure(
     const HwTranscodeOptions& options, bool is_remaster,
     HwTranscodeReport& report, int target_w, int target_h) {
@@ -196,7 +175,6 @@ Result<void> NvidiaTranscodeSession::configure(
     if (shimCodec(info_.codec) == RTX_CODEC_UNKNOWN) {
         return err(ErrorCode::Unsupported, "unsupported input codec: " + info_.video_codec);
     }
-
     report.input_container = info_.container; report.input_codec = info_.video_codec;
     report.input_width = info_.width; report.input_height = info_.height;
     report.output_width = is_remaster ? target_width_ : info_.width;
@@ -218,7 +196,6 @@ Result<void> NvidiaTranscodeSession::configure(
                        caps_res == RTX_OK ? caps.diagnostics : describe("rtx_ngx_bridge_query_caps", caps_res, nullptr));
         }
     }
-
     if (!shim_.open(&shim_error)) {
         return err(ErrorCode::DllMissing, "cannot load the NVIDIA shim", shim_error);
     }
@@ -226,6 +203,14 @@ Result<void> NvidiaTranscodeSession::configure(
         return err(ErrorCode::DllMissing, "no NVIDIA CUDA device is available to rtx_shim", diagnostics_.summary);
     }
     report.device = diagnostics_.device.name;
+    {
+        const VramScheduler budget_probe(kDefaultDxgiVramBudgetBytes, kVramMinDwellFrames);
+        logInfo(std::format("VRAM hysteresis policy armed: budget={} MiB, high82={} MiB, low68={} MiB, dwell={}f",
+                            budget_probe.dxgiBudgetBytes() / (1024ull * 1024ull),
+                            budget_probe.highWatermarkBytes() / (1024ull * 1024ull),
+                            budget_probe.lowWatermarkBytes() / (1024ull * 1024ull),
+                            kVramMinDwellFrames));
+    }
 
     if (options_.codec == VideoCodec::AV1 && !options_.use_cpu_encoder &&
         (diagnostics_.device.compute_major < 8 ||
@@ -235,30 +220,48 @@ Result<void> NvidiaTranscodeSession::configure(
         logWarn(std::format("GPU (SM {}.{}) lacks hardware AV1 NVENC; automatically falling back to HEVC Main10.",
                             diagnostics_.device.compute_major, diagnostics_.device.compute_minor));
     }
-
     const int source_depth = info_.bit_depth > 8 ? 10 : 8;
     const int output_depth = 10;
     report.output_bit_depth = output_depth;
 
     const bool is_portrait_input = (info_.width > 0 && info_.height > 0 && info_.width < info_.height);
-    const bool is_default_landscape_4k = (target_width_ == 3840 && target_height_ == 2160);
     const GeometryTargetMode geom_mode = (options.geometry_mode == 1)
         ? GeometryTargetMode::Pillarbox
         : GeometryTargetMode::AutoDirect;
-    if (is_remaster && (!options.vsr_enabled)) {
+    bridge_config_.output_offset_x = 0;
+    bridge_config_.output_offset_y = 0;
+    bridge_config_.scaled_width = 0;
+    bridge_config_.scaled_height = 0;
+    if (is_remaster && (!options.vsr_enabled || (target_width_ == 0 && target_height_ == 0))) {
+        // Native or VSR-disabled: strictly pass through source resolution without upscaling.
         target_width_ = info_.width;
         target_height_ = info_.height;
         report.output_width = target_width_;
         report.output_height = target_height_;
+    } else if (is_remaster && is_portrait_input && geom_mode == GeometryTargetMode::Pillarbox) {
+        auto geom = calculateSmartGeometry(info_.width, info_.height, geom_mode, target_width_, target_height_);
+        if (info_.height > geom.canvas_height) {
+            return err(ErrorCode::InvalidArgument,
+                       std::format("pillarbox canvas height ({}) is smaller than portrait source height ({}); use AutoDirect or native mode",
+                                   geom.canvas_height, info_.height));
+        }
+        target_width_ = geom.canvas_width;
+        target_height_ = geom.canvas_height;
+        bridge_config_.output_offset_x = geom.offset_x;
+        bridge_config_.output_offset_y = geom.offset_y;
+        bridge_config_.scaled_width = geom.scaled_width;
+        bridge_config_.scaled_height = geom.scaled_height;
+        report.output_width = target_width_;
+        report.output_height = target_height_;
     } else if (is_remaster && (target_width_ <= 0 || target_height_ <= 0 ||
-                               (is_portrait_input && is_default_landscape_4k))) {
+                               (is_portrait_input && geom_mode == GeometryTargetMode::AutoDirect &&
+                                target_width_ > target_height_))) {
         auto geom = calculateSmartGeometry(info_.width, info_.height, geom_mode, target_width_, target_height_);
         target_width_ = geom.canvas_width;
         target_height_ = geom.canvas_height;
         report.output_width = target_width_;
         report.output_height = target_height_;
     }
-
     const int clamped_nits = std::clamp(options.peak_nits > 0 ? options.peak_nits : 1000, 400, 4000);
     auto hdr_bridge_res = configureHdrAndBridge(report, clamped_nits);
     if (!hdr_bridge_res.has_value()) return hdr_bridge_res;
@@ -284,7 +287,6 @@ Result<void> NvidiaTranscodeSession::configure(
     output_info_.frame_rate = frame_rate_;
     return {};
 }
-
 Result<void> NvidiaTranscodeSession::configureHdrAndBridge(HwTranscodeReport& /*report*/, int clamped_nits) {
     if (is_remaster_) {
         TrueHdrParameters hdr_params{};
@@ -319,6 +321,7 @@ Result<void> NvidiaTranscodeSession::configureHdrAndBridge(HwTranscodeReport& /*
 
         (void)bridge_loader_.previewBuffer(bridge_.get(), 0, &preview_ring_[0], &preview_pitch_);
         (void)bridge_loader_.previewBuffer(bridge_.get(), 1, &preview_ring_[1], &preview_pitch_);
+        (void)bridge_loader_.previewBuffer(bridge_.get(), 2, &preview_ring_[2], &preview_pitch_);
 
         if (!options_.lut_path.empty()) {
             const Result<Lut3D> lut = Lut3D::loadFromCubeFile(options_.lut_path);
@@ -338,7 +341,6 @@ Result<void> NvidiaTranscodeSession::configureHdrAndBridge(HwTranscodeReport& /*
     }
     return {};
 }
-
 Result<void> NvidiaTranscodeSession::configureDecoder(int source_depth) {
     RtxDecoderConfig decoder_config{};
     decoder_config.codec = shimCodec(info_.codec);
@@ -367,7 +369,6 @@ Result<void> NvidiaTranscodeSession::configureDecoder(int source_depth) {
     }
     return {};
 }
-
 Result<void> NvidiaTranscodeSession::createEncoder(const RtxFrameDesc& frame, HwTranscodeReport& report) {
     if (options_.use_cpu_encoder) {
         CpuEncoderConfig cpu_cfg{};
@@ -389,7 +390,6 @@ Result<void> NvidiaTranscodeSession::createEncoder(const RtxFrameDesc& frame, Hw
         report.output_bit_depth = output_info_.bit_depth;
         return {};
     }
-
     RtxEncoderConfig config{};
     config.codec = encoderCodec(options_.codec);
     config.width = is_remaster_ ? target_width_ : frame.width;
@@ -418,11 +418,9 @@ Result<void> NvidiaTranscodeSession::createEncoder(const RtxFrameDesc& frame, Hw
     report.output_bit_depth = output_info_.bit_depth;
     return {};
 }
-
 void NvidiaTranscodeSession::releaseDecodedFrame(uint64_t slot) {
     if (decoder_ != nullptr) shim_.decoderReleaseFrame(decoder_.get(), slot);
 }
-
 Result<void> NvidiaTranscodeSession::openMuxer() {
     std::lock_guard<std::mutex> lock(muxer_mutex_);
     if (muxer_ != nullptr) return {};
@@ -450,7 +448,6 @@ Result<void> NvidiaTranscodeSession::openMuxer() {
     muxer_ = makeFfmpegMuxer();
     return muxer_->open(options_.output_path, output_info_, hdr_);
 }
-
 Result<void> NvidiaTranscodeSession::writeEncodedPacket(
     const RtxPacketDesc& packet, int64_t fallback_pts, HwTranscodeReport& report,
     const std::vector<uint8_t>& side_data) {
@@ -470,7 +467,6 @@ Result<void> NvidiaTranscodeSession::writeEncodedPacket(
     report.bitstream_bytes += packet.size;
     return {};
 }
-
 Result<void> NvidiaTranscodeSession::flushEncoder(HwTranscodeReport& report) {
     if (options_.use_cpu_encoder) {
         if (cpu_encoder_ && muxer_) {
@@ -502,7 +498,6 @@ Result<void> NvidiaTranscodeSession::flushEncoder(HwTranscodeReport& report) {
     }
     return {};
 }
-
 Result<void> NvidiaTranscodeSession::finalize(HwTranscodeReport& report, Clock::time_point started) {
     if (!muxer_) return err(ErrorCode::Internal, "no frame was decoded; output was not created");
     auto fin = muxer_->finalize();
@@ -523,65 +518,11 @@ Result<void> NvidiaTranscodeSession::finalize(HwTranscodeReport& report, Clock::
     report.elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
     return {};
 }
-
 Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& options) {
     RemasterPipeline pipeline(options);
     return pipeline.run();
 }
-
-Result<void> runScrubPreview(const HwTranscodeOptions& options, int64_t seek_pts_ms) {
-    if (!options.preview) return err(ErrorCode::InvalidArgument, "scrub preview requires a preview callback");
-    if (options.input_path.empty()) return err(ErrorCode::InvalidArgument, "scrub preview requires an input path");
-
-    HwTranscodeReport report;
-    auto session_res = NvidiaTranscodeSession::create(options, true, report, options.target_width, options.target_height);
-    if (!session_res.has_value()) return std::unexpected(session_res.error());
-    auto& session = *session_res.value();
-    if (!session.previewReady()) return err(ErrorCode::Unsupported, "NGX bridge preview unsupported");
-
-    const MediaInfo& info = session.info();
-    Rational tb = (info.time_base.valid() && info.time_base.num > 0) ? info.time_base : Rational{1, 90000};
-    int64_t s_pts = seek_pts_ms <= 0 ? 0 : seek_pts_ms * tb.den / (1000 * tb.num);
-    auto sought = session.demuxer()->seekToKeyframeBefore(s_pts);
-    if (!sought.has_value()) return sought;
-
-    bool ready = false;
-    RtxFrameDesc frame{};
-    for (int p = 0; !ready && p < 60; ++p) {
-        auto pkt = session.demuxer()->readPacket();
-        if (!pkt.has_value()) break;
-        if (session.isPassthroughPacket(pkt.value())) continue;
-        const Packet& inp = pkt.value();
-        int64_t pts = inp.pts == std::numeric_limits<int64_t>::min() ? 0 : inp.pts;
-        int64_t dts = inp.dts == std::numeric_limits<int64_t>::min() ? 0 : inp.dts;
-        if (session.shim().decoderSubmit(session.decoder(), inp.data.data(), inp.data.size(), pts, dts, inp.keyframe ? 1 : 0) != RTX_OK) break;
-        if (session.shim().decoderReceive(session.decoder(), &frame) == RTX_OK) ready = true;
-    }
-    if (!ready) {
-        session.shim().decoderFlush(session.decoder());
-        if (session.shim().decoderReceive(session.decoder(), &frame) == RTX_OK) ready = true;
-    }
-    if (!ready) return err(ErrorCode::NotFound, "no scrub frame decoded");
-
-    RtxNgxRemasterInput in{
-        .y_plane = frame.planes[0], .uv_plane = frame.planes[1],
-        .y_pitch = frame.pitches[0], .uv_pitch = frame.pitches[1],
-        .format = frame.format, .full_range = (info.color.range == ColorRange::Full) ? 1 : 0,
-        .matrix = (info.color.matrix == MatrixCoefficients::BT2020NC) ? 1 : 0,
-        .preview_rgba10_ptr = session.previewDevicePointer(0),
-        .preview_pitch = session.previewPitch(),
-        .split_x_norm = options.split_ratio ? std::clamp(options.split_ratio->load(std::memory_order_relaxed), 0.0f, 1.0f) : 0.5f,
-    };
-    RtxNgxRemasterOutput out{};
-    RtxNgxRemasterStats stats{};
-    RtxResult r = session.bridgeLoader().remaster(session.bridge(), &in, &out, &stats);
-    session.releaseDecodedFrame(frame.slot_index);
-    if (r != RTX_OK) return err(mapShimResult(r), "rtx_ngx_bridge_remaster failed");
-
-    std::vector<uint8_t> host(static_cast<size_t>(session.previewPitch()) * 540u, 0);
-    if (session.downloadPreviewInto(host.data(), host.size()) != RTX_OK) return err(ErrorCode::Internal, "preview download failed");
-    options.preview(host.data(), session.previewPitch());
-    return {};
-}
-
 } // namespace rtx
+// Phase 11.2 (Task 5-1 / C-02): runScrubPreview (the single-frame D2H scrub) is
+// removed together with the GUI fake-playback loop; the zero-readback monitor
+// path is MediaPlaybackSession + rtx_ngx_bridge_playback_pack + borrow_preview.

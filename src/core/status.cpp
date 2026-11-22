@@ -44,7 +44,6 @@ const char* errorCodeName(ErrorCode code) noexcept {
     }
     return "UNKNOWN";
 }
-
 std::string Error::toString() const {
     std::string result = errorCodeName(code);
     result += ": ";
@@ -56,5 +55,4 @@ std::string Error::toString() const {
     }
     return result;
 }
-
 }  // namespace rtx

@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define RTX_NGX_BRIDGE_ABI_VERSION 4u
+#define RTX_NGX_BRIDGE_ABI_VERSION 5u
 
 typedef struct RtxNgxBridge RtxNgxBridge;
 
@@ -36,7 +36,11 @@ typedef struct RtxNgxBridgeConfig {
     int32_t middle_gray;      /* 100-based */
     int32_t max_luminance;    /* cd/m^2 */
     uint32_t project_id;
-    uint8_t reserved[64];
+    int32_t output_offset_x;  /* 0 for full canvas, >0 for pillarbox left offset */
+    int32_t output_offset_y;  /* 0 for full canvas, >0 for letterbox top offset */
+    int32_t scaled_width;     /* 0 = full output_width */
+    int32_t scaled_height;    /* 0 = full output_height */
+    uint8_t reserved[48];
 } RtxNgxBridgeConfig;
 
 typedef struct RtxNgxTextureDesc {
@@ -194,17 +198,17 @@ RTX_SHIM_API uint32_t RTX_SHIM_CALL rtx_ngx_bridge_abi_version(void);
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_set_lut3d(
     RtxNgxBridge* bridge, const uint16_t* lut_half4_data, int32_t grid_size);
 
-/* Returns the bridge-allocated double-buffered 960x540 R10G10B10A2 preview
- * buffer (2 x 2.07 MB = 4.14 MB of VRAM total).  The GUI passes one slot
- * pointer per remaster through RtxNgxRemasterInput::preview_rgba10_ptr.
- * slot is 0 or 1; device_ptr == 0 means the preview path is unavailable. */
+/* Returns the bridge-allocated 3-slot 960x540 R10G10B10A2 shared preview
+ * buffer ring (3 x 2.07 MB = 6.22 MB of VRAM total; ABI v5 upgraded from the
+ * former 2-slot plain-CUDA ring to shared D3D12 buffers).  The GUI passes one
+ * slot pointer per remaster through RtxNgxRemasterInput::preview_rgba10_ptr.
+ * slot is 0..2; device_ptr == 0 means the preview path is unavailable. */
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_preview_buffer(
     RtxNgxBridge* bridge, uint32_t slot, uint64_t* device_ptr, uint32_t* pitch);
 
-/* Copies the latest preview slot contents (960x540 R10G10B10A2, 4 bytes per
- * pixel, rows padded to `pitch` bytes) from device memory into a caller
- * buffer with a synchronous cuMemcpyDtoH on the pack stream.  This is the
- * only pixel traffic the realtime viewport ever generates (<= 15 Hz). */
+/* Legacy host-download path (<= 15 Hz synchronous cuMemcpyDtoH).  Superseded
+ * by rtx_ngx_bridge_borrow_preview in ABI v5; retained for ABI stability and
+ * off-GPU diagnostics only.  Product code must not call it. */
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_download_preview(
     RtxNgxBridge* bridge, void* destination, size_t destination_bytes);
 
@@ -236,7 +240,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_init_rife(
     uint32_t width,
     uint32_t height
 );
-
 RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_rife(
     RtxNgxBridge* bridge,
     uint64_t prev_nv12,         /* CUdeviceptr: 前一帧 NV12 */
@@ -247,7 +250,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_rife(
     int32_t full_range,         /* 0=Limited Range, 1=Full Range */
     int32_t* scene_cut          /* out: 1=检测到场景硬切，已旁路推理 */
 );
-
 RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
     const char* onnx_path,      /* 输入 ONNX 模型路径 */
     const char* engine_out_path,/* 输出 .engine 文件路径 */
@@ -256,10 +258,75 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
     char* err_buf,              /* 错误消息缓冲区 */
     uint32_t err_cap            /* err_buf 容量 */
 );
-
 RTX_SHIM_API void RTX_SHIM_CALL rtx_ngx_bridge_destroy_rife(
     RtxNgxBridge* bridge
 );
+/* ------------------------------------------------------------------------- */
+/* ABI v5 append-only extensions (Phase 11.2, C-02/C-03).                     */
+/*                                                                           */
+/* The preview ring is upgraded from plain cuMemAllocPitch device memory to a */
+/* 3-slot D3D12_RESOURCE_DIMENSION_BUFFER ring (D3D12_HEAP_FLAG_SHARED,       */
+/* initial state D3D12_RESOURCE_STATE_COMMON) so the DirectComposition        */
+/* viewport can borrow the real ID3D12Resource and read it as a Buffer<uint>  */
+/* SRV: the transcode/production path writes mapped CUdeviceptrs and the      */
+/* monitor path renders them with zero host pixel traffic in both directions. */
+/*                                                                           */
+/* RtxNgxBridgeConfig.reserved[0] = 1 switches rtx_ngx_bridge_create into the */
+/* lightweight headless playback mode: no NGX evaluator is initialised and a  */
+/* 3-slot ring sized exactly input_width x input_height is created eagerly.   */
+/* This is the realtime MediaPlaybackSession zero-readback presentation path. */
+/* ------------------------------------------------------------------------- */
+
+/* Returns the D3D12 device and the shared ring resource behind `slot`.
+ * slot is 0..2; out_d3d12_resource == NULL means the ring is unavailable.
+ * The caller AddRefs both pointers for as long as it uses them (the viewport
+ * retire path releases them on fence completion). */
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_borrow_preview(
+    RtxNgxBridge* bridge,
+    uint32_t slot,
+    void** out_d3d12_device,
+    void** out_d3d12_resource,
+    uint32_t* out_pitch);
+
+/* Packs one decoded NV12/P010 frame (device pointers from the shared primary
+ * CUDA context) into ring slot `slot` as R10G10B10A2 words through the
+ * rtx_yuv_to_rgb10_buf kernel and synchronises the pack stream before
+ * returning: on RTX_OK the slot buffer is fully written and safe for the
+ * viewport's D3D12 queue to read.  Non-terminal: never blocks the decode
+ * pipeline beyond the pack kernel itself. */
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_playback_pack(
+    RtxNgxBridge* bridge,
+    uint64_t y_plane,
+    uint64_t uv_plane,
+    uint32_t y_pitch,
+    uint32_t uv_pitch,
+    uint32_t width,
+    uint32_t height,
+    int32_t format,        /* RTX_PIXEL_NV12 / RTX_PIXEL_P010 */
+    int32_t full_range,    /* 0 = limited, 1 = full */
+    int32_t matrix,        /* 0 = BT.709, 1 = BT.2020 NCL, 2 = BT.601 */
+    uint32_t slot);
+
+
+/* ------------------------------------------------------------------------- */
+/* Phase 11.4 (C-06): RIFE scale=0.5 / A=128 / reflect101 extended init ABI  */
+/* ------------------------------------------------------------------------- */
+/* Phase 11.4: RtxRifeInitConfig for extended RIFE initialization */
+typedef struct RtxRifeInitConfig {
+    uint32_t struct_size;
+    uint32_t width;
+    uint32_t height;
+    float scale;              /* 1.0f (full-res flow) or 0.5f (half-res flow for 4K) */
+    uint32_t align_mod;       /* 0 = auto (128); guarantees 64-byte alignment after 2x flow downscale */
+    int32_t reflect_padding;  /* 1 = reflect101 mirror padding, 0 = edge clamp */
+    uint32_t reserved[6];
+} RtxRifeInitConfig;
+
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_init_rife_ex(
+    RtxNgxBridge* bridge,
+    const char* engine_path,
+    const RtxRifeInitConfig* config,
+    uint64_t* out_trt_peak_bytes);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -15,15 +15,14 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
 }
-
 namespace rtx::io {
 namespace {
 
+constexpr int kSeekMask = 0xFF;
 // AVSEEK_SIZE is a bit flag in the high bits of `whence`; libavformat may
 // additionally pass AVSEEK_FORCE, which is irrelevant for a memory sink.  The
 // flag must be tested before masking, otherwise a size probe is mistaken for
 // SEEK_SET(0) and avio_size() silently reports zero.
-constexpr int kSeekMask = 0xFF;
 
 }  // namespace
 
@@ -31,18 +30,15 @@ MemoryAvioContext::MemoryAvioContext(std::span<const uint8_t> read_only_buf)
     : read_view_(read_only_buf), is_writable_(false) {
     initAvio(0);
 }
-
 MemoryAvioContext::MemoryAvioContext(std::span<const std::byte> read_only_buf)
     : read_view_(reinterpret_cast<const uint8_t*>(read_only_buf.data()), read_only_buf.size()),
       is_writable_(false) {
     initAvio(0);
 }
-
 MemoryAvioContext::MemoryAvioContext(std::vector<uint8_t>* write_buf)
     : write_vec_(write_buf), is_writable_(true) {
     initAvio(1);
 }
-
 MemoryAvioContext::~MemoryAvioContext() { releaseAvio(); }
 
 size_t MemoryAvioContext::size() const noexcept {
@@ -51,13 +47,11 @@ size_t MemoryAvioContext::size() const noexcept {
     }
     return read_view_.size();
 }
-
 void MemoryAvioContext::setSeekable(bool seekable) noexcept {
     if (avio_ctx_ != nullptr) {
         avio_ctx_->seekable = seekable ? AVIO_SEEKABLE_NORMAL : 0;
     }
 }
-
 void MemoryAvioContext::initAvio(int write_flag) {
     auto* io_buf = static_cast<uint8_t*>(av_malloc(kPageSize));
     if (io_buf == nullptr) {
@@ -75,25 +69,23 @@ void MemoryAvioContext::initAvio(int write_flag) {
         return;
     }
     io_buf_guard.release();
-    // libavformat defaults to non-seekable for caller-supplied contexts.  Both
-    // the mov and the matroska muxers need a seekable target to rewrite their
-    // index, and a memory sink always is one.
     avio_ctx_->seekable = AVIO_SEEKABLE_NORMAL;
     avio_ctx_->direct = 0;
 }
-
 void MemoryAvioContext::releaseAvio() noexcept {
     if (avio_ctx_ != nullptr) {
-        // avio_context_free() releases the AVIOContext but not the caller's
-        // buffer; both must be released here, in this order.
         av_freep(&avio_ctx_->buffer);
+// libavformat defaults to non-seekable for caller-supplied contexts.  Both
+// the mov and the matroska muxers need a seekable target to rewrite their
+// index, and a memory sink always is one.
         avio_context_free(&avio_ctx_);
         avio_ctx_ = nullptr;
     }
 }
-
 int MemoryAvioContext::readPacketCallback(void* opaque, uint8_t* buf, int buf_size) noexcept {
     auto* self = static_cast<MemoryAvioContext*>(opaque);
+// avio_context_free() releases the AVIOContext but not the caller's
+// buffer; both must be released here, in this order.
     if (self == nullptr || buf == nullptr || buf_size <= 0) {
         return AVERROR(EINVAL);
     }
@@ -115,7 +107,6 @@ int MemoryAvioContext::readPacketCallback(void* opaque, uint8_t* buf, int buf_si
     self->pos_ += to_copy;
     return static_cast<int>(to_copy);
 }
-
 int MemoryAvioContext::writePacketCallback(void* opaque, const uint8_t* buf, int buf_size) noexcept {
     auto* self = static_cast<MemoryAvioContext*>(opaque);
     if (self == nullptr || !self->is_writable_ || self->write_vec_ == nullptr ||
@@ -134,7 +125,6 @@ int MemoryAvioContext::writePacketCallback(void* opaque, const uint8_t* buf, int
     self->pos_ = end_pos;
     return buf_size;
 }
-
 int64_t MemoryAvioContext::seekCallback(void* opaque, int64_t offset, int whence) noexcept {
     auto* self = static_cast<MemoryAvioContext*>(opaque);
     if (self == nullptr) {
@@ -164,8 +154,6 @@ int64_t MemoryAvioContext::seekCallback(void* opaque, int64_t offset, int whence
     }
     if (self->is_writable_ && self->write_vec_ != nullptr &&
         static_cast<size_t>(target) > total_size) {
-        // Sparse extension: a muxer may seek past the current tail before the
-        // next write (moov/mdat back-patching), and the gap must read as zero.
         try {
             self->write_vec_->resize(static_cast<size_t>(target), 0);
         } catch (...) {
@@ -175,5 +163,6 @@ int64_t MemoryAvioContext::seekCallback(void* opaque, int64_t offset, int whence
     self->pos_ = static_cast<size_t>(target);
     return target;
 }
-
 }  // namespace rtx::io
+// Sparse extension: a muxer may seek past the current tail before the
+// next write (moov/mdat back-patching), and the gap must read as zero.

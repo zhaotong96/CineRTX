@@ -13,6 +13,10 @@
 
 namespace rtx_ngx {
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct RifePreprocessLaunch {
     uint64_t y_plane_0 = 0;       /* CUdeviceptr */
     uint64_t uv_plane_0 = 0;      /* CUdeviceptr */
@@ -28,8 +32,15 @@ struct RifePreprocessLaunch {
     float alpha = 0.5f;
     int32_t full_range = 0;
     uint64_t d_sad_sum = 0;       /* CUdeviceptr of uint32_t */
+    int32_t reflect_padding = 1;  /* Phase 11.4 (C-06): reflect101 PTX 7.5 / sm_75 */
+    uint32_t infer_width = 0;
+    uint32_t infer_height = 0;
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct RifePreprocessSeparateLaunch {
     uint64_t y_plane_0 = 0;
     uint64_t uv_plane_0 = 0;
@@ -47,8 +58,13 @@ struct RifePreprocessSeparateLaunch {
     float alpha = 0.5f;
     int32_t full_range = 0;
     uint64_t d_sad_sum = 0;
+    int32_t reflect_padding = 1;
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct RifePostprocessLaunch {
     uint64_t rgb_tensor = 0;      /* CUdeviceptr [1, 3, H_pad, W_pad] */
     uint64_t y_plane = 0;         /* CUdeviceptr output */
@@ -60,6 +76,8 @@ struct RifePostprocessLaunch {
     uint32_t padded_width = 0;
     uint32_t padded_height = 0;
     int32_t full_range = 0;
+    uint32_t infer_width = 0;
+    uint32_t infer_height = 0;
 };
 
 bool isRifePackAvailable();

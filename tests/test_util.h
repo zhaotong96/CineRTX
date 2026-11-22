@@ -26,12 +26,10 @@ public:
         std::error_code error;
         std::filesystem::create_directories(path_, error);
     }
-
     ~TempDir() {
         std::error_code error;
         std::filesystem::remove_all(path_, error);
     }
-
     TempDir(const TempDir&) = delete;
     TempDir& operator=(const TempDir&) = delete;
 
@@ -50,7 +48,6 @@ inline std::vector<uint8_t> readAll(const std::filesystem::path& path) {
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(stream),
                                 std::istreambuf_iterator<char>());
 }
-
 inline bool writeAll(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     if (!stream) {
@@ -62,7 +59,6 @@ inline bool writeAll(const std::filesystem::path& path, const std::vector<uint8_
     }
     return static_cast<bool>(stream);
 }
-
 inline Result<void> allocateTestFrame(Frame& frame, int frame_width, int frame_height,
                                       PixelFormat frame_format, size_t alignment = 256) {
     if (frame_width <= 0 || frame_height <= 0 || frame_format == PixelFormat::Unknown) {
@@ -121,7 +117,6 @@ inline void fillNV12(Frame& frame, uint8_t luma, uint8_t chroma_u, uint8_t chrom
         }
     }
 }
-
 inline void fillP010(Frame& frame, uint16_t luma10, uint16_t chroma_u10, uint16_t chroma_v10) {
     for (int y = 0; y < frame.height; ++y) {
         uint16_t* row = reinterpret_cast<uint16_t*>(frame.planes[0] +
@@ -139,5 +134,4 @@ inline void fillP010(Frame& frame, uint16_t luma10, uint16_t chroma_u10, uint16_
         }
     }
 }
-
 }  // namespace rtx::test

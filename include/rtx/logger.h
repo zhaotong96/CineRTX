@@ -46,45 +46,40 @@ enum class LogLevel : uint8_t {
     }
     return "INFO";
 }
-
 using LogSinkCallback = std::function<void(LogLevel level, std::string_view message)>;
 
+void setLogLevel(LogLevel min_level) noexcept;
 // Controls minimum severity for stderr console emission (DebugView always
 // receives Info/Warn/Error, and Debug when min_level <= LogLevel::Debug).
-void setLogLevel(LogLevel min_level) noexcept;
 [[nodiscard]] LogLevel currentLogLevel() noexcept;
 
+void setConsoleLogEnabled(bool enabled) noexcept;
 // Enables or disables stderr console emission (e.g. disabled during --json or
 // --session-stdio when logs are routed as JSONL events on stdout).
-void setConsoleLogEnabled(bool enabled) noexcept;
 [[nodiscard]] bool isConsoleLogEnabled() noexcept;
 
+void setLogCallback(LogSinkCallback callback);
 // Registers an optional in-process listener (GUI status/telemetry or
 // --session-stdio JSONL emitter). Pass nullptr / empty function to clear.
-void setLogCallback(LogSinkCallback callback);
 
-// Core non-template sink entry point.
 void logWrite(LogLevel level, std::string_view message,
+// Core non-template sink entry point.
               std::source_location loc = std::source_location::current()) noexcept;
 
 inline void logDebug(std::string_view message,
                      std::source_location loc = std::source_location::current()) noexcept {
     logWrite(LogLevel::Debug, message, loc);
 }
-
 inline void logInfo(std::string_view message,
                     std::source_location loc = std::source_location::current()) noexcept {
     logWrite(LogLevel::Info, message, loc);
 }
-
 inline void logWarn(std::string_view message,
                     std::source_location loc = std::source_location::current()) noexcept {
     logWrite(LogLevel::Warn, message, loc);
 }
-
 inline void logError(std::string_view message,
                      std::source_location loc = std::source_location::current()) noexcept {
     logWrite(LogLevel::Error, message, loc);
 }
-
 }  // namespace rtx

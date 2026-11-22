@@ -31,6 +31,7 @@ bool NvidiaShim::open(std::string* error) {
     decoder_submit_ = api->decoder_submit;
     decoder_receive_ = api->decoder_receive;
     decoder_flush_ = api->decoder_flush;
+    decoder_reset_ = api->decoder_reset;
     decoder_release_ = api->decoder_release_frame;
     decoder_stats_ = api->decoder_get_stats;
     decoder_last_error_ = api->decoder_last_error;
@@ -47,7 +48,6 @@ bool NvidiaShim::open(std::string* error) {
     if (error != nullptr) error->clear();
     return true;
 }
-
 void NvidiaShim::close() {
     embedded_ = false;
     path_.clear();
@@ -58,6 +58,7 @@ void NvidiaShim::close() {
     decoder_submit_ = nullptr;
     decoder_receive_ = nullptr;
     decoder_flush_ = nullptr;
+    decoder_reset_ = nullptr;
     decoder_release_ = nullptr;
     decoder_stats_ = nullptr;
     decoder_last_error_ = nullptr;
@@ -69,7 +70,6 @@ void NvidiaShim::close() {
     encoder_stats_ = nullptr;
     encoder_last_error_ = nullptr;
 }
-
 RtxResult NvidiaShim::probe(RtxDiagnostics* d) const { return probe_ ? probe_(d) : RTX_ERR_DLL_MISSING; }
 RtxResult NvidiaShim::decoderCreate(const RtxDecoderConfig* c, RtxDecoder** d) const { return decoder_create_ ? decoder_create_(c, d) : RTX_ERR_DLL_MISSING; }
 void NvidiaShim::decoderDestroy(RtxDecoder* d) const { if (decoder_destroy_) decoder_destroy_(d); }
@@ -78,6 +78,7 @@ RtxResult NvidiaShim::decoderSubmit(RtxDecoder* d, const uint8_t* data, size_t s
 }
 RtxResult NvidiaShim::decoderReceive(RtxDecoder* d, RtxFrameDesc* f) const { return decoder_receive_ ? decoder_receive_(d, f) : RTX_ERR_DLL_MISSING; }
 RtxResult NvidiaShim::decoderFlush(RtxDecoder* d) const { return decoder_flush_ ? decoder_flush_(d) : RTX_ERR_DLL_MISSING; }
+RtxResult NvidiaShim::decoderReset(RtxDecoder* d) const { return decoder_reset_ ? decoder_reset_(d) : RTX_ERR_DLL_MISSING; }
 RtxResult NvidiaShim::decoderReleaseFrame(RtxDecoder* d, uint64_t slot) const { return decoder_release_ ? decoder_release_(d, slot) : RTX_ERR_DLL_MISSING; }
 RtxResult NvidiaShim::decoderStats(RtxDecoder* d, RtxHwStats* s) const { return decoder_stats_ ? decoder_stats_(d, s) : RTX_ERR_DLL_MISSING; }
 const char* NvidiaShim::decoderLastError(RtxDecoder* d) const { return decoder_last_error_ ? decoder_last_error_(d) : "not loaded"; }

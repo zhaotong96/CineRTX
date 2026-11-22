@@ -19,7 +19,6 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 }
-
 namespace rtx {
 namespace {
 
@@ -36,7 +35,6 @@ void convertP010RowLuma(const uint16_t* src, uint16_t* dst, int width) noexcept 
         dst[x] = static_cast<uint16_t>(src[x] >> 6);
     }
 }
-
 void deinterleaveP010RowChroma(const uint16_t* src_uv, uint16_t* dst_u, uint16_t* dst_v, int chroma_w) noexcept {
     int x = 0;
 #if defined(__AVX2__)
@@ -59,7 +57,6 @@ void deinterleaveP010RowChroma(const uint16_t* src_uv, uint16_t* dst_u, uint16_t
         dst_v[x] = static_cast<uint16_t>(src_uv[x * 2 + 1] >> 6);
     }
 }
-
 const char* codecEncoderName(VideoCodec codec) noexcept {
     switch (codec) {
         case VideoCodec::AV1:  return "libsvtav1";
@@ -68,9 +65,12 @@ const char* codecEncoderName(VideoCodec codec) noexcept {
         default:               return nullptr;
     }
 }
-
 } // namespace
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 struct CpuVideoEncoder::Impl {
     CpuEncoderConfig cfg{};
     AVCodecContext* ctx = nullptr;
@@ -83,7 +83,6 @@ struct CpuVideoEncoder::Impl {
         if (frame != nullptr) av_frame_free(&frame);
         if (ctx != nullptr) avcodec_free_context(&ctx);
     }
-
     Result<std::vector<Packet>> drainPackets() {
         std::vector<Packet> out;
         for (;;) {
@@ -120,7 +119,6 @@ Result<CpuVideoEncoder> CpuVideoEncoder::create(const CpuEncoderConfig& cfg) {
     if (codec == nullptr) {
         return err(ErrorCode::Unsupported, std::string("FFmpeg static build lacks encoder: ") + name);
     }
-
     auto impl = std::make_unique<Impl>();
     impl->cfg = cfg;
     impl->ctx = avcodec_alloc_context3(codec);
@@ -129,7 +127,6 @@ Result<CpuVideoEncoder> CpuVideoEncoder::create(const CpuEncoderConfig& cfg) {
     if (!impl->ctx || !impl->frame || !impl->pkt) {
         return err(ErrorCode::OutOfMemory, "Failed to allocate FFmpeg CPU encoder context");
     }
-
     AVCodecContext* c = impl->ctx;
     c->width = cfg.width;
     c->height = cfg.height;
@@ -145,7 +142,6 @@ Result<CpuVideoEncoder> CpuVideoEncoder::create(const CpuEncoderConfig& cfg) {
         c->colorspace = AVCOL_SPC_BT2020_NCL;
         c->color_range = (cfg.hdr.color.range == ColorRange::Full) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
     }
-
     const int crf = std::clamp(cfg.crf, 0, 51);
     av_opt_set_int(c->priv_data, "crf", crf, 0);
     if (cfg.codec == VideoCodec::AV1) {
@@ -157,7 +153,6 @@ Result<CpuVideoEncoder> CpuVideoEncoder::create(const CpuEncoderConfig& cfg) {
         };
         av_opt_set(c->priv_data, "preset", kX265Presets[std::clamp(cfg.preset, 0, 9)], 0);
     }
-
     const int open_rc = avcodec_open2(c, codec, nullptr);
     if (open_rc < 0) {
         return err(ErrorCode::Internal, "avcodec_open2 failed for CPU CRF encoder", std::to_string(open_rc));
@@ -165,19 +160,16 @@ Result<CpuVideoEncoder> CpuVideoEncoder::create(const CpuEncoderConfig& cfg) {
     if (c->extradata != nullptr && c->extradata_size > 0) {
         impl->extradata_buf.assign(c->extradata, c->extradata + c->extradata_size);
     }
-
     impl->frame->format = c->pix_fmt;
     impl->frame->width = c->width;
     impl->frame->height = c->height;
     if (av_frame_get_buffer(impl->frame, 32) < 0) {
         return err(ErrorCode::OutOfMemory, "av_frame_get_buffer failed");
     }
-
     CpuVideoEncoder enc;
     enc.impl_ = std::move(impl);
     return enc;
 }
-
 Result<std::vector<Packet>> CpuVideoEncoder::encodeP010Frame(
     const uint16_t* y_plane, size_t y_pitch_bytes,
     const uint16_t* uv_plane, size_t uv_pitch_bytes,
@@ -189,7 +181,6 @@ Result<std::vector<Packet>> CpuVideoEncoder::encodeP010Frame(
     if (av_frame_make_writable(impl_->frame) < 0) {
         return err(ErrorCode::Internal, "av_frame_make_writable failed");
     }
-
     const int w = impl_->cfg.width;
     const int h = impl_->cfg.height;
     const size_t y_stride_u16 = y_pitch_bytes / sizeof(uint16_t);
@@ -208,7 +199,6 @@ Result<std::vector<Packet>> CpuVideoEncoder::encodeP010Frame(
             reinterpret_cast<uint16_t*>(impl_->frame->data[2] + y * impl_->frame->linesize[2]),
             w / 2);
     }
-
     impl_->frame->pts = pts_90k;
     impl_->frame->pict_type = force_keyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
     if (force_keyframe) impl_->frame->flags |= AV_FRAME_FLAG_KEY;
@@ -241,7 +231,6 @@ Result<std::vector<Packet>> CpuVideoEncoder::encodeP010Frame(
             cll->MaxFALL = impl_->cfg.hdr.cll.max_fall;
         }
     }
-
     if (!hdr10plus_payload.empty()) {
         AVBufferRef* buf = av_buffer_alloc(hdr10plus_payload.size());
         if (buf) {
@@ -251,12 +240,10 @@ Result<std::vector<Packet>> CpuVideoEncoder::encodeP010Frame(
             }
         }
     }
-
     const int rc = avcodec_send_frame(impl_->ctx, impl_->frame);
     if (rc < 0) return err(ErrorCode::Internal, "avcodec_send_frame failed", std::to_string(rc));
     return impl_->drainPackets();
 }
-
 Result<std::vector<Packet>> CpuVideoEncoder::flush() {
     if (!impl_ || !impl_->ctx) return std::vector<Packet>{};
     const int rc = avcodec_send_frame(impl_->ctx, nullptr);
@@ -265,9 +252,7 @@ Result<std::vector<Packet>> CpuVideoEncoder::flush() {
     }
     return impl_->drainPackets();
 }
-
 std::span<const uint8_t> CpuVideoEncoder::extradata() const noexcept {
     return impl_ ? std::span<const uint8_t>(impl_->extradata_buf) : std::span<const uint8_t>{};
 }
-
 } // namespace rtx

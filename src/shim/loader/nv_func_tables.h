@@ -80,6 +80,10 @@ inline constexpr int CU_MEMORYTYPE_DEVICE = 2;
 inline constexpr int CU_MEMORYTYPE_ARRAY = 3;
 inline constexpr int CU_MEMORYTYPE_UNIFIED = 4;
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_MEMCPY2D {
     size_t srcXInBytes = 0;
     size_t srcY = 0;
@@ -101,6 +105,10 @@ struct CUDA_MEMCPY2D {
     size_t Height = 0;
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_ARRAY3D_DESCRIPTOR {
     size_t Width = 0;
     size_t Height = 0;
@@ -110,6 +118,10 @@ struct CUDA_ARRAY3D_DESCRIPTOR {
     unsigned int Flags = 0;
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
     int type = 0;
     union {
@@ -125,6 +137,10 @@ struct CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
     unsigned int reserved[16] = {};
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC {
     unsigned long long offset = 0;
     CUDA_ARRAY3D_DESCRIPTOR arrayDesc{};
@@ -132,6 +148,10 @@ struct CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC {
     unsigned int reserved[16] = {};
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_EXTERNAL_MEMORY_BUFFER_DESC {
     unsigned long long offset = 0;
     unsigned long long size = 0;
@@ -139,6 +159,10 @@ struct CUDA_EXTERNAL_MEMORY_BUFFER_DESC {
     unsigned int reserved[16] = {};
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC {
     int type = 0;
     union {
@@ -153,6 +177,10 @@ struct CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC {
     unsigned int reserved[16] = {};
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS {
     struct {
         struct {
@@ -171,6 +199,10 @@ struct CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS {
     unsigned int reserved[16];
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS {
     struct {
         struct {
@@ -190,6 +222,10 @@ struct CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS {
     unsigned int reserved[16];
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct DriverTable {
     using PFN_cuInit = CUresult (*)(unsigned int);
     using PFN_cuDriverGetVersion = CUresult (*)(int*);
@@ -300,6 +336,10 @@ inline constexpr NVENCSTATUS NV_ENC_SUCCESS = 0;
 using PFN_NvEncodeAPICreateInstance = NVENCSTATUS (*)(void*);
 using PFN_NvEncodeAPIGetMaxSupportedVersion = NVENCSTATUS (*)(uint32_t*);
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct Table {
     PFN_NvEncodeAPICreateInstance createInstance = nullptr;
     PFN_NvEncodeAPIGetMaxSupportedVersion getMaxSupportedVersion = nullptr;
@@ -307,8 +347,6 @@ struct Table {
 };
 
 }  // namespace rtx_shim::nvenc
-
-
 
 namespace rtx_shim::ngx {
 
@@ -326,6 +364,10 @@ using PFN_ParameterSetF = int (*)(void*, const char*, float);
 using PFN_ParameterSetD = int (*)(void*, const char*, double);
 using PFN_ParameterSetULL = int (*)(void*, const char*, unsigned long long);
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct Table {
     PFN_Init init = nullptr;
     PFN_AllocateParameters allocateParameters = nullptr;

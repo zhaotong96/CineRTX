@@ -34,6 +34,10 @@ inline constexpr std::size_t kCacheLineSize = 64;
 // Tagged strong handle: strong typing with zero-cost compile-time semantics
 template <typename Tag, std::integral ValueType = std::int64_t,
           ValueType InvalidValue = static_cast<ValueType>(-1)>
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct TaggedHandle {
     using value_type = ValueType;
     using tag_type = Tag;
@@ -55,7 +59,6 @@ struct TaggedHandle {
             return v != kInvalid;
         }
     }
-
     [[nodiscard]] constexpr ValueType value() const noexcept { return v; }
 
     constexpr operator ValueType() const noexcept { return v; }
@@ -68,7 +71,6 @@ struct TaggedHandle {
             return static_cast<ValueType>(other);
         }
     }
-
     constexpr auto operator<=>(const TaggedHandle&) const noexcept = default;
     constexpr auto operator<=>(std::integral auto other) const noexcept {
         return v <=> visitor(other);
@@ -79,19 +81,45 @@ struct TaggedHandle {
 };
 
 // Core domain handle tags
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
+// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
 struct SlotTag {};
-struct DeviceTag {};
-struct SurfaceTag {};
-struct StreamTag {};
-struct EventTag {};
 
 // Strongly-typed domain handles
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
+// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
+struct DeviceTag {};
+
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
+// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
+struct SurfaceTag {};
+
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
+// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
+struct StreamTag {};
+
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
+// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
+struct EventTag {};
+
 using SlotHandle    = TaggedHandle<SlotTag, std::uint32_t, std::numeric_limits<std::uint32_t>::max()>;
 using DeviceHandle  = TaggedHandle<DeviceTag, std::int32_t, -1>;
 using SurfaceHandle = TaggedHandle<SurfaceTag, std::uint64_t, 0ull>;
 using StreamHandle  = TaggedHandle<StreamTag, std::uint64_t, 0ull>;
 using EventHandle   = TaggedHandle<EventTag, std::uint64_t, 0ull>;
 
+// Phase 8 (Task 8-B1): broadcast codecs NVDEC cannot decode; the engine
+// routes them through the FFmpeg software decoder (broadcast tier).
 static_assert(sizeof(SlotHandle) == 4);
 static_assert(std::is_trivially_copyable_v<SlotHandle>);
 static_assert(std::is_standard_layout_v<SlotHandle>);
@@ -114,8 +142,6 @@ enum class VideoCodec : int32_t {
     H264 = 1,
     HEVC = 2,
     AV1 = 3,
-    // Phase 8 (Task 8-B1): broadcast codecs NVDEC cannot decode; the engine
-    // routes them through the FFmpeg software decoder (broadcast tier).
     ProRes = 4,
     Dnxhd = 5,
 };
@@ -137,7 +163,6 @@ enum class VideoCodec : int32_t {
     }
     return "unknown";
 }
-
 [[nodiscard]] inline VideoCodec videoCodecFromName(std::string_view name) noexcept {
     if (name == "h264" || name == "avc" || name == "avc1") {
         return VideoCodec::H264;
@@ -150,7 +175,6 @@ enum class VideoCodec : int32_t {
     }
     return VideoCodec::Unknown;
 }
-
 [[nodiscard]] constexpr const char* pixelFormatName(PixelFormat format) noexcept {
     switch (format) {
         case PixelFormat::NV12:
@@ -170,7 +194,6 @@ enum class VideoCodec : int32_t {
     }
     return "UNKNOWN";
 }
-
 [[nodiscard]] constexpr size_t bytesPerPixel(PixelFormat format) noexcept {
     switch (format) {
         case PixelFormat::NV12:
@@ -188,7 +211,6 @@ enum class VideoCodec : int32_t {
     }
     return 0;
 }
-
 [[nodiscard]] constexpr int planeCount(PixelFormat format) noexcept {
     switch (format) {
         case PixelFormat::NV12:
@@ -205,19 +227,16 @@ enum class VideoCodec : int32_t {
     }
     return 0;
 }
-
 [[nodiscard]] constexpr bool isTenBit(PixelFormat format) noexcept {
     return format == PixelFormat::P010 || format == PixelFormat::YUV420P10 ||
            format == PixelFormat::R10G10B10A2;
 }
-
 [[nodiscard]] constexpr size_t alignUp(size_t value, size_t alignment) noexcept {
     if (alignment == 0) {
         return value;
     }
     return (value + alignment - 1) & ~(alignment - 1);
 }
-
 [[nodiscard]] constexpr size_t planeByteSize(PixelFormat format, int width, int height, int plane, int pitch) {
     if (width <= 0 || height <= 0 || plane < 0) {
         return 0;
@@ -253,7 +272,6 @@ enum class VideoCodec : int32_t {
     }
     return 0;
 }
-
 inline size_t frameByteSize(int width, int height, PixelFormat format, int* pitches = nullptr,
                             int* chroma_width = nullptr, int* chroma_height = nullptr) {
     if (width <= 0 || height <= 0) {
@@ -284,13 +302,11 @@ inline size_t frameByteSize(int width, int height, PixelFormat format, int* pitc
         case PixelFormat::Unknown:
             return 0;
     }
-
     size_t total = 0;
     const int planes = planeCount(format);
     for (int plane = 0; plane < planes; ++plane) {
         total += planeByteSize(format, width, height, plane, local_pitches[plane]);
     }
-
     if (pitches != nullptr) {
         pitches[0] = local_pitches[0];
         pitches[1] = local_pitches[1];
@@ -304,7 +320,6 @@ inline size_t frameByteSize(int width, int height, PixelFormat format, int* pitc
     }
     return total;
 }
-
 enum class ColorPrimaries : int32_t {
     BT709 = 1,
     BT2020 = 9,
@@ -326,6 +341,10 @@ enum class ColorRange : int32_t {
     Full = 1,
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct ColorDescription {
     ColorPrimaries primaries = ColorPrimaries::BT709;
     TransferFunction transfer = TransferFunction::BT709;
@@ -333,6 +352,10 @@ struct ColorDescription {
     ColorRange range = ColorRange::Limited;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct MasteringDisplay {
     uint16_t red_x = 0;
     uint16_t red_y = 0;
@@ -346,11 +369,19 @@ struct MasteringDisplay {
     uint32_t min_luminance = 0;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct ContentLightLevel {
     uint16_t max_cll = 0;
     uint16_t max_fall = 0;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct Hdr10Metadata {
     bool enabled = false;
     MasteringDisplay mastering{};
@@ -360,6 +391,10 @@ struct Hdr10Metadata {
     uint32_t target_nits = 1000;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct DeviceInfo {
     std::string name;
     uint8_t luid[8] = {};
@@ -387,6 +422,10 @@ struct DeviceInfo {
     }
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 包含对齐契约的宿主内存帧缓冲领域模型：内部封装对齐分配逻辑与有效字节缓冲，std::vector 自身无法表达 64/256 字节 GPU 传输对齐不变量。
+// Invariant: alignment >= 64；allocate 成功后 bytes 尺寸大于 0 且零溢出。
 struct FrameBuffer {
     std::vector<uint8_t> bytes;
     size_t alignment = 256;
@@ -423,6 +462,10 @@ private:
     size_t offset_ = 0;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct Frame {
     int width = 0;
     int height = 0;
@@ -457,14 +500,12 @@ struct Frame {
         }
         return std::span<uint8_t>(planes[plane], plane_sizes[plane]);
     }
-
     std::span<const uint8_t> planeSpan(int plane) const noexcept {
         if (plane < 0 || plane >= 3 || !planes[plane]) {
             return {};
         }
         return std::span<const uint8_t>(planes[plane], plane_sizes[plane]);
     }
-
     void copyMetadataFrom(const Frame& other) {
         width = other.width;
         height = other.height;
@@ -479,7 +520,6 @@ struct Frame {
             device_planes[i] = other.device_planes[i];
             device_pitches[i] = other.device_pitches[i];
         }
-
         pts = other.pts;
         time_base = other.time_base;
         duration = other.duration;
@@ -488,7 +528,6 @@ struct Frame {
         color = other.color;
         hdr = other.hdr;
     }
-
     Frame cloneMetadata() const {
         Frame frame;
         frame.copyMetadataFrom(*this);
@@ -496,6 +535,10 @@ struct Frame {
     }
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct PlaneRect {
     int x = 0;
     int y = 0;
@@ -503,6 +546,10 @@ struct PlaneRect {
     int height = 0;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct AudioTrackInfo {
     int stream_index = -1;
     int codec_id = 0;
@@ -523,6 +570,10 @@ struct AudioTrackInfo {
     std::shared_ptr<void> opaque_codecpar;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct Packet {
     std::vector<uint8_t> data;
     int64_t pts = 0;

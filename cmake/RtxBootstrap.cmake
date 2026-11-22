@@ -27,8 +27,8 @@ endif()
 
 find_program(_rtx_ninja_program NAMES ninja ninja.exe)
 if(NOT _rtx_ninja_program AND CMAKE_HOST_WIN32)
-    # $ENV{ProgramFiles(x86)} cannot be parsed by CMake (parentheses are not
-    # allowed in variable names); ProgramW6432 is the unambiguous 64-bit root.
+# $ENV{ProgramFiles(x86)} cannot be parsed by CMake (parentheses are not
+# allowed in variable names); ProgramW6432 is the unambiguous 64-bit root.
     file(GLOB _rtx_vs_ninja
         "$ENV{ProgramFiles}/Microsoft Visual Studio/*/*/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
         "$ENV{ProgramW6432}/Microsoft Visual Studio/*/*/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe")

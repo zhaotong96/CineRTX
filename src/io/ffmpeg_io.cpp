@@ -47,7 +47,6 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
 }
-
 #include "bitstream.h"
 #include "memory_avio.h"
 #include "rtx/rational.h"
@@ -64,14 +63,12 @@ std::string avErrorString(int error) {
     }
     return buffer;
 }
-
 std::string pathExtension(const std::filesystem::path& p) {
     std::string ext = p.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return static_cast<char>(c | 0x20); });
     return ext;
 }
-
 VideoCodec codecFromAv(AVCodecID id) {
     switch (id) {
         case AV_CODEC_ID_H264:
@@ -88,7 +85,6 @@ VideoCodec codecFromAv(AVCodecID id) {
             return VideoCodec::Unknown;
     }
 }
-
 AVCodecID codecToAv(VideoCodec codec) {
     switch (codec) {
         case VideoCodec::H264:
@@ -101,7 +97,6 @@ AVCodecID codecToAv(VideoCodec codec) {
             return AV_CODEC_ID_NONE;
     }
 }
-
 ColorDescription colorFromAv(const AVCodecParameters& parameters) {
     ColorDescription color;
     switch (parameters.color_primaries) {
@@ -135,7 +130,6 @@ ColorDescription colorFromAv(const AVCodecParameters& parameters) {
                                                             : ColorRange::Limited;
     return color;
 }
-
 void colorToAv(const ColorDescription& color, AVCodecParameters& parameters) {
     parameters.color_primaries = color.primaries == ColorPrimaries::BT2020 ? AVCOL_PRI_BT2020
                                                                            : AVCOL_PRI_BT709;
@@ -150,7 +144,6 @@ void colorToAv(const ColorDescription& color, AVCodecParameters& parameters) {
     parameters.color_range = color.range == ColorRange::Full ? AVCOL_RANGE_JPEG
                                                              : AVCOL_RANGE_MPEG;
 }
-
 Hdr10Metadata hdrFromSideData(const AVCodecParameters& parameters) {
     Hdr10Metadata hdr;
     for (int i = 0; i < parameters.nb_coded_side_data; ++i) {
@@ -201,11 +194,6 @@ Hdr10Metadata hdrFromSideData(const AVCodecParameters& parameters) {
     }
     return hdr;
 }
-
-// The minimal FFmpeg build has no HEVC decoder, so
-// avformat_find_stream_info() cannot lift the SPS VUI or prefix-SEI HDR10
-// metadata into AVCodecParameters.  These helpers recover them from the coded
-// bitstream; container-level values always take precedence.
 void mergeHevcBitstreamMetadata(const AVCodecParameters& parameters,
                                 const HevcVuiColor& vui, const HevcSeiHdr10& sei,
                                 MediaInfo& info) {
@@ -214,6 +202,10 @@ void mergeHevcBitstreamMetadata(const AVCodecParameters& parameters,
     const bool container_matrix = parameters.color_space != AVCOL_SPC_UNSPECIFIED;
     const bool vui_primaries = vui.has_colour_description && vui.primaries != 2;
     const bool vui_transfer = vui.has_colour_description && vui.transfer != 2;
+// The minimal FFmpeg build has no HEVC decoder, so
+// avformat_find_stream_info() cannot lift the SPS VUI or prefix-SEI HDR10
+// metadata into AVCodecParameters.  These helpers recover them from the coded
+// bitstream; container-level values always take precedence.
     const bool vui_matrix = vui.has_colour_description && vui.matrix != 2;
 
     if (!container_primaries && vui_primaries) {
@@ -242,7 +234,6 @@ void mergeHevcBitstreamMetadata(const AVCodecParameters& parameters,
     if (parameters.color_range == AVCOL_RANGE_UNSPECIFIED && vui.has_video_signal_type) {
         info.color.range = vui.full_range ? ColorRange::Full : ColorRange::Limited;
     }
-
     const bool has_primaries = container_primaries || vui_primaries;
     const bool has_transfer = container_transfer || vui_transfer;
     const bool has_matrix = container_matrix || vui_matrix;
@@ -270,11 +261,7 @@ void mergeHevcBitstreamMetadata(const AVCodecParameters& parameters,
             info.hdr.cll.max_fall = sei.max_fall;
         }
     }
-
     if (info.hdr.enabled) {
-        // HDR10 signals that omit colour metadata still require the PQ
-        // container description; fill only the gaps so an explicit HLG or
-        // BT.2020 declaration survives untouched.
         if (!has_primaries) {
             info.color.primaries = ColorPrimaries::BT2020;
         }
@@ -285,10 +272,12 @@ void mergeHevcBitstreamMetadata(const AVCodecParameters& parameters,
             info.color.matrix = MatrixCoefficients::BT2020NC;
         }
         info.hdr.color = info.color;
+// HDR10 signals that omit colour metadata still require the PQ
+// container description; fill only the gaps so an explicit HLG or
+// BT.2020 declaration survives untouched.
     }
     info.hdr_source = info.hdr.enabled;
 }
-
 int detectBitDepth(const AVCodecParameters& parameters, VideoCodec codec) {
     int bits = parameters.bits_per_raw_sample;
     if (bits <= 0 && parameters.format >= 0) {
@@ -309,15 +298,15 @@ int detectBitDepth(const AVCodecParameters& parameters, VideoCodec codec) {
     }
     return bits > 0 ? bits : 8;
 }
-
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: IDemuxer 多方法虚接口的 libavformat 实体实现，同时持有 AVFormatContext、BSF 与自定义 MemoryAvioContext 的确定性析构顺序。
+// Invariant: open() 成功后方可 readPacket()/seekToKeyframeBefore()；析构时先释放 BSF 与流上下文再释放底层 AVIO 缓冲。
 class FfmpegDemuxer final : public IDemuxer {
 public:
-    // Filesystem source.  `container_hint` is only used to label the result.
     explicit FfmpegDemuxer(std::string container_hint = {})
         : container_hint_(std::move(container_hint)) {}
 
-    // In-memory source.  The bytes are owned by the demuxer so the AVIOContext
-    // span stays valid for the whole lifetime of the AVFormatContext.
     FfmpegDemuxer(std::vector<uint8_t> bytes, std::string container_hint)
         : memory_bytes_(std::move(bytes)),
           container_hint_(std::move(container_hint)),
@@ -327,24 +316,24 @@ public:
 
     Result<MediaInfo> open(const std::filesystem::path& path) override {
         close();
+// Filesystem source.  `container_hint` is only used to label the result.
         if (memory_source_) {
-            // Zero-disk path: `path` is a container-name hint only.  No file is
-            // opened and no environment variable is consulted.
             memory_avio_ = std::make_unique<io::MemoryAvioContext>(
                 std::span<const uint8_t>(memory_bytes_.data(), memory_bytes_.size()));
+// In-memory source.  The bytes are owned by the demuxer so the AVIOContext
+// span stays valid for the whole lifetime of the AVFormatContext.
             if (!memory_avio_->valid()) {
                 close();
                 return err(ErrorCode::OutOfMemory,
                            "cannot allocate the in-memory AVIO context");
             }
-            // The AVIO context must be attached to a freshly allocated
-            // AVFormatContext *before* avformat_open_input(); passing it
-            // afterwards would let the probe open a different (file) source.
             format_ = avformat_alloc_context();
             if (format_ == nullptr) {
                 close();
                 return err(ErrorCode::OutOfMemory,
                            "cannot allocate AVFormatContext");
+// Zero-disk path: `path` is a container-name hint only.  No file is
+// opened and no environment variable is consulted.
             }
             format_->pb = memory_avio_->raw();
             format_->flags |= AVFMT_FLAG_CUSTOM_IO;
@@ -352,6 +341,9 @@ public:
             if (memory_status < 0) {
                 close();
                 return err(ErrorCode::Io,
+// The AVIO context must be attached to a freshly allocated
+// AVFormatContext *before* avformat_open_input(); passing it
+// afterwards would let the probe open a different (file) source.
                            "cannot open in-memory media container",
                            avErrorString(memory_status));
             }
@@ -366,7 +358,6 @@ public:
         }
         return finishOpen(path);
     }
-
     Result<Packet> readPacket() override {
         if (format_ == nullptr || video_stream_ < 0) {
             return err(ErrorCode::State, "demuxer is not open");
@@ -405,8 +396,6 @@ public:
                 av_packet_unref(packet_);
                 return p;
             }
-            // Phase 7 (Task 7-B3): forward every passthrough-eligible
-            // secondary audio / subtitle packet with its own time base.
             if (isPassthroughIndex(packet_->stream_index)) {
                 Packet p = convertPacket(*packet_);
                 p.stream_index = packet_->stream_index;
@@ -420,6 +409,8 @@ public:
             if (bitstream_filter_ != nullptr) {
                 status = av_bsf_send_packet(bitstream_filter_, packet_);
                 av_packet_unref(packet_);
+// Phase 7 (Task 7-B3): forward every passthrough-eligible
+// secondary audio / subtitle packet with its own time base.
                 if (status < 0) {
                     return err(ErrorCode::Io, "bitstream filter rejected packet",
                                avErrorString(status));
@@ -431,14 +422,10 @@ public:
             av_packet_unref(packet_);
         }
     }
-
     std::vector<std::string> warnings() const override { return warnings_; }
 
     int audioStreamIndex() const noexcept override { return audio_stream_; }
 
-    // Phase 7 scrubbing / Phase 8 checkpoint recovery: avformat_seek_file to
-    // the latest key frame at or before the requested video PTS, then reset
-    // the buffered state so readPacket resumes from that point.
     Result<void> seekToKeyframeBefore(int64_t video_stream_pts) override {
         if (format_ == nullptr || video_stream_ < 0) {
             return err(ErrorCode::State, "demuxer is not open");
@@ -447,34 +434,40 @@ public:
             video_stream_pts == std::numeric_limits<int64_t>::min()
                 ? 0
                 : video_stream_pts;
-        // av_seek_frame with BACKWARD: the avformat_seek_file variant forced a
-        // [INT64_MIN, 0] ts range that fails (EPERM/EINVAL) for any mid-stream
-        // target; the single-timestamp form is the canonical key-frame seek.
         const int status = av_seek_frame(format_, video_stream_, target,
                                          AVSEEK_FLAG_BACKWARD);
         if (status < 0) {
             return err(ErrorCode::Io, "cannot seek to the requested key frame",
                        avErrorString(status));
         }
+// Phase 7 scrubbing / Phase 8 checkpoint recovery: avformat_seek_file to
+// the latest key frame at or before the requested video PTS, then reset
+// the buffered state so readPacket resumes from that point.
+        if (bitstream_filter_ != nullptr) {
+            av_bsf_flush(bitstream_filter_);
+        }
         pending_.clear();
         drained_ = false;
         bitstream_filter_flushed_ = false;
         video_guard_.reset();
         audio_guard_.reset();
+// av_seek_frame with BACKWARD: the avformat_seek_file variant forced a
+// [INT64_MIN, 0] ts range that fails (EPERM/EINVAL) for any mid-stream
+// target; the single-timestamp form is the canonical key-frame seek.
         return {};
     }
-
-
 private:
-    // Phase 7 (Task 7-B3): true when the stream rides the passthrough set.
     bool isPassthroughIndex(int stream_index) const noexcept {
         if (stream_index == audio_stream_) {
             return false;  // handled by the primary-audio branch above
+// Phase 11.2 (Track 11C 提纯项): EOF 排空时 av_bsf_send_packet(nullptr)
+// 会把过滤器锁进终态，seek 后的第一个包会被拒绝
+// ("A non-NULL packet sent after an EOF")。av_bsf_flush 解除该终态，
+// 实时播放的 GOP Seek 与回放才能反复进行。
         }
         return std::any_of(passthrough_indices_.begin(), passthrough_indices_.end(),
                            [stream_index](int index) { return index == stream_index; });
     }
-
     Result<MediaInfo> finishOpen(const std::filesystem::path& path) {
         int status = avformat_find_stream_info(format_, nullptr);
         if (status < 0) {
@@ -482,8 +475,8 @@ private:
             return err(ErrorCode::Io, "cannot read stream information",
                        avErrorString(status));
         }
-
         const int stream_index = av_find_best_stream(format_, AVMEDIA_TYPE_VIDEO, -1, -1,
+// Phase 7 (Task 7-B3): true when the stream rides the passthrough set.
                                                      nullptr, 0);
         if (stream_index < 0) {
             close();
@@ -506,6 +499,15 @@ private:
         info.video_codec = avcodec_get_name(stream->codecpar->codec_id);
         info.width = stream->codecpar->width;
         info.height = stream->codecpar->height;
+        for (int sd_idx = 0; sd_idx < stream->codecpar->nb_coded_side_data; ++sd_idx) {
+            const AVPacketSideData& sd = stream->codecpar->coded_side_data[sd_idx];
+            if (sd.type == AV_PKT_DATA_DISPLAYMATRIX &&
+                sd.data != nullptr && sd.size >= sizeof(int32_t) * 9) {
+                std::memcpy(info.display_matrix.data(), sd.data, sizeof(int32_t) * 9);
+                info.has_display_matrix = true;
+                break;
+            }
+        }
         info.bit_depth = detectBitDepth(*stream->codecpar, info.codec);
         info.bitrate = static_cast<int>(std::max<int64_t>(0, stream->codecpar->bit_rate));
         info.time_base = Rational{stream->time_base.num, stream->time_base.den};
@@ -550,8 +552,6 @@ private:
                     });
                 }
                 info.audio_tracks.push_back(std::move(track));
-                // Phase 7 (Task 7-B3): every audio stream joins the
-                // passthrough set, not only the primary one.
                 PassthroughStreamInfo passthrough;
                 passthrough.stream_index = static_cast<int>(i);
                 passthrough.codec_type = 1;  // audio
@@ -564,14 +564,13 @@ private:
                 info.passthrough_streams.push_back(std::move(passthrough));
             } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
                 ++info.subtitle_streams;
-                // Phase 7 (Task 7-B3): text-based subtitles (subrip / ass /
-                // mov_text / webvtt) ride along bitstream-level; the muxer
-                // filters what the output container can actually carry.
                 const int codec_id = static_cast<int>(st->codecpar->codec_id);
                 if (codec_id == AV_CODEC_ID_SUBRIP || codec_id == AV_CODEC_ID_ASS ||
                     codec_id == AV_CODEC_ID_SSA || codec_id == AV_CODEC_ID_WEBVTT ||
                     codec_id == AV_CODEC_ID_MOV_TEXT) {
                     PassthroughStreamInfo passthrough;
+// Phase 7 (Task 7-B3): every audio stream joins the
+// passthrough set, not only the primary one.
                     passthrough.stream_index = static_cast<int>(i);
                     passthrough.codec_type = 2;  // subtitle
                     passthrough.codec_id = codec_id;
@@ -584,6 +583,9 @@ private:
                             if (p != nullptr) {
                                 AVCodecParameters* cp = static_cast<AVCodecParameters*>(p);
                                 avcodec_parameters_free(&cp);
+// Phase 7 (Task 7-B3): text-based subtitles (subrip / ass /
+// mov_text / webvtt) ride along bitstream-level; the muxer
+// filters what the output container can actually carry.
                             }
                         });
                     }
@@ -592,7 +594,6 @@ private:
             }
         }
         info.primary_audio_index = audio_stream_;
-        // Phase 7 (Task 7-B3): snapshot the passthrough set for readPacket.
         passthrough_indices_.clear();
         for (const PassthroughStreamInfo& entry : info.passthrough_streams) {
             passthrough_indices_.push_back(entry.stream_index);
@@ -608,13 +609,9 @@ private:
         if (info.codec == VideoCodec::HEVC && !info.extradata.empty()) {
             (void)parseHevcVuiColor(info.extradata.data(), info.extradata.size(), vui);
         }
-
-        // MP4/MOV store length-prefixed NAL units; MKV/TS can already deliver
-        // start codes.  Detect the actual packet syntax instead of guessing
-        // from the container name: MP4 always needs h264_mp4toannexb /
-        // hevc_mp4toannexb, while Matroska is demuxed to Annex-B by FFmpeg.
         info_ = info;
         video_drift_ = FlicksDriftCompensator{};
+// Phase 7 (Task 7-B3): snapshot the passthrough set for readPacket.
         audio_drift_ = FlicksDriftCompensator{};
         video_guard_.reset();
         audio_guard_.reset();
@@ -623,7 +620,6 @@ private:
             close();
             return err(ErrorCode::Io, "out of memory for AVPacket");
         }
-
         AVPacket* probe = av_packet_alloc();
         if (probe == nullptr) {
             close();
@@ -632,6 +628,10 @@ private:
         bool packets_are_annex_b = false;
         bool probe_valid = false;
         HevcSeiHdr10 sei;
+// MP4/MOV store length-prefixed NAL units; MKV/TS can already deliver
+// start codes.  Detect the actual packet syntax instead of guessing
+// from the container name: MP4 always needs h264_mp4toannexb /
+// hevc_mp4toannexb, while Matroska is demuxed to Annex-B by FFmpeg.
         while (av_read_frame(format_, probe) >= 0) {
             if (probe->stream_index == video_stream_) {
                 packets_are_annex_b = looksLikeAnnexB(probe->data,
@@ -672,7 +672,6 @@ private:
         av_packet_free(&probe);
         return info_;
     }
-
     void configureBitstreamFilter(const char* name) {
         const AVBitStreamFilter* filter = av_bsf_get_by_name(name);
         if (filter == nullptr) {
@@ -692,7 +691,6 @@ private:
             warnings_.push_back(std::string("cannot initialise bitstream filter: ") + name);
         }
     }
-
     void drainBitstreamFilter() {
         for (;;) {
             int status = av_bsf_receive_packet(bitstream_filter_, packet_);
@@ -707,10 +705,6 @@ private:
             av_packet_unref(packet_);
         }
     }
-
-    // Projects a container timestamp onto the Flicks axis and repairs a
-    // regression for monotonic streams (e.g. audio). Returns the (possibly repaired)
-    // Flicks value; `valid` is false when the container supplies no timestamp at all.
     int64_t projectWithTimebase(const AVPacket& source, Rational time_base,
                                 FlicksDriftCompensator& drift, FlicksMonotonicGuard& guard,
                                 bool* valid) {
@@ -723,11 +717,6 @@ private:
             source.pts, static_cast<uint32_t>(time_base.num),
             static_cast<uint32_t>(time_base.den)));
     }
-
-    // Projects a video packet presentation timestamp (PTS) onto the Flicks timeline.
-    // In demuxed packet streams with B-frames, packet delivery strictly follows
-    // decoding order (DTS), causing valid presentation timestamps (PTS) to be non-monotonic.
-    // Video PTS must be preserved without monotonic clamping.
     int64_t projectVideoPtsToFlicks(int64_t pts, Rational time_base,
                                     FlicksDriftCompensator& drift, bool* valid) {
         if (pts == AV_NOPTS_VALUE || !time_base.valid()) {
@@ -738,8 +727,10 @@ private:
         return drift.rescaleToFlicks(
             pts, static_cast<uint32_t>(time_base.num),
             static_cast<uint32_t>(time_base.den));
+// Projects a container timestamp onto the Flicks axis and repairs a
+// regression for monotonic streams (e.g. audio). Returns the (possibly repaired)
+// Flicks value; `valid` is false when the container supplies no timestamp at all.
     }
-
     Packet convertPacket(const AVPacket& source) {
         Packet packet;
         packet.data.assign(source.data, source.data + source.size);
@@ -750,10 +741,12 @@ private:
         packet.stream_index = source.stream_index;
         if (source.stream_index >= 0 &&
             static_cast<unsigned int>(source.stream_index) < format_->nb_streams) {
-            // Phase 7 (Task 7-B3): every packet carries its own stream's time
-            // base so the muxer can rescale any passthrough stream correctly.
             packet.time_base = Rational{format_->streams[source.stream_index]->time_base.num,
                                         format_->streams[source.stream_index]->time_base.den};
+// Projects a video packet presentation timestamp (PTS) onto the Flicks timeline.
+// In demuxed packet streams with B-frames, packet delivery strictly follows
+// decoding order (DTS), causing valid presentation timestamps (PTS) to be non-monotonic.
+// Video PTS must be preserved without monotonic clamping.
         } else {
             packet.time_base = info_.time_base;
         }
@@ -761,7 +754,6 @@ private:
                                                     &packet.flicks_valid);
         return packet;
     }
-
     void close() {
         pending_.clear();
         if (bitstream_filter_ != nullptr) {
@@ -773,12 +765,12 @@ private:
             packet_ = nullptr;
         }
         if (format_ != nullptr) {
-            // With AVFMT_FLAG_CUSTOM_IO libavformat does not own the AVIO
-            // context; detach it so neither side can double-free the page.
             if (memory_avio_ != nullptr) {
                 format_->pb = nullptr;
             }
             avformat_close_input(&format_);
+// Phase 7 (Task 7-B3): every packet carries its own stream's time
+// base so the muxer can rescale any passthrough stream correctly.
             format_ = nullptr;
         }
         memory_avio_.reset();
@@ -789,7 +781,6 @@ private:
         video_guard_.reset();
         audio_guard_.reset();
     }
-
     std::vector<uint8_t> memory_bytes_;
     std::string container_hint_;
     bool memory_source_ = false;
@@ -801,6 +792,8 @@ private:
     std::vector<std::string> warnings_;
     MediaInfo info_;
     FlicksDriftCompensator video_drift_;
+// With AVFMT_FLAG_CUSTOM_IO libavformat does not own the AVIO
+// context; detach it so neither side can double-free the page.
     FlicksDriftCompensator audio_drift_;
     FlicksMonotonicGuard video_guard_;
     FlicksMonotonicGuard audio_guard_;
@@ -808,13 +801,15 @@ private:
     bool last_audio_flicks_valid_ = false;
     int video_stream_ = -1;
     int audio_stream_ = -1;
-    // Phase 7 (Task 7-B3): secondary audio + subtitle indices forwarded to
-    // the caller (subset of info_.passthrough_streams).
     std::vector<int> passthrough_indices_;
     bool drained_ = false;
     bool bitstream_filter_flushed_ = false;
 };
 
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: IMuxer 多方法虚接口的 libavformat 实体实现，协调容器写头、交错包写入、HDR 边带数据注入与尾表刷盘状态机。
+// Invariant: writePacket() 仅在 open() 写头后有效；finalize() 幂等写入容器尾表并关闭输出 AVIO 句柄。
 class FfmpegMuxer final : public IMuxer {
 public:
     FfmpegMuxer() = default;
@@ -832,6 +827,8 @@ public:
         const AVCodecID codec = codecToAv(info.codec);
         if (codec == AV_CODEC_ID_NONE) {
             return err(ErrorCode::InvalidArgument,
+// Phase 7 (Task 7-B3): secondary audio + subtitle indices forwarded to
+// the caller (subset of info_.passthrough_streams).
                        "unsupported output video codec", path_str);
         }
         const bool in_memory = memory_target_ != nullptr;
@@ -880,18 +877,11 @@ public:
                                         ? static_cast<int>(info.frame_rate.den)
                                         : 1};
         stream_->avg_frame_rate = frame_rate;
-        // Phase 9 (RC-6): r_frame_rate is the container-level real frame rate
-        // players and probes actually trust; leaving it unset made 120fps
-        // transcodes report the source fps.
         stream_->r_frame_rate = frame_rate;
         stream_->time_base =
             AVRational{info.time_base.num > 0 ? static_cast<int>(info.time_base.num) : 1,
                        info.time_base.den > 0 ? static_cast<int>(info.time_base.den) : 90000};
 
-        // HDR10 static metadata must reach the container, not only the HEVC
-        // bitstream: the mp4 muxer derives the mdcv/clli boxes from the coded
-        // side data of the output stream.  Adding it here (before
-        // avformat_write_header) is the only point where movenc will emit it.
         if (hdr.enabled) {
             const Result<void> side = applyHdrSideData(hdr);
             if (!side.has_value()) {
@@ -899,17 +889,27 @@ public:
                 return side;
             }
         }
-
-        // Phase 7 (Task 7-B3): resolve the output container name before the
-        // passthrough streams are created so subtitle support checks work.
+        if (info.has_display_matrix) {
+            constexpr size_t kMatrixBytes = sizeof(int32_t) * 9;
+            auto* matrix_buf = static_cast<int32_t*>(av_malloc(kMatrixBytes));
+            if (matrix_buf == nullptr) {
+                close();
+                return err(ErrorCode::OutOfMemory, "cannot allocate display-matrix side data");
+            }
+            std::memcpy(matrix_buf, info.display_matrix.data(), kMatrixBytes);
+            if (av_packet_side_data_add(&parameters->coded_side_data,
+                                        &parameters->nb_coded_side_data,
+                                        AV_PKT_DATA_DISPLAYMATRIX, matrix_buf, kMatrixBytes,
+                                        0) == nullptr) {
+                av_free(matrix_buf);
+                close();
+                return err(ErrorCode::OutOfMemory, "cannot attach display-matrix side data");
+            }
+        }
         container_ = info.format_name.empty()
                          ? (in_memory ? memory_format_ : pathExtension(path))
                          : info.format_name;
 
-        // Phase 7 (Task 7-B3): full multi-audio + subtitle passthrough.  Every
-        // audio stream in the passthrough set gets its own output stream with
-        // the cloned codec parameters; subtitle streams ride along when the
-        // output container can carry them natively.
         const bool matroska_output =
             container_.find("matroska") != std::string::npos ||
             container_.find("webm") != std::string::npos;
@@ -920,11 +920,18 @@ public:
                 continue;
             }
             AVCodecParameters* src_par =
+// Phase 9 (RC-6): r_frame_rate is the container-level real frame rate
+// players and probes actually trust; leaving it unset made 120fps
+// transcodes report the source fps.
                 static_cast<AVCodecParameters*>(entry.opaque_codecpar.get());
             if (entry.codec_type == 2) {  // subtitle
                 const int codec_id = static_cast<int>(src_par->codec_id);
                 const bool supported =
                     (matroska_output &&
+// HDR10 static metadata must reach the container, not only the HEVC
+// bitstream: the mp4 muxer derives the mdcv/clli boxes from the coded
+// side data of the output stream.  Adding it here (before
+// avformat_write_header) is the only point where movenc will emit it.
                      (codec_id == AV_CODEC_ID_SUBRIP || codec_id == AV_CODEC_ID_ASS ||
                       codec_id == AV_CODEC_ID_SSA || codec_id == AV_CODEC_ID_WEBVTT)) ||
                     (mp4_output && codec_id == AV_CODEC_ID_MOV_TEXT);
@@ -933,10 +940,16 @@ public:
                                         std::to_string(entry.stream_index) + " (" +
                                         entry.codec_name + ") is not supported by the " +
                                         container_ + " output container; dropped");
+// Phase 7 (Task 7-B3): resolve the output container name before the
+// passthrough streams are created so subtitle support checks work.
                     continue;
                 }
             }
             AVStream* out_stream = avformat_new_stream(format_, nullptr);
+// Phase 7 (Task 7-B3): full multi-audio + subtitle passthrough.  Every
+// audio stream in the passthrough set gets its own output stream with
+// the cloned codec parameters; subtitle streams ride along when the
+// output container can carry them natively.
             if (out_stream == nullptr) {
                 close();
                 return err(ErrorCode::Io, "cannot create passthrough output stream");
@@ -991,15 +1004,11 @@ public:
         opened_ = true;
         return {};
     }
-
     Result<void> writePacket(const Packet& packet) override {
         std::lock_guard<std::mutex> lock(muxer_mutex_);
         if (!opened_ || format_ == nullptr) {
             return err(ErrorCode::State, "muxer is not open");
         }
-        // Phase 7 (Task 7-B3): route any passthrough stream (multi-audio +
-        // subtitles) by source stream index, rescaling from the packet's own
-        // time base to the output stream's.
         for (PassthroughTarget& target : passthrough_streams_) {
             if (packet.stream_index != target.source_index) {
                 continue;
@@ -1025,11 +1034,12 @@ public:
             packet_->dts = av_rescale_q(packet.dts, source_base, out_stream->time_base);
             packet_->duration = av_rescale_q(packet.duration, source_base, out_stream->time_base);
             packet_->flags = packet.keyframe ? AV_PKT_FLAG_KEY : 0;
-            // Phase 8 (Task 8-B2): strictly monotonic DTS per output stream,
-            // so a VFR / damaged source can never trip the interleaver.
             target.guard.sanitize(packet_->pts, packet_->dts, 1);
             status = av_interleaved_write_frame(format_, packet_);
             av_packet_unref(packet_);
+// Phase 7 (Task 7-B3): route any passthrough stream (multi-audio +
+// subtitles) by source stream index, rescaling from the packet's own
+// time base to the output stream's.
             if (status < 0) {
                 return err(ErrorCode::Io, "cannot write passthrough packet",
                            avErrorString(status));
@@ -1055,6 +1065,8 @@ public:
             data = converted.data();
             size = converted.size();
         }
+// Phase 8 (Task 8-B2): strictly monotonic DTS per output stream,
+// so a VFR / damaged source can never trip the interleaver.
         if (size > static_cast<size_t>(INT_MAX)) {
             return err(ErrorCode::InvalidArgument, "packet is too large");
         }
@@ -1072,7 +1084,6 @@ public:
         packet_->dts = av_rescale_q(packet.dts, source_base, stream_->time_base);
         packet_->duration = av_rescale_q(packet.duration, source_base, stream_->time_base);
         packet_->flags = packet.keyframe ? AV_PKT_FLAG_KEY : 0;
-            // Phase 8 (Task 8-B2): strictly monotonic DTS on the video stream too.
         video_guard_.sanitize(packet_->pts, packet_->dts, 1);
         status = av_interleaved_write_frame(format_, packet_);
         av_packet_unref(packet_);
@@ -1082,7 +1093,6 @@ public:
         }
         return {};
     }
-
     Result<void> finalize() override {
         Result<void> result;
         if (format_ != nullptr && opened_) {
@@ -1098,11 +1108,11 @@ public:
         close();
         return result;
     }
-
 private:
     Result<void> applyHdrSideData(const Hdr10Metadata& hdr) {
         AVCodecParameters* parameters = stream_->codecpar;
         size_t size = 0;
+// Phase 8 (Task 8-B2): strictly monotonic DTS on the video stream too.
         AVMasteringDisplayMetadata* mastering =
             av_mastering_display_metadata_alloc_size(&size);
         if (mastering == nullptr) {
@@ -1130,7 +1140,6 @@ private:
             return err(ErrorCode::OutOfMemory,
                        "cannot attach mastering-display side data");
         }
-
         AVContentLightMetadata* light = av_content_light_metadata_alloc(&size);
         if (light == nullptr) {
             return err(ErrorCode::OutOfMemory,
@@ -1148,7 +1157,6 @@ private:
         }
         return {};
     }
-
     void close() {
         opened_ = false;
         if (packet_ != nullptr) {
@@ -1176,16 +1184,16 @@ private:
         warnings_.clear();
         hdr_ = Hdr10Metadata{};
     }
-
     std::mutex muxer_mutex_;
     AVStream* audio_stream_ = nullptr;
     int audio_stream_index_ = -1;
     int src_audio_stream_index_ = -1;
     Rational in_audio_time_base_{1, 48000};
     Rational out_audio_time_base_{1, 48000};
-    // Phase 7 (Task 7-B3): source stream index -> output AVStream for every
-    // passthrough (audio + subtitle) stream.  Phase 8 attaches a per-stream
-    // monotonic-DTS guard to each of them.
+    // @rtx-type-justification
+    // Category: Domain-Model
+    // Why-Std-Fails: 容器直通流映射描述条目，具名绑定源流索引、输出 AVStream 指针与时间基映射，std::tuple 丢失流映射语义。
+    // Invariant: source_index >= 0 且 stream 由所属 AVFormatContext 拥有，生命周期不超过 FfmpegMuxer。
     struct PassthroughTarget {
         int source_index = -1;
         AVStream* stream = nullptr;
@@ -1208,13 +1216,6 @@ private:
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Phase 8 (Task 8-B1): broadcast-tier software decoder (ProRes / DNxHR).
-// NVDEC has no hardware decoder for these codecs, so the statically linked
-// FFmpeg decoders produce host frames (YUV422P10LE / YUV422P for ProRes,
-// YUV422P10LE / YUV422P / YUV444P10LE for DNxHR) and a hand-rolled 2-tap box
-// chroma downsampler converts them to P010 planes without any swscale
-// dependency (the surgical FFmpeg archive does not ship libswscale).
 std::unique_ptr<IDemuxer> makeFfmpegDemuxer() { return std::make_unique<FfmpegDemuxer>(); }
 
 std::unique_ptr<IMuxer> makeFfmpegMuxer() { return std::make_unique<FfmpegMuxer>(); }
@@ -1222,10 +1223,17 @@ std::unique_ptr<IMuxer> makeFfmpegMuxer() { return std::make_unique<FfmpegMuxer>
 std::unique_ptr<IDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes) {
     return std::make_unique<FfmpegDemuxer>(std::move(bytes), std::string{"memory"});
 }
-
+// Phase 7 (Task 7-B3): source stream index -> output AVStream for every
+// passthrough (audio + subtitle) stream.  Phase 8 attaches a per-stream
+// monotonic-DTS guard to each of them.
 std::unique_ptr<IMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
                                         std::string container_format) {
     return std::make_unique<FfmpegMuxer>(output, std::move(container_format));
 }
-
 }  // namespace rtx
+// Phase 8 (Task 8-B1): broadcast-tier software decoder (ProRes / DNxHR).
+// NVDEC has no hardware decoder for these codecs, so the statically linked
+// FFmpeg decoders produce host frames (YUV422P10LE / YUV422P for ProRes,
+// YUV422P10LE / YUV422P / YUV444P10LE for DNxHR) and a hand-rolled 2-tap box
+// chroma downsampler converts them to P010 planes without any swscale
+// dependency (the surgical FFmpeg archive does not ship libswscale).

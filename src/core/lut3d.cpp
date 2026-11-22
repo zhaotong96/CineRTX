@@ -49,7 +49,6 @@ float halfToFloat(uint16_t value) noexcept {
     std::memcpy(&result, &bits, sizeof(result));
     return result;
 }
-
 uint16_t floatToHalf(float value) noexcept {
     uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
@@ -79,7 +78,6 @@ uint16_t floatToHalf(float value) noexcept {
     const uint32_t round_add = (round_bit != 0 && (sticky_bits != 0 || (half_mantissa & 1u) != 0)) ? 1u : 0u;
     return static_cast<uint16_t>(sign | ((half_exponent | half_mantissa) + round_add));
 }
-
 namespace {
 
 bool parseIntegerToken(const std::string& token, int& value) {
@@ -88,7 +86,6 @@ bool parseIntegerToken(const std::string& token, int& value) {
     const auto result = std::from_chars(begin, end, value);
     return result.ec == std::errc{} && result.ptr == end;
 }
-
 bool parseFloatToken(const std::string& token, float& value) {
     try {
         size_t consumed = 0;
@@ -98,7 +95,6 @@ bool parseFloatToken(const std::string& token, float& value) {
         return false;
     }
 }
-
 }  // namespace
 
 Result<Lut3D> Lut3D::parse(const std::string& text) {
@@ -110,11 +106,11 @@ Result<Lut3D> Lut3D::parse(const std::string& text) {
     int line_no = 0;
     while (std::getline(stream, line)) {
         ++line_no;
-        // Strip a UTF-8 BOM on the first line.
         if (line_no == 1 && line.size() >= 3 &&
             static_cast<unsigned char>(line[0]) == 0xEF &&
             static_cast<unsigned char>(line[1]) == 0xBB &&
             static_cast<unsigned char>(line[2]) == 0xBF) {
+// Strip a UTF-8 BOM on the first line.
             line.erase(0, 3);
         }
         const size_t comment = line.find('#');
@@ -155,12 +151,12 @@ Result<Lut3D> Lut3D::parse(const std::string& text) {
         float r = 0.0f;
         float g = 0.0f;
         float b = 0.0f;
-        // A data row starts with its red value, which `keyword` already
-        // consumed from the stream; keep it as the first token.
         const std::string token_r = keyword;
         std::string token_g;
         std::string token_b;
         tokens >> token_g >> token_b;
+// A data row starts with its red value, which `keyword` already
+// consumed from the stream; keep it as the first token.
         if (!parseFloatToken(token_r, r) || !parseFloatToken(token_g, g) ||
             !parseFloatToken(token_b, b)) {
             return err(ErrorCode::InvalidArgument,
@@ -180,7 +176,6 @@ Result<Lut3D> Lut3D::parse(const std::string& text) {
                        std::to_string(expected) + ", got " +
                        std::to_string(table.size() / 3u));
     }
-
     Lut3D lut;
     lut.grid_size_ = grid_size;
     lut.half4_table_.resize(expected * 4u);
@@ -192,7 +187,6 @@ Result<Lut3D> Lut3D::parse(const std::string& text) {
     }
     return lut;
 }
-
 Result<Lut3D> Lut3D::loadFromCubeFile(const std::filesystem::path& path) {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec) {
@@ -206,5 +200,4 @@ Result<Lut3D> Lut3D::loadFromCubeFile(const std::filesystem::path& path) {
     buffer << file.rdbuf();
     return parse(buffer.str());
 }
-
 }  // namespace rtx

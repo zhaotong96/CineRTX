@@ -23,10 +23,10 @@
 namespace rtx {
 
 void initRuntimeEnvironment() noexcept {
-    // 1. C++ global locale configuration with multi-stage fallback.
-    // On Linux/glibc, constructing std::locale with a non-existent name throws
-    // std::runtime_error. To guarantee noexcept contract is never violated,
-    // catch all exceptions and try standard fallback names before falling back to classic().
+// 1. C++ global locale configuration with multi-stage fallback.
+// On Linux/glibc, constructing std::locale with a non-existent name throws
+// std::runtime_error. To guarantee noexcept contract is never violated,
+// catch all exceptions and try standard fallback names before falling back to classic().
     try {
         bool cpp_locale_set = false;
         const char* const cpp_candidates[] = {
@@ -40,18 +40,17 @@ void initRuntimeEnvironment() noexcept {
                 cpp_locale_set = true;
                 break;
             } catch (const std::exception&) {
-                // Continue trying candidate locales
+// Continue trying candidate locales
             }
         }
         if (!cpp_locale_set) {
             std::locale::global(std::locale::classic());
         }
     } catch (...) {
-        // Absolute noexcept guarantee
+// Absolute noexcept guarantee
     }
-
-    // 2. C runtime setlocale with fallback validation.
     try {
+// 2. C runtime setlocale with fallback validation.
         const char* const c_candidates[] = {
             ".utf8",
             "C.UTF-8",
@@ -66,19 +65,18 @@ void initRuntimeEnvironment() noexcept {
         }
     } catch (...) {
     }
-
 #if defined(_WIN32)
-    // 3. UTF-8 console output and input code pages on Windows
     ::SetConsoleOutputCP(CP_UTF8);
     ::SetConsoleCP(CP_UTF8);
+// 3. UTF-8 console output and input code pages on Windows
 
-    // 4. Hardened unhandled exception filter for Minidump generation.
-    // - Security: load dbghelp.dll strictly from System32 using LOAD_LIBRARY_SEARCH_SYSTEM32
-    //   to prevent DLL preloading attacks.
-    // - Collision prevention: append PID and timestamp to avoid overwriting existing crash dumps.
-    // - Resiliency: prefer Windows temp directory; fallback to current directory if needed.
     ::SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* ep) -> LONG {
         HMODULE dbghelp = ::LoadLibraryExW(
+// 4. Hardened unhandled exception filter for Minidump generation.
+// - Security: load dbghelp.dll strictly from System32 using LOAD_LIBRARY_SEARCH_SYSTEM32
+//   to prevent DLL preloading attacks.
+// - Collision prevention: append PID and timestamp to avoid overwriting existing crash dumps.
+// - Resiliency: prefer Windows temp directory; fallback to current directory if needed.
             L"dbghelp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (dbghelp) {
             using MiniDumpWriteDumpFn = BOOL(WINAPI*)(
@@ -107,7 +105,6 @@ void initRuntimeEnvironment() noexcept {
                                static_cast<unsigned long>(pid),
                                static_cast<unsigned long long>(timestamp));
                 }
-
                 HANDLE hFile = ::CreateFileW(
                     dumpPath, GENERIC_WRITE, 0, nullptr,
                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -127,5 +124,4 @@ void initRuntimeEnvironment() noexcept {
     });
 #endif
 }
-
 }  // namespace rtx

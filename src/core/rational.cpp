@@ -22,12 +22,15 @@
 extern "C" {
 #include <libavutil/mathematics.h>
 }
-
 #include "rtx/flicks.h"
 
 namespace rtx {
 namespace detail {
 
+// @rtx-type-justification
+// Category: Hardware-Layout
+// Why-Std-Fails: 硬件/内核参数布局结构：字段序即 PTX 内核参数 ABI 或缓存行对齐布局，std 聚合无法表达布局承诺。
+// Invariant: 内存布局与对齐由硬件消费方逐字读取；禁止增删改字段顺序。
 struct Uint128 {
     uint64_t high = 0;
     uint64_t low = 0;
@@ -35,8 +38,8 @@ struct Uint128 {
     constexpr auto operator<=>(const Uint128& other) const noexcept = default;
 };
 
-// Portable constexpr 64x64 -> 128 unsigned multiplication
 constexpr inline Uint128 mul64(uint64_t a, uint64_t b) noexcept {
+// Portable constexpr 64x64 -> 128 unsigned multiplication
 #if defined(_MSC_VER) && defined(_M_X64)
     if (!std::is_constant_evaluated()) {
         unsigned __int64 high = 0;
@@ -67,13 +70,11 @@ constexpr inline Uint128 mul64(uint64_t a, uint64_t b) noexcept {
     return Uint128{high, low};
 #endif
 }
-
 inline std::strong_ordering compareExact(int64_t n1, int64_t d1,
                                          int64_t n2, int64_t d2) noexcept {
     if (n1 == n2 && d1 == d2) {
         return std::strong_ordering::equal;
     }
-
     if (d1 < 0) {
         n1 = -n1;
         d1 = -d1;
@@ -82,17 +83,14 @@ inline std::strong_ordering compareExact(int64_t n1, int64_t d1,
         n2 = -n2;
         d2 = -d2;
     }
-
     if (d1 == d2 && d1 > 0) {
         return n1 <=> n2;
     }
-
     if (d1 == 0 || d2 == 0) {
         if (d1 == 0 && d2 == 0) return n1 <=> n2;
         if (d1 == 0) return n1 > 0 ? std::strong_ordering::greater : std::strong_ordering::less;
         return n2 > 0 ? std::strong_ordering::less : std::strong_ordering::greater;
     }
-
     if (n1 == 0 && n2 == 0) return std::strong_ordering::equal;
     if (n1 <= 0 && n2 > 0) return std::strong_ordering::less;
     if (n1 >= 0 && n2 < 0) return std::strong_ordering::greater;
@@ -104,14 +102,16 @@ inline std::strong_ordering compareExact(int64_t n1, int64_t d1,
         const Uint128 p2 = mul64(static_cast<uint64_t>(n2), static_cast<uint64_t>(d1));
         return p1 <=> p2;
     }
-
     const uint64_t u1 = 0ULL - static_cast<uint64_t>(n1);
     const uint64_t u2 = 0ULL - static_cast<uint64_t>(n2);
     const Uint128 p1 = mul64(u1, static_cast<uint64_t>(d2));
     const Uint128 p2 = mul64(u2, static_cast<uint64_t>(d1));
     return p2 <=> p1;
 }
-
+// @rtx-type-justification
+// Category: Hardware-Layout
+// Why-Std-Fails: 硬件/内核参数布局结构：字段序即 PTX 内核参数 ABI 或缓存行对齐布局，std 聚合无法表达布局承诺。
+// Invariant: 内存布局与对齐由硬件消费方逐字读取；禁止增删改字段顺序。
 struct Div128 {
     uint64_t quotient = 0;
     uint64_t remainder = 0;
@@ -160,13 +160,11 @@ inline Div128 divide128(uint64_t high, uint64_t low, uint64_t divisor) noexcept 
     return result;
 #endif
 }
-
 }  // namespace detail
 
 Rational::Rational(int64_t numerator, int64_t denominator) : num(numerator), den(denominator) {
     normalize();
 }
-
 void Rational::normalize() {
     if (den == 0) {
         return;
@@ -181,7 +179,6 @@ void Rational::normalize() {
         den /= divisor;
     }
 }
-
 Rational Rational::fromDouble(double value, int64_t max_denominator) {
     if (!std::isfinite(value) || max_denominator <= 0) {
         return {};
@@ -220,7 +217,6 @@ Rational Rational::fromDouble(double value, int64_t max_denominator) {
     result.normalize();
     return result;
 }
-
 Result<Rational> Rational::parse(std::string_view text) {
     if (text.empty()) {
         return err(ErrorCode::InvalidArgument, "empty rational");
@@ -242,7 +238,6 @@ Result<Rational> Rational::parse(std::string_view text) {
         }
         return Rational{n, d};
     }
-
     int64_t int_val = 0;
     const auto res_int = std::from_chars(text.data(), text.data() + text.size(), int_val);
     if (res_int.ec == std::errc{} && res_int.ptr == text.data() + text.size()) {
@@ -251,11 +246,7 @@ Result<Rational> Rational::parse(std::string_view text) {
         }
         return Rational{int_val, 1};
     }
-
     double dbl_val = 0.0;
-    // Zig's bundled libc++ (LLVM 18/19) has no floating-point std::from_chars
-    // overload.  std::strtod is the byte-identical fallback for this host
-    // path; MSVC keeps the locale-independent from_chars semantics.
 #if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 200000
     const std::string dbl_text(text.data(), text.size());
     char* dbl_end = nullptr;
@@ -270,46 +261,41 @@ Result<Rational> Rational::parse(std::string_view text) {
         return err(ErrorCode::InvalidArgument, "malformed rational", std::string(text));
     }
 #endif
+// Zig's bundled libc++ (LLVM 18/19) has no floating-point std::from_chars
+// overload.  std::strtod is the byte-identical fallback for this host
+// path; MSVC keeps the locale-independent from_chars semantics.
     if (dbl_val <= 0.0) {
         return err(ErrorCode::InvalidArgument, "rational must be positive");
     }
     return Rational::fromDouble(dbl_val);
 }
-
 std::string Rational::toString() const {
     if (den == 1) {
         return std::format("{}", num);
     }
     return std::format("{}/{}", num, den);
 }
-
 Rational Rational::operator*(const Rational& other) const {
     return Rational{num * other.num, den * other.den};
 }
-
 Rational Rational::operator/(const Rational& other) const {
     return Rational{num * other.den, den * other.num};
 }
-
 Rational Rational::operator+(const Rational& other) const {
     return Rational{num * other.den + other.num * den, den * other.den};
 }
-
 Rational Rational::operator-(const Rational& other) const {
     return Rational{num * other.den - other.num * den, den * other.den};
 }
-
 std::strong_ordering Rational::operator<=>(const Rational& other) const noexcept {
     return detail::compareExact(num, den, other.num, other.den);
 }
-
 bool Rational::operator==(const Rational& other) const noexcept {
     if (num == other.num && den == other.den) {
         return true;
     }
     return (*this <=> other) == 0;
 }
-
 int64_t rescaleQ(int64_t timestamp, Rational source_time_base, Rational destination_time_base,
                  Rounding rounding) {
     if (!source_time_base.valid() || !destination_time_base.valid()) {
@@ -325,7 +311,6 @@ int64_t rescaleQ(int64_t timestamp, Rational source_time_base, Rational destinat
     const AVRational dst{static_cast<int>(destination_time_base.num), static_cast<int>(destination_time_base.den)};
     return av_rescale_q_rnd(timestamp, src, dst, rnd);
 }
-
 int64_t rescaleToFlicks(int64_t stream_pts, Rational time_base) {
     if (time_base.num <= 0 || time_base.den <= 0) {
         return 0;
@@ -340,7 +325,6 @@ int64_t rescaleToFlicks(int64_t stream_pts, Rational time_base) {
     return negative ? -static_cast<int64_t>(divided.quotient)
                     : static_cast<int64_t>(divided.quotient);
 }
-
 int64_t FlicksDriftCompensator::rescaleToFlicks(int64_t stream_pts, uint32_t timebase_num,
                                                 uint32_t timebase_den) {
     if (timebase_num == 0 || timebase_den == 0) {
@@ -362,7 +346,6 @@ int64_t FlicksDriftCompensator::rescaleToFlicks(int64_t stream_pts, uint32_t tim
     return negative ? -static_cast<int64_t>(divided.quotient)
                     : static_cast<int64_t>(divided.quotient);
 }
-
 int64_t FlicksMonotonicGuard::apply(int64_t candidate) noexcept {
     if (!primed_) {
         primed_ = true;
@@ -376,5 +359,4 @@ int64_t FlicksMonotonicGuard::apply(int64_t candidate) noexcept {
     last_ = candidate;
     return last_;
 }
-
 }  // namespace rtx

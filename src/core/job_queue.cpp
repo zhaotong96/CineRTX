@@ -19,7 +19,6 @@ std::string EncoderJob::formatSummary() const {
         profile.vsr_quality,
         profile.fps_mode);
 }
-
 std::string EncoderJob::toJson() const {
     std::ostringstream oss;
     oss << "{"
@@ -36,19 +35,16 @@ std::string EncoderJob::toJson() const {
         << "}";
     return oss.str();
 }
-
 EncoderJobQueue::EncoderJobQueue(RunnerFunc custom_runner)
     : runner_(custom_runner ? std::move(custom_runner) : RunnerFunc(&runNvidiaRemasterTranscode)) {}
 
 EncoderJobQueue::~EncoderJobQueue() noexcept {
     stopQueue(true);
 }
-
 void EncoderJobQueue::setEventCallback(EventCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     on_event_ = std::move(cb);
 }
-
 void EncoderJobQueue::emit(JobQueueEvent::Kind kind, const EncoderJob& job) {
     EventCallback cb;
     {
@@ -59,7 +55,6 @@ void EncoderJobQueue::emit(JobQueueEvent::Kind kind, const EncoderJob& job) {
         cb(JobQueueEvent{kind, job.job_id, job});
     }
 }
-
 Result<uint64_t> EncoderJobQueue::enqueueJob(
     std::vector<std::filesystem::path> inputs,
     const TranscodeProfile& profile,
@@ -85,7 +80,6 @@ Result<uint64_t> EncoderJobQueue::enqueueJob(
     emit(JobQueueEvent::Kind::JobAdded, created);
     return created.job_id;
 }
-
 Result<void> EncoderJobQueue::updatePendingJob(
     uint64_t job_id,
     const TranscodeProfile& new_profile,
@@ -110,7 +104,6 @@ Result<void> EncoderJobQueue::updatePendingJob(
     emit(JobQueueEvent::Kind::JobUpdated, snapshot);
     return {};
 }
-
 Result<void> EncoderJobQueue::removeJob(uint64_t job_id) {
     EncoderJob removed;
     {
@@ -129,7 +122,6 @@ Result<void> EncoderJobQueue::removeJob(uint64_t job_id) {
     emit(JobQueueEvent::Kind::JobRemoved, removed);
     return {};
 }
-
 Result<void> EncoderJobQueue::moveJob(uint64_t job_id, int delta) {
     if (delta == 0) return {};
     EncoderJob snapshot;
@@ -152,7 +144,6 @@ Result<void> EncoderJobQueue::moveJob(uint64_t job_id, int delta) {
     emit(JobQueueEvent::Kind::JobReordered, snapshot);
     return {};
 }
-
 void EncoderJobQueue::clearNonRunningJobs(bool completed_only) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::erase_if(jobs_, [completed_only](const EncoderJob& j) {
@@ -160,7 +151,6 @@ void EncoderJobQueue::clearNonRunningJobs(bool completed_only) {
         return completed_only ? (j.status == JobStatus::Completed) : true;
     });
 }
-
 Result<void> EncoderJobQueue::retryJob(uint64_t job_id) {
     EncoderJob snapshot;
     {
@@ -182,7 +172,6 @@ Result<void> EncoderJobQueue::retryJob(uint64_t job_id) {
     emit(JobQueueEvent::Kind::JobUpdated, snapshot);
     return {};
 }
-
 void EncoderJobQueue::startWorker() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (worker_active_.load()) return;
@@ -192,11 +181,9 @@ void EncoderJobQueue::startWorker() {
     if (worker_thread_.joinable()) worker_thread_.join();
     worker_thread_ = std::thread([this]() { workerLoop(); });
 }
-
 void EncoderJobQueue::skipCurrentJob() {
     skip_current_requested_.store(true);
 }
-
 void EncoderJobQueue::stopQueue(bool wait_for_idle) {
     stop_all_requested_.store(true);
     skip_current_requested_.store(true);
@@ -205,16 +192,13 @@ void EncoderJobQueue::stopQueue(bool wait_for_idle) {
         worker_thread_.join();
     }
 }
-
 bool EncoderJobQueue::isWorkerRunning() const noexcept {
     return worker_active_.load();
 }
-
 std::vector<EncoderJob> EncoderJobQueue::snapshotJobs() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return {jobs_.begin(), jobs_.end()};
 }
-
 std::optional<EncoderJob> EncoderJobQueue::findJob(uint64_t job_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = std::find_if(jobs_.begin(), jobs_.end(),
@@ -222,7 +206,6 @@ std::optional<EncoderJob> EncoderJobQueue::findJob(uint64_t job_id) const {
     if (it == jobs_.end()) return std::nullopt;
     return *it;
 }
-
 void EncoderJobQueue::workerLoop() {
     for (;;) {
         uint64_t active_id = 0;
@@ -244,7 +227,6 @@ void EncoderJobQueue::workerLoop() {
             active_id = it->job_id;
             job_copy = *it;
         }
-
         skip_current_requested_.store(false);
         emit(JobQueueEvent::Kind::JobStarted, job_copy);
 
@@ -265,7 +247,6 @@ void EncoderJobQueue::workerLoop() {
                 prof.output = rtx::str::pathToUtf8(job_copy.explicit_output);
                 prof.auto_output = false;
             } else if (job_copy.inputs.size() == 1 && !prof.output.empty() && !prof.auto_output) {
-                // Keep explicit single-file output from profile
             } else {
                 prof.output.clear();
                 prof.auto_output = true;
@@ -284,6 +265,7 @@ void EncoderJobQueue::workerLoop() {
                 if (std::chrono::duration<double>(now - last_prog_emit).count() < 0.10 &&
                     (p.total_frames == 0 || p.frames_encoded < p.total_frames)) {
                     return;
+// Keep explicit single-file output from profile
                 }
                 last_prog_emit = now;
                 const double file_pct = (p.total_frames > 0)
@@ -334,7 +316,6 @@ void EncoderJobQueue::workerLoop() {
             }
             emit(JobQueueEvent::Kind::JobProgress, prog_snap);
         }
-
         EncoderJob fin_snap;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -367,5 +348,4 @@ void EncoderJobQueue::workerLoop() {
         }
     }
 }
-
 } // namespace rtx

@@ -9,7 +9,6 @@
 // Headless Direct3D 12 device creation, timeline fence sharing, and CUDA external memory interop.
 // Enables zero-copy texture exchange between Direct3D 12 (NGX VSR/TrueHDR) and CUDA.
 // Requires driver-level external resource sharing across compatible adapters.
-
 #include "ffnvcodec/dynlink_cuda.h"
 
 #ifndef NOMINMAX
@@ -23,14 +22,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <tuple>
 #include <vector>
 
 namespace rtx_ngx {
 namespace {
 
+bool traceEnabled() { return false; }
 // Opt-in bring-up trace (RTX_BRIDGE_TRACE=1).  D3D12/CUDA interop failures are
 // otherwise indistinguishable from a silent crash on a new driver.
-bool traceEnabled() { return false; }
 
 void trace(const char* step, const std::string& detail = std::string()) {
     if (!traceEnabled()) {
@@ -40,11 +41,10 @@ void trace(const char* step, const std::string& detail = std::string()) {
                  detail.c_str());
     std::fflush(stderr);
 }
-
-// COM interface ids.  Declared locally so the bridge never links a Direct3D
-// import library (the audit requires a zero static Direct3D import too).
 const GUID kIidFactory4 = {0x1bc6ea02, 0xef36, 0x464f, {0xbf, 0x0c, 0x21, 0xca, 0x39, 0xe5, 0x16, 0x8a}};
 const GUID kIidDevice = {0x189819f1, 0x1db6, 0x4b57, {0xbe, 0x54, 0x18, 0x21, 0x33, 0x9b, 0x85, 0xf7}};
+// COM interface ids.  Declared locally so the bridge never links a Direct3D
+// import library (the audit requires a zero static Direct3D import too).
 const GUID kIidCommandQueue = {0x0ec870a6, 0x5d7e, 0x4c22, {0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed}};
 const GUID kIidResource = {0x696442be, 0xa72e, 0x4059, {0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad}};
 const GUID kIidCommandAllocator = {0x6102dee4, 0xaf59, 0x4b09, {0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24}};
@@ -53,6 +53,10 @@ const GUID kIidFence = {0x0a753dcf, 0xc4d8, 0x4b91, {0xad, 0xf6, 0xbe, 0x5a, 0x6
 
 constexpr unsigned kExternalMemoryDedicated = 0x1;
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CUDA_MEMCPY3D {
     unsigned int srcXInBytes, srcY, srcZ, srcLOD;
     CUmemorytype srcMemoryType;
@@ -74,6 +78,10 @@ using PFN_cuSurfObjectDestroy = CUresult (*)(CUsurfObject);
 template <typename T>
 T* as(void* pointer) { return static_cast<T*>(pointer); }
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct D3D12Api {
     HRESULT(WINAPI* create_device)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**) = nullptr;
     HRESULT(WINAPI* create_factory)(REFIID, void**) = nullptr;
@@ -110,6 +118,10 @@ struct D3D12Api {
     }
 };
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CudaApi {
     CUresult (*init)(unsigned int) = nullptr;
     CUresult (*device_get)(CUdevice*, int) = nullptr;
@@ -119,7 +131,10 @@ struct CudaApi {
     CUresult (*primary_ctx_set_flags)(CUdevice, unsigned int) = nullptr;
     CUresult (*import_external_memory)(CUexternalMemory*, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC*) = nullptr;
     CUresult (*get_mapped_mipmapped_array)(CUmipmappedArray*, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC*) = nullptr;
+    CUresult (*get_mapped_buffer)(CUdeviceptr*, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_BUFFER_DESC*) = nullptr;
     CUresult (*mipmapped_array_get_level)(CUarray*, CUmipmappedArray, unsigned int) = nullptr;
+// Phase 11.2 (C-02): maps a shared D3D12 BUFFER into a linear CUdeviceptr.
+// Signature aligned with nv_func_tables.h.
     PFN_cuSurfObjectCreate surf_object_create = nullptr;
     PFN_cuSurfObjectDestroy surf_object_destroy = nullptr;
     CUresult (*destroy_external_memory)(CUexternalMemory) = nullptr;
@@ -168,6 +183,7 @@ struct CudaApi {
         LOAD_CUDA_SYM(primary_ctx_set_flags, "cuDevicePrimaryCtxSetFlags");
         LOAD_CUDA_SYM(import_external_memory, "cuImportExternalMemory");
         LOAD_CUDA_SYM(get_mapped_mipmapped_array, "cuExternalMemoryGetMappedMipmappedArray");
+        LOAD_CUDA_SYM(get_mapped_buffer, "cuExternalMemoryGetMappedBuffer");
         LOAD_CUDA_SYM(mipmapped_array_get_level, "cuMipmappedArrayGetLevel");
         LOAD_CUDA_SYM(surf_object_create, "cuSurfObjectCreate");
         LOAD_CUDA_SYM(surf_object_destroy, "cuSurfObjectDestroy");
@@ -224,7 +240,6 @@ const char* cudaErrorName(CUresult result) {
     if (cuda.get_error_name && cuda.get_error_name(result, &name) == CUDA_SUCCESS) return name;
     return name;
 }
-
 bool ensureCudaContext(std::string* error) {
     CudaApi& cuda = cudaApi();
     if (!cuda.init && !cuda.load(error)) return false;
@@ -255,42 +270,47 @@ bool ensureCudaContext(std::string* error) {
     cuda.ctx_set_current(primary);
     return true;
 }
+using FormatEntry = std::tuple<int32_t, DXGI_FORMAT, CUarray_format, unsigned int, uint32_t>;
 
-struct FormatMapping {
-    int32_t format;
-    DXGI_FORMAT dxgi;
-    CUarray_format cuda;
-    unsigned int channels;
-    uint32_t bytes;
-};
+constexpr std::array<FormatEntry, 3> kFormats{{
+    {RTX_PIXEL_RGBA16F, DXGI_FORMAT_R16G16B16A16_FLOAT, CU_AD_FORMAT_HALF, 4u, 8u},
+    {RTX_PIXEL_R10G10B10A2, DXGI_FORMAT_R10G10B10A2_UNORM, CU_AD_FORMAT_UNSIGNED_INT32, 1u, 4u},
+    {RTX_PIXEL_RGB32, DXGI_FORMAT_R8G8B8A8_UNORM, CU_AD_FORMAT_UNSIGNED_INT8, 4u, 4u},
+}};
 
-constexpr FormatMapping kFormats[] = {
-    {RTX_PIXEL_RGBA16F, DXGI_FORMAT_R16G16B16A16_FLOAT, CU_AD_FORMAT_HALF, 4, 8},
-    {RTX_PIXEL_R10G10B10A2, DXGI_FORMAT_R10G10B10A2_UNORM, CU_AD_FORMAT_UNSIGNED_INT32, 1, 4},
-    {RTX_PIXEL_RGB32, DXGI_FORMAT_R8G8B8A8_UNORM, CU_AD_FORMAT_UNSIGNED_INT8, 4, 4},
-};
-
-const FormatMapping* formatMapping(int32_t format) {
-    for (const FormatMapping& m : kFormats) if (m.format == format) return &m;
+const FormatEntry* formatMapping(int32_t format) noexcept {
+    for (const auto& entry : kFormats) {
+        const auto& [fmt, dxgi, cuda_fmt, channels, bytes] = entry;
+        (void)dxgi; (void)cuda_fmt; (void)channels; (void)bytes;
+        if (fmt == format) return &entry;
+    }
     return nullptr;
 }
-
-DXGI_FORMAT toDxgi(int32_t format) {
-    const FormatMapping* m = formatMapping(format);
-    return m ? m->dxgi : DXGI_FORMAT_UNKNOWN;
+DXGI_FORMAT toDxgi(int32_t format) noexcept {
+    if (const FormatEntry* m = formatMapping(format)) {
+        const auto& [fmt, dxgi, cuda_fmt, channels, bytes] = *m;
+        (void)fmt; (void)cuda_fmt; (void)channels; (void)bytes;
+        return dxgi;
+    }
+    return DXGI_FORMAT_UNKNOWN;
 }
-
-CUarray_format toCudaFormat(int32_t format) {
-    const FormatMapping* m = formatMapping(format);
-    return m ? m->cuda : CU_AD_FORMAT_UNSIGNED_INT8;
+CUarray_format toCudaFormat(int32_t format) noexcept {
+    if (const FormatEntry* m = formatMapping(format)) {
+        const auto& [fmt, dxgi, cuda_fmt, channels, bytes] = *m;
+        (void)fmt; (void)dxgi; (void)channels; (void)bytes;
+        return cuda_fmt;
+    }
+    return CU_AD_FORMAT_UNSIGNED_INT8;
 }
-
-int channelsOf(int32_t format) {
-    const FormatMapping* m = formatMapping(format);
-    return m ? static_cast<int>(m->channels) : 0;
+int channelsOf(int32_t format) noexcept {
+    if (const FormatEntry* m = formatMapping(format)) {
+        const auto& [fmt, dxgi, cuda_fmt, channels, bytes] = *m;
+        (void)fmt; (void)dxgi; (void)cuda_fmt; (void)bytes;
+        return static_cast<int>(channels);
+    }
+    return 0;
 }
-
-uint32_t channelBytes(CUarray_format format) {
+uint32_t channelBytes(CUarray_format format) noexcept {
     switch (format) {
         case CU_AD_FORMAT_HALF: return 2;
         case CU_AD_FORMAT_UNSIGNED_INT32: return 4;
@@ -298,12 +318,14 @@ uint32_t channelBytes(CUarray_format format) {
         default: return 0;
     }
 }
-
-uint32_t bytesPerPixel(int32_t format) {
-    const FormatMapping* m = formatMapping(format);
-    return m ? m->bytes : 0;
+uint32_t bytesPerPixel(int32_t format) noexcept {
+    if (const FormatEntry* m = formatMapping(format)) {
+        const auto& [fmt, dxgi, cuda_fmt, channels, bytes] = *m;
+        (void)fmt; (void)dxgi; (void)cuda_fmt; (void)channels;
+        return bytes;
+    }
+    return 0;
 }
-
 bool waitForFence(ID3D12Fence* fence, uint64_t value) {
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!event) return false;
@@ -312,7 +334,6 @@ bool waitForFence(ID3D12Fence* fence, uint64_t value) {
     CloseHandle(event);
     return ok;
 }
-
 }  // namespace
 
 D3D12Interop::~D3D12Interop() { release(); }
@@ -323,10 +344,6 @@ bool D3D12Interop::create(const RtxNgxBridgeConfig& config, std::string* error) 
         trace("create: api load failed", *error);
         return false;
     }
-    // Order matters: create the D3D12 device first, then bind the CUDA primary
-    // context, then import.  Creating the device can detach the thread's CUDA
-    // context; importing under an implicit context makes later copies fail with
-    // CUDA_ERROR_INVALID_CONTEXT.
     if (!create_device(config.luid, error)) {
         trace("create: device failed", *error);
         return false;
@@ -338,15 +355,16 @@ bool D3D12Interop::create(const RtxNgxBridgeConfig& config, std::string* error) 
     }
     if (cudaApi().ctx_get_current != nullptr) {
         (void)cudaApi().ctx_get_current(reinterpret_cast<CUcontext*>(&cuda_context_));
+// Order matters: create the D3D12 device first, then bind the CUDA primary
+// context, then import.  Creating the device can detach the thread's CUDA
+// context; importing under an implicit context makes later copies fail with
+// CUDA_ERROR_INVALID_CONTEXT.
     }
     if (cuda_context_ == nullptr) {
         *error = "the CUDA primary context is not current after D3D12 creation";
         return false;
     }
     trace("create: cuda context bound");
-    // Anti-TDR mechanism 3: want the pack stage on the driver's highest
-    // priority stream so it cannot be starved by opportunistic copies.  A
-    // driver without the priority API only loses the ordering hint.
     std::string stream_error;
     if (!create_pack_stream(&stream_error)) {
         trace("create: high-priority pack stream unavailable", stream_error);
@@ -358,6 +376,9 @@ bool D3D12Interop::create(const RtxNgxBridgeConfig& config, std::string* error) 
                         &input_, error)) {
         trace("create: input texture failed", *error);
         return false;
+// Anti-TDR mechanism 3: want the pack stage on the driver's highest
+// priority stream so it cannot be starved by opportunistic copies.  A
+// driver without the priority API only loses the ordering hint.
     }
     trace("create: input texture ready");
     if (!create_texture(static_cast<uint32_t>(config.output_width),
@@ -367,11 +388,6 @@ bool D3D12Interop::create(const RtxNgxBridgeConfig& config, std::string* error) 
         return false;
     }
     trace("create: output texture ready");
-    // Expert directive B-2.1: VSR writes a 4K SDR result that TrueHDR then
-    // reads; the two features cannot work in place on textures of different
-    // geometry, so an internal 4K SDR intermediate texture is required
-    // whenever the configuration upscales.  It is pure D3D12 (no shared
-    // handle, no CUDA import, ~32 MB at 4K).
     if (static_cast<uint32_t>(config.output_width) > static_cast<uint32_t>(config.input_width) ||
         static_cast<uint32_t>(config.output_height) >
             static_cast<uint32_t>(config.input_height)) {
@@ -382,12 +398,12 @@ bool D3D12Interop::create(const RtxNgxBridgeConfig& config, std::string* error) 
         }
         trace("create: mid 4K texture ready");
     }
-    // Import the shared fence into CUDA as an external semaphore so the W5/W6
-    // main loop can hand work between the CUDA streams and the D3D12 queue
-    // without a CPU wait (expert hardening item 2).  A driver without the
-    // external-semaphore API degrades to the CPU-wait fallback, so failure
-    // here is recorded but not fatal.
     std::string semaphore_error;
+// Expert directive B-2.1: VSR writes a 4K SDR result that TrueHDR then
+// reads; the two features cannot work in place on textures of different
+// geometry, so an internal 4K SDR intermediate texture is required
+// whenever the configuration upscales.  It is pure D3D12 (no shared
+// handle, no CUDA import, ~32 MB at 4K).
     if (!import_fence_semaphore(&semaphore_error)) {
         trace("create: external semaphore unavailable", semaphore_error);
     } else {
@@ -398,10 +414,14 @@ bool D3D12Interop::create(const RtxNgxBridgeConfig& config, std::string* error) 
                    "; pack stream priority " +
                    (pack_stream_ != nullptr
                         ? (pack_stream_high_priority_ ? "high" : "default")
+// Import the shared fence into CUDA as an external semaphore so the W5/W6
+// main loop can hand work between the CUDA streams and the D3D12 queue
+// without a CPU wait (expert hardening item 2).  A driver without the
+// external-semaphore API degrades to the CPU-wait fallback, so failure
+// here is recorded but not fatal.
                         : "unavailable");
     return true;
 }
-
 bool D3D12Interop::bind_context(std::string* error) {
     CudaApi& cuda = cudaApi();
     if (cuda_context_ == nullptr || cuda.ctx_set_current == nullptr) {
@@ -415,7 +435,6 @@ bool D3D12Interop::bind_context(std::string* error) {
     }
     return true;
 }
-
 bool D3D12Interop::import_fence_semaphore(std::string* error) {
     CudaApi& cuda = cudaApi();
     if (fence_shared_handle_ == nullptr) {
@@ -445,7 +464,6 @@ bool D3D12Interop::import_fence_semaphore(std::string* error) {
     external_semaphore_ = semaphore;
     return true;
 }
-
 bool D3D12Interop::fence_signal_cuda(void* cuda_stream, uint64_t value, std::string* error) {
     CudaApi& cuda = cudaApi();
     if (external_semaphore_ == nullptr || cuda.signal_external_semaphores_async == nullptr) {
@@ -467,7 +485,6 @@ bool D3D12Interop::fence_signal_cuda(void* cuda_stream, uint64_t value, std::str
     }
     return true;
 }
-
 bool D3D12Interop::fence_wait_cuda(void* cuda_stream, uint64_t value, std::string* error) {
     CudaApi& cuda = cudaApi();
     if (external_semaphore_ == nullptr || cuda.wait_external_semaphores_async == nullptr) {
@@ -488,7 +505,6 @@ bool D3D12Interop::fence_wait_cuda(void* cuda_stream, uint64_t value, std::strin
     }
     return true;
 }
-
 bool D3D12Interop::queue_wait_fence(uint64_t value, std::string* error) {
     ID3D12CommandQueue* queue = as<ID3D12CommandQueue>(queue_);
     ID3D12Fence* fence = as<ID3D12Fence>(fence_);
@@ -502,7 +518,6 @@ bool D3D12Interop::queue_wait_fence(uint64_t value, std::string* error) {
     }
     return true;
 }
-
 bool D3D12Interop::queue_signal_fence(uint64_t value, std::string* error) {
     ID3D12CommandQueue* queue = as<ID3D12CommandQueue>(queue_);
     ID3D12Fence* fence = as<ID3D12Fence>(fence_);
@@ -514,9 +529,6 @@ bool D3D12Interop::queue_signal_fence(uint64_t value, std::string* error) {
         *error = "ID3D12CommandQueue::Signal on the shared fence failed";
         return false;
     }
-    // Anti-TDR mechanism 2 bookkeeping: retain the values of submissions the
-    // queue has not retired yet.  Values at or below the completed watermark
-    // are pruned, keeping the list bounded by the live queue depth.
     const uint64_t completed = fence->GetCompletedValue();
     auto stale = queue_pending_values_.begin();
     while (stale != queue_pending_values_.end() && *stale <= completed) {
@@ -527,7 +539,6 @@ bool D3D12Interop::queue_signal_fence(uint64_t value, std::string* error) {
     queue_submitted_value_ = value;
     return true;
 }
-
 size_t D3D12Interop::queue_depth() const {
     const uint64_t completed = queue_completed_value();
     size_t depth = 0;
@@ -535,10 +546,12 @@ size_t D3D12Interop::queue_depth() const {
         if (value > completed) {
             ++depth;
         }
+// Anti-TDR mechanism 2 bookkeeping: retain the values of submissions the
+// queue has not retired yet.  Values at or below the completed watermark
+// are pruned, keeping the list bounded by the live queue depth.
     }
     return depth;
 }
-
 bool D3D12Interop::wait_for_queue_depth(size_t max_depth, std::chrono::milliseconds timeout,
                                         std::string* error) {
     ID3D12Fence* fence = as<ID3D12Fence>(fence_);
@@ -551,8 +564,6 @@ bool D3D12Interop::wait_for_queue_depth(size_t max_depth, std::chrono::milliseco
         if (queue_depth() <= max_depth) {
             return true;
         }
-        // Wait on the oldest outstanding submission only: once it retires the
-        // depth strictly decreases, so the loop cannot spin on a busy fence.
         const uint64_t completed = fence->GetCompletedValue();
         uint64_t oldest = 0;
         bool found = false;
@@ -572,6 +583,8 @@ bool D3D12Interop::wait_for_queue_depth(size_t max_depth, std::chrono::milliseco
         }
         if (FAILED(fence->SetEventOnCompletion(oldest, event))) {
             CloseHandle(event);
+// Wait on the oldest outstanding submission only: once it retires the
+// depth strictly decreases, so the loop cannot spin on a busy fence.
             *error = "cannot arm the fence event for the queue-depth wait";
             return false;
         }
@@ -592,7 +605,6 @@ bool D3D12Interop::wait_for_queue_depth(size_t max_depth, std::chrono::milliseco
         }
     }
 }
-
 bool D3D12Interop::wait_for_fence_value(uint64_t value, std::chrono::milliseconds timeout,
                                         std::string* error) {
     ID3D12Fence* fence = as<ID3D12Fence>(fence_);
@@ -632,7 +644,6 @@ bool D3D12Interop::wait_for_fence_value(uint64_t value, std::chrono::millisecond
     }
     return true;
 }
-
 bool D3D12Interop::pollDeviceLost(std::string* error) {
     ID3D12Device* device = as<ID3D12Device>(device_);
     if (device == nullptr) {
@@ -651,7 +662,6 @@ bool D3D12Interop::pollDeviceLost(std::string* error) {
     }
     return true;
 }
-
 bool D3D12Interop::create_pack_stream(std::string* error) {
     CudaApi& cuda = cudaApi();
     if (pack_stream_ != nullptr) {
@@ -673,7 +683,6 @@ bool D3D12Interop::create_pack_stream(std::string* error) {
         return false;
     }
     CUstream stream = nullptr;
-    // CUDA numbers the highest priority with the smallest value.
     const CUresult created =
         cuda.stream_create_with_priority(&stream, CU_STREAM_NON_BLOCKING, greatest);
     if (created != CUDA_SUCCESS || stream == nullptr) {
@@ -685,7 +694,6 @@ bool D3D12Interop::create_pack_stream(std::string* error) {
     pack_stream_high_priority_ = greatest < least;
     return true;
 }
-
 bool D3D12Interop::clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t width,
                                     uint32_t height, std::string* error) {
     if (device_ptr == 0) return true;
@@ -697,12 +705,12 @@ bool D3D12Interop::clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t 
         cuda.memset_d2d16(static_cast<CUdeviceptr>(device_ptr + pitch * height), pitch, uv_neutral, width, height / 2);
     } else if (cuda.memset_d16 != nullptr) {
         for (size_t r = 0; r < height; ++r) cuda.memset_d16(static_cast<CUdeviceptr>(device_ptr + r * pitch), y_black, width);
+// CUDA numbers the highest priority with the smallest value.
         const uint64_t uv_base = device_ptr + pitch * height;
         for (size_t r = 0; r < height / 2; ++r) cuda.memset_d16(static_cast<CUdeviceptr>(uv_base + r * pitch), uv_neutral, width);
     }
     return true;
 }
-
 bool D3D12Interop::alloc_pitched(uint64_t* device_ptr, size_t* pitch, size_t width_bytes, size_t rows, std::string* error) {
     if (!device_ptr || !pitch) return false;
     CudaApi& cuda = cudaApi();
@@ -713,7 +721,6 @@ bool D3D12Interop::alloc_pitched(uint64_t* device_ptr, size_t* pitch, size_t wid
     *device_ptr = static_cast<uint64_t>(p); *pitch = r;
     return true;
 }
-
 bool D3D12Interop::free_device(uint64_t device_ptr, std::string* error) {
     if (!device_ptr) return true;
     CudaApi& cuda = cudaApi();
@@ -722,7 +729,6 @@ bool D3D12Interop::free_device(uint64_t device_ptr, std::string* error) {
     if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
-
 bool D3D12Interop::memset_d32_async(uint64_t device_ptr, unsigned int value, size_t count, void* stream, std::string* error) {
     if (!device_ptr || count == 0) return false;
     CudaApi& cuda = cudaApi();
@@ -731,7 +737,6 @@ bool D3D12Interop::memset_d32_async(uint64_t device_ptr, unsigned int value, siz
     if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
-
 bool D3D12Interop::memcpy_dtoh(void* dst, uint64_t src, size_t bytes, std::string* error) {
     if (!dst || !src || bytes == 0) return false;
     CudaApi& cuda = cudaApi();
@@ -749,7 +754,6 @@ bool D3D12Interop::memcpy_dtoh(void* dst, uint64_t src, size_t bytes, std::strin
     if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
-
 bool D3D12Interop::memcpy_htod(uint64_t dst, const void* src, size_t bytes, std::string* error) {
     if (!dst || !src || bytes == 0) return false;
     CudaApi& cuda = cudaApi();
@@ -767,7 +771,6 @@ bool D3D12Interop::memcpy_htod(uint64_t dst, const void* src, size_t bytes, std:
     if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
-
 bool D3D12Interop::create_lut_texture(const uint16_t* lut_half4_data, int32_t grid_size,
                                       void** texture_object, void** array_out,
                                       std::string* error) {
@@ -800,9 +803,6 @@ bool D3D12Interop::create_lut_texture(const uint16_t* lut_half4_data, int32_t gr
         *error = std::string("cuArray3DCreate failed: ") + cudaErrorName(created);
         return false;
     }
-    // Upload the whole N^3 table with one cuMemcpy3D call (the dynlink header
-    // predates the 3D entry point, so the struct and symbol are declared
-    // locally against the stable driver ABI).
     CUDA_MEMCPY3D copy{};
     copy.srcMemoryType = CU_MEMORYTYPE_HOST;
     copy.srcHost = lut_half4_data;
@@ -825,8 +825,6 @@ bool D3D12Interop::create_lut_texture(const uint16_t* lut_half4_data, int32_t gr
     texture_desc.addressMode[1] = CU_TR_ADDRESS_MODE_CLAMP;
     texture_desc.addressMode[2] = CU_TR_ADDRESS_MODE_CLAMP;
     texture_desc.filterMode = CU_TR_FILTER_MODE_LINEAR;
-    // The dynlink header only declares CU_TRSF_READ_AS_INTEGER (1); the
-    // normalized-coordinate flag is 2 in the stable driver ABI.
     texture_desc.flags = 2u /* CU_TRSF_NORMALIZED_COORDINATES */;
     CUtexObject tex_object = 0;
     const CUresult tex_created =
@@ -834,13 +832,15 @@ bool D3D12Interop::create_lut_texture(const uint16_t* lut_half4_data, int32_t gr
     if (tex_created != CUDA_SUCCESS || tex_object == 0) {
         *error = std::string("cuTexObjectCreate failed: ") + cudaErrorName(tex_created);
         (void)cuda.array_destroy(array);
+// Upload the whole N^3 table with one cuMemcpy3D call (the dynlink header
+// predates the 3D entry point, so the struct and symbol are declared
+// locally against the stable driver ABI).
         return false;
     }
     *texture_object = reinterpret_cast<void*>(static_cast<uintptr_t>(tex_object));
     *array_out = array;
     return true;
 }
-
 void D3D12Interop::destroy_lut_texture(void** texture_object, void** array) noexcept {
     CudaApi& cuda = cudaApi();
     if (texture_object && *texture_object) {
@@ -852,25 +852,24 @@ void D3D12Interop::destroy_lut_texture(void** texture_object, void** array) noex
         *array = nullptr;
     }
 }
-
 bool D3D12Interop::event_create(void** event, std::string* error) {
     if (!event) return false;
     *event = nullptr;
     CudaApi& cuda = cudaApi();
     if (!cuda.event_create || !bind_context(error)) return false;
+// The dynlink header only declares CU_TRSF_READ_AS_INTEGER (1); the
+// normalized-coordinate flag is 2 in the stable driver ABI.
     CUevent handle = nullptr;
     CUresult res = cuda.event_create(&handle, 0);
     if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     *event = handle;
     return true;
 }
-
 void D3D12Interop::event_destroy(void* event) noexcept {
     if (!event) return;
     CudaApi& cuda = cudaApi();
     if (cuda.event_destroy) cuda.event_destroy(static_cast<CUevent>(event));
 }
-
 bool D3D12Interop::event_record(void* event, void* stream, std::string* error) {
     if (!event) return false;
     CudaApi& cuda = cudaApi();
@@ -879,7 +878,6 @@ bool D3D12Interop::event_record(void* event, void* stream, std::string* error) {
     if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
-
 bool D3D12Interop::event_elapsed(double* ms, void* start, void* end, std::string* error) {
     if (!ms || !start || !end) return false;
     *ms = 0.0;
@@ -891,7 +889,6 @@ bool D3D12Interop::event_elapsed(double* ms, void* start, void* end, std::string
     *ms = static_cast<double>(val);
     return true;
 }
-
 bool D3D12Interop::stream_synchronize(void* stream, std::string* error) {
     CudaApi& cuda = cudaApi();
     if (!cuda.stream_synchronize || !bind_context(error)) return false;
@@ -899,17 +896,11 @@ bool D3D12Interop::stream_synchronize(void* stream, std::string* error) {
     if (res != CUDA_SUCCESS) { if (error) *error = cudaErrorName(res); return false; }
     return true;
 }
-
 uint64_t D3D12Interop::queue_completed_value() const {
     ID3D12Fence* fence = as<ID3D12Fence>(fence_);
     return fence != nullptr ? fence->GetCompletedValue() : 0;
 }
-
 bool D3D12Interop::create_device(const uint8_t luid[8], std::string* error) {
-    // Anti-TDR mechanism 4 status was latched by D3D12Api::load(): a GPU hang
-    // resurfaces as DXGI_ERROR_DEVICE_REMOVED (mapped to RTX_ERR_DEVICE_LOST)
-    // instead of terminating the encoder.  Absent on Windows before 10 1803 or
-    // when CUDA was initialised first, where DXGI reports INVALID_CALL.
     adapter_removal_declared_ = d3d12Api().removal_declared;
     if (adapter_removal_declared_) {
         trace("create: adapter removal declared");
@@ -944,12 +935,13 @@ bool D3D12Interop::create_device(const uint8_t luid[8], std::string* error) {
         *error = "no DXGI adapter matches the CUDA device LUID";
         return false;
     }
-    // 12_1 first (the spec target); older parts and drivers only expose 12_0
-    // (Maxwell/Pascal) or 11_0.  Trying them in order keeps the interop layer
-    // usable on the development host instead of failing at device creation.
     ID3D12Device* device = nullptr;
     for (D3D_FEATURE_LEVEL level : {D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0,
                                     D3D_FEATURE_LEVEL_11_0}) {
+// Anti-TDR mechanism 4 status was latched by D3D12Api::load(): a GPU hang
+// resurfaces as DXGI_ERROR_DEVICE_REMOVED (mapped to RTX_ERR_DEVICE_LOST)
+// instead of terminating the encoder.  Absent on Windows before 10 1803 or
+// when CUDA was initialised first, where DXGI reports INVALID_CALL.
         hr = d3d12Api().create_device(matched, level, kIidDevice,
                                       reinterpret_cast<void**>(&device));
         if (SUCCEEDED(hr) && device != nullptr) {
@@ -982,11 +974,11 @@ bool D3D12Interop::create_device(const uint8_t luid[8], std::string* error) {
         *error = "CreateFence failed";
         return false;
     }
-    // Export the fence as a shared Win32 handle so CUDA can import it as an
-    // external semaphore (expert hardening item 2).  The handle is an NT
-    // handle owned by this object; it stays valid for the fence lifetime.
     HANDLE fence_handle = nullptr;
     if (FAILED(device->CreateSharedHandle(fence, nullptr, GENERIC_ALL, nullptr,
+// 12_1 first (the spec target); older parts and drivers only expose 12_0
+// (Maxwell/Pascal) or 11_0.  Trying them in order keeps the interop layer
+// usable on the development host instead of failing at device creation.
                                           &fence_handle))) {
         fence->Release();
         queue->Release();
@@ -1001,7 +993,6 @@ bool D3D12Interop::create_device(const uint8_t luid[8], std::string* error) {
     fence_value_ = 0;
     return true;
 }
-
 bool D3D12Interop::create_texture(uint32_t width, uint32_t height, int32_t format,
                                   InteropTexture* texture, std::string* error) {
     const DXGI_FORMAT dxgi = toDxgi(format);
@@ -1023,6 +1014,9 @@ bool D3D12Interop::create_texture(uint32_t width, uint32_t height, int32_t forma
 
     D3D12_HEAP_PROPERTIES heap{};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+// Export the fence as a shared Win32 handle so CUDA can import it as an
+// external semaphore (expert hardening item 2).  The handle is an NT
+// handle owned by this object; it stays valid for the fence lifetime.
     heap.CreationNodeMask = 1;
     heap.VisibleNodeMask = 1;
 
@@ -1052,20 +1046,145 @@ bool D3D12Interop::create_texture(uint32_t width, uint32_t height, int32_t forma
     }
     return true;
 }
+bool D3D12Interop::create_shared_buffer_ring(uint32_t slot_count, uint32_t width,
+                                             uint32_t height, uint32_t bytes_per_pixel,
+                                             std::string* error) {
+    if (slot_count == 0 || width == 0 || height == 0 || bytes_per_pixel == 0) {
+        if (error) *error = "create_shared_buffer_ring: invalid geometry";
+        return false;
+    }
+    if (!preview_ring_.empty() && preview_ring_row_bytes_ == width * bytes_per_pixel) {
+        return true;  // already sized for this geometry
+    }
+    release_shared_buffer_ring();
+    CudaApi& cuda = cudaApi();
+    if (!bind_context(error)) {
+        return false;
+    }
+    if (cuda.get_mapped_buffer == nullptr) {
+        if (error) *error = "CUDA driver lacks cuExternalMemoryGetMappedBuffer";
+        return false;
+    }
+    ID3D12Device* device = as<ID3D12Device>(device_);
+    const uint32_t row_bytes = width * bytes_per_pixel;
+    const unsigned long long total_bytes =
+        static_cast<unsigned long long>(row_bytes) * static_cast<unsigned long long>(height);
 
-bool D3D12Interop::create_mid_texture(uint32_t width, uint32_t height, std::string* error) {
-    // 4K SDR intermediate surface for the VSR -> TrueHDR chain (expert B-2.1):
-    // committed, default heap, UAV-capable, deliberately NOT shared and NOT
-    // imported into CUDA -- only the D3D12 command queue touches it.
+    preview_ring_.resize(slot_count);
+    for (uint32_t i = 0; i < slot_count; ++i) {
+        SharedBufferSlot& slot = preview_ring_[i];
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = total_bytes;
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_UNKNOWN;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        heap.CreationNodeMask = 1;
+        heap.VisibleNodeMask = 1;
+
+        ID3D12Resource* resource = nullptr;
+        HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+                                                     D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                     kIidResource,
+                                                     reinterpret_cast<void**>(&resource));
+        if (FAILED(hr) || resource == nullptr) {
+            if (error) *error = "CreateCommittedResource(SHARED preview buffer) failed";
+            release_shared_buffer_ring();
+            return false;
+        }
+        slot.resource = resource;
+        HANDLE handle = nullptr;
+        if (FAILED(device->CreateSharedHandle(resource, nullptr, GENERIC_ALL, nullptr, &handle))) {
+            if (error) *error = "CreateSharedHandle for the preview buffer failed";
+            release_shared_buffer_ring();
+            return false;
+        }
+        slot.shared_handle = handle;
+        slot.external_memory = nullptr;
+        slot.device_ptr = 0;
+
+        const unsigned long long allocation =
+            device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+        CUDA_EXTERNAL_MEMORY_HANDLE_DESC handle_desc{};
+        handle_desc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE;
+        handle_desc.handle.win32.handle = handle;
+        handle_desc.size = allocation;
+        handle_desc.flags = kExternalMemoryDedicated;
+
+        CUexternalMemory external = nullptr;
+        CUresult result = cuda.import_external_memory(&external, &handle_desc);
+        if (result != CUDA_SUCCESS) {
+            if (error) {
+                *error = std::string("cuImportExternalMemory(preview buffer) failed: ") +
+                         cudaErrorName(result);
+            }
+            release_shared_buffer_ring();
+            return false;
+        }
+        slot.external_memory = external;
+// D3D12_HEAP_FLAG_SHARED + 初始状态 COMMON（C-02）：CUDA 侧以裸设备指针
+// 直写，视口侧经 Buffer<uint> SRV 隐式提升读取，双方零屏障协作。
+
+        CUDA_EXTERNAL_MEMORY_BUFFER_DESC buffer_desc{};
+        buffer_desc.offset = 0;
+        buffer_desc.size = total_bytes;
+        buffer_desc.flags = 0;
+        CUdeviceptr mapped = 0;
+        result = cuda.get_mapped_buffer(&mapped, external, &buffer_desc);
+        if (result != CUDA_SUCCESS || mapped == 0) {
+            if (error) {
+                *error = std::string("cuExternalMemoryGetMappedBuffer failed: ") +
+                         cudaErrorName(result);
+            }
+            release_shared_buffer_ring();
+            return false;
+        }
+        slot.device_ptr = mapped;
+    }
+    preview_ring_row_bytes_ = row_bytes;
+    return true;
+}
+void D3D12Interop::release_shared_buffer_ring() noexcept {
+    if (preview_ring_.empty()) {
+        preview_ring_row_bytes_ = 0;
+        return;
+    }
+    CudaApi& cuda = cudaApi();
+    std::string ignored;
+    (void)bind_context(&ignored);
+    for (SharedBufferSlot& slot : preview_ring_) {
+        if (slot.external_memory && cuda.destroy_external_memory) {
+            (void)cuda.destroy_external_memory(
+                static_cast<CUexternalMemory>(slot.external_memory));
+            slot.external_memory = nullptr;
+        }
+        if (slot.resource) {
+            as<ID3D12Resource>(slot.resource)->Release();
+            slot.resource = nullptr;
+        }
+        if (slot.shared_handle) {
+            CloseHandle(static_cast<HANDLE>(slot.shared_handle));
+            slot.shared_handle = nullptr;
+        }
+        slot.device_ptr = 0;
+    }
+    preview_ring_.clear();
+    preview_ring_row_bytes_ = 0;
+}
+bool D3D12Interop::create_mid_texture(uint32_t width, uint32_t height, std::string* error) {    // 4K SDR intermediate surface for the VSR -> TrueHDR chain (expert B-2.1):
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     desc.Width = width;
     desc.Height = height;
     desc.DepthOrArraySize = 1;
     desc.MipLevels = 1;
-    // The RTX Video SDK reference allocates the VSR -> TrueHDR intermediate as
-    // R8G8B8A8_UNORM; TrueHDR reads that 8-bit SDR texture and produces the
-    // 10-bit/FP16 HDR output.
     desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -1092,24 +1211,26 @@ bool D3D12Interop::create_mid_texture(uint32_t width, uint32_t height, std::stri
     mid_4k_.allocation_size = device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
     return true;
 }
-
 bool D3D12Interop::import_into_cuda(InteropTexture* texture, std::string* error) {
     CudaApi& cuda = cudaApi();
     CUDA_EXTERNAL_MEMORY_HANDLE_DESC handle_desc{};
     handle_desc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE;
     handle_desc.handle.win32.handle = texture->shared_handle;
     handle_desc.size = texture->allocation_size;
-    // Windows 11 5xx/6xx drivers reject the import without DEDICATED.
     handle_desc.flags = kExternalMemoryDedicated;
 
     CUexternalMemory external = nullptr;
+// committed, default heap, UAV-capable, deliberately NOT shared and NOT
+// imported into CUDA -- only the D3D12 command queue touches it.
     CUresult result = cuda.import_external_memory(&external, &handle_desc);
     if (result != CUDA_SUCCESS) {
         *error = std::string("cuImportExternalMemory failed: ") + cudaErrorName(result);
         return false;
     }
-
     CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC mip_desc{};
+// The RTX Video SDK reference allocates the VSR -> TrueHDR intermediate as
+// R8G8B8A8_UNORM; TrueHDR reads that 8-bit SDR texture and produces the
+// 10-bit/FP16 HDR output.
     mip_desc.offset = 0;
     mip_desc.numLevels = 1;
     mip_desc.arrayDesc.Width = texture->width;
@@ -1117,8 +1238,6 @@ bool D3D12Interop::import_into_cuda(InteropTexture* texture, std::string* error)
     mip_desc.arrayDesc.Depth = 0;
     mip_desc.arrayDesc.Format = toCudaFormat(texture->format);
     mip_desc.arrayDesc.NumChannels = static_cast<unsigned int>(channelsOf(texture->format));
-    // Guard the invariant the driver enforces opaquely: the array descriptor
-    // must describe exactly the imported D3D12 allocation, byte for byte.
     if (mip_desc.arrayDesc.NumChannels == 0 ||
         channelBytes(mip_desc.arrayDesc.Format) * mip_desc.arrayDesc.NumChannels !=
             bytesPerPixel(texture->format)) {
@@ -1126,7 +1245,6 @@ bool D3D12Interop::import_into_cuda(InteropTexture* texture, std::string* error)
                  " has no consistent CUDA array descriptor";
         return false;
     }
-
     CUmipmappedArray mip = nullptr;
     result = cuda.get_mapped_mipmapped_array(&mip, external, &mip_desc);
     if (result != CUDA_SUCCESS) {
@@ -1146,6 +1264,7 @@ bool D3D12Interop::import_into_cuda(InteropTexture* texture, std::string* error)
     CUDA_RESOURCE_DESC resource_desc{};
     resource_desc.resType = CU_RESOURCE_TYPE_ARRAY;
     resource_desc.res.array.hArray = array;
+// Windows 11 5xx/6xx drivers reject the import without DEDICATED.
     CUsurfObject surface = 0;
     result = cuda.surf_object_create(&surface, &resource_desc);
     if (result != CUDA_SUCCESS) {
@@ -1160,10 +1279,11 @@ bool D3D12Interop::import_into_cuda(InteropTexture* texture, std::string* error)
     texture->surface = surface;
     return true;
 }
-
 bool D3D12Interop::flush_queue(std::string* error) {
     ID3D12Fence* fence = as<ID3D12Fence>(fence_);
     const uint64_t value = advance_timeline();
+// Guard the invariant the driver enforces opaquely: the array descriptor
+// must describe exactly the imported D3D12 allocation, byte for byte.
     if (!queue_signal_fence(value, error)) {
         return false;
     }
@@ -1173,11 +1293,11 @@ bool D3D12Interop::flush_queue(std::string* error) {
     }
     return true;
 }
-
 void D3D12Interop::release() {
     CudaApi& cuda = cudaApi();
     std::string ignored_error;
     if (cuda_context_ != nullptr) (void)bind_context(&ignored_error);
+    release_shared_buffer_ring();
     if (mid_4k_.resource != nullptr) { as<ID3D12Resource>(mid_4k_.resource)->Release(); mid_4k_.resource = nullptr; }
     for (InteropTexture* texture : {&input_, &output_}) {
         if (texture->surface != 0 && cuda.surf_object_destroy) { cuda.surf_object_destroy(texture->surface); texture->surface = 0; }
@@ -1194,18 +1314,12 @@ void D3D12Interop::release() {
     if (device_) { as<ID3D12Device>(device_)->Release(); device_ = nullptr; }
     cuda_context_ = nullptr;
 }
-
 bool interopPrerequisitesAvailable() {
     std::string error;
     return d3d12Api().load(&error) && cudaApi().load(&error);
 }
-
 std::wstring plugin_directory() {
 #if defined(_WIN32)
-    // Explicit override wins (CI and commercial deployments), but only when it
-    // actually contains a feature DLL.  A stale RTX_NGX_PLUGIN_DIR left over
-    // from an older deployment must not hide the copies sitting beside the
-    // bridge.
     wchar_t override_dir[32768] = {};
     const DWORD override_length =
         GetEnvironmentVariableW(L"RTX_NGX_PLUGIN_DIR", override_dir, 32768);
@@ -1220,10 +1334,6 @@ std::wstring plugin_directory() {
             }
         }
     }
-    // Otherwise the bridge's own directory when the feature DLLs sit beside
-    // it, or <bridge dir>/plugins/nvidia_rtx for a bridge at the app root.  The
-    // module handle comes from the address of a function in this translation
-    // unit, which is the documented way for a DLL to locate itself.
     HMODULE module = nullptr;
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -1239,9 +1349,6 @@ std::wstring plugin_directory() {
     if (slash != std::wstring::npos) {
         path.resize(slash);
     }
-    // Canonical staging, install and <app>/plugins/nvidia_rtx layouts keep the
-    // feature DLLs in the bridge's own directory; only a bridge placed at the
-    // app root uses the nested plugins/nvidia_rtx directory.
     auto present = [&path](const wchar_t* name) {
         const std::wstring candidate = path + L"\\" + name;
         const DWORD attributes = GetFileAttributesW(candidate.c_str());
@@ -1256,12 +1363,15 @@ std::wstring plugin_directory() {
     return std::wstring();
 #endif
 }
-
 void* load_plugin_library(const wchar_t* name) {
 #if defined(_WIN32)
     if (name == nullptr) {
         return nullptr;
     }
+// Explicit override wins (CI and commercial deployments), but only when it
+// actually contains a feature DLL.  A stale RTX_NGX_PLUGIN_DIR left over
+// from an older deployment must not hide the copies sitting beside the
+// bridge.
     const std::wstring path = plugin_directory() + L"\\" + name;
     return LoadLibraryExW(path.c_str(), nullptr,
                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -1270,5 +1380,11 @@ void* load_plugin_library(const wchar_t* name) {
     return nullptr;
 #endif
 }
-
 }  // namespace rtx_ngx
+// Otherwise the bridge's own directory when the feature DLLs sit beside
+// it, or <bridge dir>/plugins/nvidia_rtx for a bridge at the app root.  The
+// module handle comes from the address of a function in this translation
+// unit, which is the documented way for a DLL to locate itself.
+// Canonical staging, install and <app>/plugins/nvidia_rtx layouts keep the
+// feature DLLs in the bridge's own directory; only a bridge placed at the
+// app root uses the nested plugins/nvidia_rtx directory.

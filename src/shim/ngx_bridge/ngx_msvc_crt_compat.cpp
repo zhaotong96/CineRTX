@@ -31,15 +31,12 @@ extern "C" void _Init_thread_header(int* guard) {
         Sleep(0);
     }
 }
-
 extern "C" void _Init_thread_footer(int* guard) {
     InterlockedExchange(reinterpret_cast<volatile LONG*>(guard), 1);
 }
-
 extern "C" void _Init_thread_abort(int* guard) {
     InterlockedExchange(reinterpret_cast<volatile LONG*>(guard), 0);
 }
-
 extern "C" uintptr_t __security_cookie = 0x2B992DDFA232ULL;
 
 extern "C" void __security_check_cookie(uintptr_t value) {
@@ -47,7 +44,6 @@ extern "C" void __security_check_cookie(uintptr_t value) {
         abort();
     }
 }
-
 extern "C" int __GSHandlerCheck(void*, void*, void*, void*) { return 1; }
 
 extern "C" int __GSHandlerCheck_EH(void*, void*, void*, void*) { return 1; }
@@ -61,7 +57,6 @@ extern "C" void* ngx_msvc_operator_new(unsigned long long size) {
     }
     return memory;
 }
-
 extern "C" void ngx_msvc_operator_delete(void* memory) __asm__("??3@YAXPEAX@Z");
 extern "C" void ngx_msvc_operator_delete(void* memory) { std::free(memory); }
 
@@ -73,5 +68,4 @@ extern "C" void ngx_msvc_length_error(const char* message)
 extern "C" void ngx_msvc_length_error(const char* message) {
     throw std::length_error(message);
 }
-
 #endif  // !defined(_MSC_VER)

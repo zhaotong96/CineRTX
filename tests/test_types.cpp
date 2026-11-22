@@ -9,7 +9,9 @@
 
 #include <utility>
 
+#include "rtx/raii_owners.h"
 #include "rtx/geometry.h"
+#include "rtx/json_scanner.h"
 #include "rtx/status.h"
 #include "rtx/types.h"
 
@@ -33,7 +35,6 @@ RTX_TEST(types_format_metadata) {
     RTX_CHECK(isTenBit(PixelFormat::YUV420P10));
     RTX_CHECK(isTenBit(PixelFormat::R10G10B10A2));
 }
-
 RTX_TEST(types_alignment_and_sizes) {
     RTX_CHECK_EQ(alignUp(0, 256), static_cast<size_t>(0));
     RTX_CHECK_EQ(alignUp(1, 256), static_cast<size_t>(256));
@@ -66,7 +67,6 @@ RTX_TEST(types_alignment_and_sizes) {
     RTX_CHECK_EQ(planeByteSize(PixelFormat::NV12, 10, 10, 1, 256), static_cast<size_t>(1280));
     RTX_CHECK_EQ(planeByteSize(PixelFormat::NV12, 10, 10, 2, 256), static_cast<size_t>(0));
 }
-
 RTX_TEST(types_frame_buffer_alignment) {
     FrameBuffer buffer;
     RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(0));
@@ -80,13 +80,12 @@ RTX_TEST(types_frame_buffer_alignment) {
     RTX_CHECK_EQ(buffer.data()[0], static_cast<uint8_t>(0xAB));
     RTX_CHECK_EQ(buffer.data()[99], static_cast<uint8_t>(0xCD));
 
-    // A second allocation must reset the logical size, even when the vector
-    // reuses heap storage.
     RTX_CHECK(buffer.allocate(17, 64).has_value());
     RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(17));
+// A second allocation must reset the logical size, even when the vector
+// reuses heap storage.
     RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(buffer.data()) % 64, static_cast<uintptr_t>(0));
 }
-
 RTX_TEST(types_metadata_copy_and_clone) {
     Frame source;
     source.width = 32;
@@ -126,7 +125,6 @@ RTX_TEST(types_metadata_copy_and_clone) {
     RTX_CHECK(destination.planes[0] == original_plane);  // storage is untouched
     RTX_CHECK_EQ(destination.device_planes[0], static_cast<DevicePtr>(0x12345678));
 }
-
 RTX_TEST(types_device_residency) {
     Frame frame;
     RTX_CHECK(!frame.isDeviceResident());
@@ -135,16 +133,12 @@ RTX_TEST(types_device_residency) {
     frame.device_planes[0] = kInvalidDevicePtr;
     RTX_CHECK(!frame.isDeviceResident());
 }
-
-// ---------------------------------------------------------------------------
-// Status and Result<T> contract (merged from test_status.cpp)
-// ---------------------------------------------------------------------------
-
 RTX_TEST(status_success_and_failure) {
     const Result<void> success;
     RTX_CHECK(success.has_value());
     RTX_CHECK(static_cast<bool>(success));
 
+// Status and Result<T> contract (merged from test_status.cpp)
     const Result<void> failure = err(ErrorCode::Io, "disk on fire", "sector 7");
     RTX_CHECK(!failure.has_value());
     RTX_CHECK(!static_cast<bool>(failure));
@@ -156,7 +150,6 @@ RTX_TEST(status_success_and_failure) {
     RTX_CHECK(text.find("disk on fire") != std::string::npos);
     RTX_CHECK(text.find("sector 7") != std::string::npos);
 }
-
 RTX_TEST(status_error_names_are_stable) {
     RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::Ok)), std::string("OK"));
     RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::InvalidArgument)),
@@ -166,7 +159,6 @@ RTX_TEST(status_error_names_are_stable) {
                  std::string("RESERVED_11"));
     RTX_CHECK_EQ(std::string(errorCodeName(ErrorCode::Internal)), std::string("INTERNAL_ERROR"));
 }
-
 RTX_TEST(status_result_value) {
     const Result<int> good = 41;
     RTX_CHECK(good.has_value());
@@ -178,7 +170,6 @@ RTX_TEST(status_result_value) {
     RTX_CHECK_EQ(bad.error().message, std::string("too slow"));
     RTX_CHECK_EQ(bad.value_or(7), 7);
 }
-
 RTX_TEST(status_result_void) {
     Result<void> success;
     RTX_CHECK(success.has_value());
@@ -190,7 +181,6 @@ RTX_TEST(status_result_void) {
     failure = err(ErrorCode::OutOfMemory, "no vram");
     RTX_CHECK_EQ(failure.error().code, ErrorCode::OutOfMemory);
 }
-
 RTX_TEST(status_error_copy_and_move) {
     Error assigned{ErrorCode::Internal, "stale message", "stale detail"};
     const Error source{ErrorCode::Io, "assigned message", "assigned detail"};
@@ -207,10 +197,6 @@ RTX_TEST(status_error_copy_and_move) {
     RTX_CHECK_EQ(move_assigned.message, std::string("assigned message"));
     RTX_CHECK_EQ(move_assigned.detail, std::string("assigned detail"));
 }
-
-// ---------------------------------------------------------------------------
-// SmartGeometryCalculator portrait & pillarbox contract (merged from tests/unit)
-// ---------------------------------------------------------------------------
 RTX_TEST(smart_geometry_portrait_and_pillarbox) {
     auto res_a = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::AutoDirect);
     RTX_CHECK(res_a.is_portrait);
@@ -222,6 +208,7 @@ RTX_TEST(smart_geometry_portrait_and_pillarbox) {
     auto res_b = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::Pillarbox);
     RTX_CHECK(res_b.is_portrait);
     RTX_CHECK_EQ(res_b.canvas_width, 3840);
+// SmartGeometryCalculator portrait & pillarbox contract (merged from tests/unit)
     RTX_CHECK_EQ(res_b.canvas_height, 2160);
     RTX_CHECK_EQ(res_b.scaled_height, 2160);
     RTX_CHECK_EQ(res_b.scaled_width, 1214);
@@ -238,4 +225,89 @@ RTX_TEST(smart_geometry_portrait_and_pillarbox) {
     RTX_CHECK(res_def.is_portrait);
     RTX_CHECK_EQ(res_def.canvas_width, 2160);
     RTX_CHECK_EQ(res_def.canvas_height, 3840);
+}
+#if defined(_WIN32)
+struct MockUnknown : IUnknown {
+    int ref_count = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
+    ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(++ref_count); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        int r = --ref_count;
+        if (r == 0) delete this;
+        return static_cast<ULONG>(r);
+    }
+};
+#endif
+
+RTX_TEST(com_ptr_move_and_lifetime) {
+#if defined(_WIN32)
+    MockUnknown* mock = new MockUnknown();
+    RTX_CHECK_EQ(mock->ref_count, 1);
+    {
+        ComPtr<MockUnknown> owner(mock);
+        RTX_CHECK(static_cast<bool>(owner));
+        RTX_CHECK_EQ(owner.get(), mock);
+        RTX_CHECK_EQ(owner->ref_count, 1);
+
+        ComPtr<MockUnknown> moved(std::move(owner));
+        RTX_CHECK(!owner);
+        RTX_CHECK(static_cast<bool>(moved));
+        RTX_CHECK_EQ(moved.get(), mock);
+
+        owner = std::move(moved);
+        RTX_CHECK(static_cast<bool>(owner));
+        RTX_CHECK(!moved);
+
+        MockUnknown* released = owner.release();
+        RTX_CHECK(!owner);
+        RTX_CHECK_EQ(released, mock);
+        RTX_CHECK_EQ(mock->ref_count, 1);
+        owner.reset(released);
+    }
+#endif
+}
+RTX_TEST(json_scanner_contract) {
+    const std::string text = R"({
+        "name": "CineRTX",
+        "version": 3,
+        "pi": 3.14159,
+        "enabled": true,
+        "tags": ["cuda", "transcode", "hdr"],
+        "nested": {"fps": 60}
+    })";
+
+    std::size_t pos = 0;
+    auto obj = json::scanObject(text, pos);
+    RTX_REQUIRE(obj.has_value());
+    RTX_CHECK_EQ(obj->size(), 6u);
+
+    auto name = json::memberString(*obj, "name");
+    RTX_REQUIRE(name.has_value());
+    RTX_CHECK_EQ(*name, "CineRTX");
+
+    auto ver = json::memberInt(*obj, "version");
+    RTX_REQUIRE(ver.has_value());
+    RTX_CHECK_EQ(*ver, 3);
+
+    auto pi = json::memberDouble(*obj, "pi");
+    RTX_REQUIRE(pi.has_value());
+    RTX_CHECK(std::abs(*pi - 3.14159) < 1e-4);
+
+    auto en = json::memberBool(*obj, "enabled");
+    RTX_REQUIRE(en.has_value());
+    RTX_CHECK_EQ(*en, true);
+
+    auto tags = json::memberArray(*obj, "tags");
+    RTX_REQUIRE(tags.has_value());
+    RTX_CHECK_EQ(tags->size(), 3u);
+
+    auto nested = json::memberObject(*obj, "nested");
+    RTX_REQUIRE(nested.has_value());
+    auto nested_fps = json::memberInt(*nested, "fps");
+    RTX_REQUIRE(nested_fps.has_value());
+    RTX_CHECK_EQ(*nested_fps, 60);
+
+    const std::string escaped = json::escapeJson("hello\n\"world\"");
+    RTX_CHECK_EQ(escaped, "hello\\n\\\"world\\\"");
+    RTX_CHECK_EQ(json::jsonQuoted("a"), "\"a\"");
 }

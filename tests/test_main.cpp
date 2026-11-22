@@ -15,7 +15,6 @@ namespace {
 void printUsage(const char* executable) {
     std::cout << "usage: " << executable << " [--list] [--filter TEXT]\n";
 }
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -38,7 +37,6 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-
     auto& cases = rtx::test::registry();
     std::stable_sort(cases.begin(), cases.end(),
                      [](const rtx::test::TestCase& a, const rtx::test::TestCase& b) {
@@ -51,12 +49,11 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
-
-    // A trailing '*' turns the filter into a prefix match, which is what the
-    // CTest contract gates (`--filter=rife_*`) rely on.
     const bool prefix_filter = !filter.empty() && filter.back() == '*';
     const std::string filter_text =
         prefix_filter ? filter.substr(0, filter.size() - 1) : filter;
+// A trailing '*' turns the filter into a prefix match, which is what the
+// CTest contract gates (`--filter=rife_*`) rely on.
 
     size_t run = 0;
     size_t failed = 0;

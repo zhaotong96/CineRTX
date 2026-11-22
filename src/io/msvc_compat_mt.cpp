@@ -80,7 +80,6 @@ extern "C" {
         _locale_t locale,
         va_list arglist);
 }
-
 BIND_RAW(atan2f, &atan2f)
 BIND_RAW(atanf, &atanf)
 BIND_RAW(cbrt, &cbrt)

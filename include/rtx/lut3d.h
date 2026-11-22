@@ -22,23 +22,26 @@ namespace rtx {
 uint16_t floatToHalf(float value) noexcept;
 float halfToFloat(uint16_t value) noexcept;
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 class Lut3D {
 public:
-    // Parses an Adobe Iridas .cube file.  Supports TITLE, LUT_3D_SIZE,
-    // LUT_3D_INPUT_RANGE, DOMAIN_MIN / DOMAIN_MAX and DOMAIN_MIN comments;
-    // 1D (LUT_1D_SIZE) files are rejected as unsupported.  Grid sizes 2..256
-    // are accepted (17, 33, 64, 65 are the production targets).
+// Parses an Adobe Iridas .cube file.  Supports TITLE, LUT_3D_SIZE,
+// LUT_3D_INPUT_RANGE, DOMAIN_MIN / DOMAIN_MAX and DOMAIN_MIN comments;
+// 1D (LUT_1D_SIZE) files are rejected as unsupported.  Grid sizes 2..256
+// are accepted (17, 33, 64, 65 are the production targets).
     [[nodiscard]] static Result<Lut3D> loadFromCubeFile(const std::filesystem::path& path);
 
-    // Parses from memory (hermetic tests).  Same contract as loadFromCubeFile.
+// Parses from memory (hermetic tests).  Same contract as loadFromCubeFile.
     [[nodiscard]] static Result<Lut3D> parse(const std::string& text);
 
     [[nodiscard]] int gridSize() const noexcept { return grid_size_; }
-    // grid_size^3 * 4 RGBA16F values (IEEE-754 binary16 in uint16 carriers).
+// grid_size^3 * 4 RGBA16F values (IEEE-754 binary16 in uint16 carriers).
     [[nodiscard]] std::span<const std::uint16_t> half4Data() const noexcept {
         return half4_table_;
     }
-
 private:
     Lut3D() = default;
     int grid_size_ = 0;                      // Supports 17, 33, 64, 65, ...

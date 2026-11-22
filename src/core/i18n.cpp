@@ -19,7 +19,7 @@ namespace rtx {
 namespace {
 
 constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCount] = {
-    // English
+// English
     {
         L"CineRTX Professional GPU Remaster & NLE Engine",              // AppTitle
         L"Win32 - single EXE - no managed runtime",                     // AppSubtitle
@@ -87,7 +87,7 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"self-test FAIL",                                              // SelfTestFail
         L"Hardware probe OK",                                           // StatusProbeOk
 
-        // Stage 2 SSOT additions: WebUI & shared parameter labels
+// Stage 2 SSOT additions: WebUI & shared parameter labels
         L"WebUI - JSON state-driven - fully decoupled from the backend",// WuiSubtitle
         L"Transcode parameters",                                        // WuiParamsTitle
         L"Target frame rate (FRUC interpolation)",                      // WuiParamFps
@@ -110,7 +110,7 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"Probe unavailable",                                           // WuiProbeUnavailable
         L"Request failed",                                              // WuiReqFailed
 
-        // Stage 2 SSOT additions: unified dropdown option labels
+// Stage 2 SSOT additions: unified dropdown option labels
         L"AV1 10-bit (Default)",                                        // OptCodecAv1
         L"HEVC Main10 (H.265)",                                         // OptCodecHevc
         L"H.264 High (8-bit SDR - Deprecated)",                         // OptCodecH264
@@ -152,7 +152,7 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"Move Down",                                                   // BtnQueueDown
         L"Skip Current",                                                // BtnQueueSkip
     },
-    // Simplified Chinese
+// Simplified Chinese
     {
         L"CineRTX 纯 GPU 专业转码与非编引擎",                            // AppTitle
         L"Win32 · 单 exe · 无托管运行时",                                // AppSubtitle
@@ -219,7 +219,7 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"自检失败",                                                     // SelfTestFail
         L"硬件探测正常",                                                 // StatusProbeOk
 
-        // Stage 2 SSOT additions: WebUI & shared parameter labels
+// Stage 2 SSOT additions: WebUI & shared parameter labels
         L"WebUI · JSON 状态驱动 · 与后端彻底解耦",                       // WuiSubtitle
         L"转码参数",                                                     // WuiParamsTitle
         L"目标帧率 (FRUC 补帧)",                                         // WuiParamFps
@@ -242,7 +242,7 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"探针不可用",                                                   // WuiProbeUnavailable
         L"请求失败",                                                     // WuiReqFailed
 
-        // Stage 2 SSOT additions: unified dropdown option labels
+// Stage 2 SSOT additions: unified dropdown option labels
         L"AV1 10-bit (默认推荐)",                                        // OptCodecAv1
         L"HEVC Main10 (H.265)",                                          // OptCodecHevc
         L"H.264 High (8-bit SDR · 已废弃)",                              // OptCodecH264
@@ -442,7 +442,6 @@ void appendCodePoint(std::string& out, uint32_t code_point) {
         out.push_back(static_cast<char>(0x80 | (code_point & 0x3F)));
     }
 }
-
 std::string toUtf8(const wchar_t* text) {
     std::string out;
     if (text == nullptr) {
@@ -466,7 +465,6 @@ std::string toUtf8(const wchar_t* text) {
     }
     return out;
 }
-
 std::string escapeJsonUtf8(std::string_view input) {
     std::string out;
     out.reserve(input.size() + 8);
@@ -492,29 +490,24 @@ std::string escapeJsonUtf8(std::string_view input) {
     }
     return out;
 }
-
 }  // namespace
 
 Language currentLanguage() noexcept {
     return g_language.load(std::memory_order_relaxed);
 }
-
 void setLanguage(Language language) noexcept {
     if (language == Language::En || language == Language::Zh) {
         g_language.store(language, std::memory_order_relaxed);
     }
 }
-
 Language toggleLanguage() noexcept {
     const Language next = currentLanguage() == Language::Zh ? Language::En : Language::Zh;
     setLanguage(next);
     return next;
 }
-
 const char* languageTag(Language language) noexcept {
     return language == Language::Zh ? "zh" : "en";
 }
-
 Result<Language> parseLanguage(std::string_view tag) {
     std::string lowered;
     lowered.reserve(tag.size());
@@ -531,11 +524,9 @@ Result<Language> parseLanguage(std::string_view tag) {
     return err(ErrorCode::InvalidArgument, "unknown language tag",
                std::string(tag));
 }
-
 std::wstring_view trWView(StrId id) noexcept {
     return trW(id);
 }
-
 std::string_view strIdNameView(StrId id) noexcept {
     const size_t index = static_cast<size_t>(id);
     if (index >= kStrIdCount) {
@@ -543,7 +534,6 @@ std::string_view strIdNameView(StrId id) noexcept {
     }
     return kStrIdNames[index];
 }
-
 const wchar_t* trW(StrId id) noexcept {
     const size_t index = static_cast<size_t>(id);
     if (index >= kStrIdCount) {
@@ -553,7 +543,6 @@ const wchar_t* trW(StrId id) noexcept {
     const wchar_t* text = kTableW[language][index];
     return text != nullptr ? text : L"";
 }
-
 std::string tr(StrId id) { return toUtf8(trW(id)); }
 
 std::string trForLanguage(Language language, StrId id) {
@@ -564,12 +553,10 @@ std::string trForLanguage(Language language, StrId id) {
     }
     return toUtf8(kTableW[lang_idx][index]);
 }
-
 const char* strIdName(StrId id) noexcept {
     const size_t index = static_cast<size_t>(id);
     return index < kStrIdCount ? kStrIdNames[index] : "Unknown";
 }
-
 StrId strIdForError(ErrorCode code) noexcept {
     switch (code) {
         case ErrorCode::InvalidArgument:
@@ -590,7 +577,6 @@ StrId strIdForError(ErrorCode code) noexcept {
             return StrId::StatusFailed;
     }
 }
-
 std::string exportI18nJson() {
     std::string out = "{\n";
     const Language langs[2] = {Language::En, Language::Zh};
@@ -611,5 +597,4 @@ std::string exportI18nJson() {
     out += "  }";
     return out;
 }
-
 }  // namespace rtx

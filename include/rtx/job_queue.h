@@ -38,7 +38,10 @@ enum class JobStatus : uint8_t {
     }
     return "unknown";
 }
-
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct EncoderJob {
     uint64_t job_id = 0;
     std::string name{};
@@ -60,6 +63,10 @@ struct EncoderJob {
     [[nodiscard]] std::string toJson() const;
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct JobQueueEvent {
     enum class Kind : uint8_t {
         JobAdded,
@@ -76,6 +83,10 @@ struct JobQueueEvent {
     EncoderJob snapshot{};
 };
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 class EncoderJobQueue {
 public:
     using EventCallback = std::function<void(const JobQueueEvent&)>;
@@ -128,7 +139,6 @@ public:
         }
         return enqueueJob(std::move(inputs), profile, std::move(out_dir));
     }
-
 private:
     void workerLoop();
     void emit(JobQueueEvent::Kind kind, const EncoderJob& job);

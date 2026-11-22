@@ -45,6 +45,10 @@ enum class ErrorCode : int {
 
 [[nodiscard]] const char* errorCodeName(ErrorCode code) noexcept;
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct FastError {
     ErrorCode code{ErrorCode::Internal};
     std::int32_t vendor_status{0};
@@ -59,6 +63,10 @@ static_assert(sizeof(FastError) == 8);
 template <typename T>
 using HotResult = std::expected<T, FastError>;
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct Error {
     ErrorCode code{ErrorCode::Internal};
     std::int32_t vendor_status{0};
@@ -85,9 +93,7 @@ using Result = std::expected<T, Error>;
     std::source_location loc = std::source_location::current()) {
     return std::unexpected<Error>(Error{code, std::move(msg), std::move(det), loc});
 }
-
 [[nodiscard]] constexpr auto fastErr(ErrorCode code, std::int32_t vendor_status = 0) noexcept {
     return std::unexpected<FastError>(FastError{code, vendor_status});
 }
-
 }  // namespace rtx

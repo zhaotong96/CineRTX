@@ -14,12 +14,10 @@ ShotTransitionDecision ShotGroupSegmenter::evaluate(
         decision.shot_group_id = shot_group_id_;
         return decision;
     }
-
     uint64_t total_sad = 0;
     for (uint32_t s : block_sad) {
         total_sad += s;
     }
-
     const double total_norm_denom =
         static_cast<double>(width) * static_cast<double>(height) * static_cast<double>(max_sample_val);
     const float mu_k = static_cast<float>(static_cast<double>(total_sad) / total_norm_denom);
@@ -58,11 +56,9 @@ ShotTransitionDecision ShotGroupSegmenter::evaluate(
         constexpr float kAlpha = 2.0f / (8.0f + 1.0f);
         ema_motion_ = (1.0f - kAlpha) * ema_motion_ + kAlpha * mu_k;
     }
-
     decision.shot_group_id = shot_group_id_;
     return decision;
 }
-
 ShotTransitionDecision ShotGroupSegmenter::evaluateTransition(
     uint64_t frame_index, const FrameDiffMetrics& metrics) noexcept {
     (void)frame_index;
@@ -91,9 +87,7 @@ ShotTransitionDecision ShotGroupSegmenter::evaluateTransition(
         constexpr float kAlpha = 2.0f / (8.0f + 1.0f);
         ema_motion_ = (1.0f - kAlpha) * ema_motion_ + kAlpha * mu_k;
     }
-
     decision.shot_group_id = shot_group_id_;
     return decision;
 }
-
 } // namespace rtx

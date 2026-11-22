@@ -1,41 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 # File: cmake/EnsureRifeEngine.cmake
-# Purpose: Ensure official RIFE v4.25 TensorRT .engine is present after CineRTX builds.
-#          Compiles it automatically using CineRTX --build-rife-engine if missing,
-#          guaranteeing a 100% painless zero-delay out-of-the-box user experience.
+# Purpose: Ensure official RIFE v4.25 orientation-dedicated TensorRT .engine files are present.
+#          Compiles rife_v4.25_landscape.engine and rife_v4.25_portrait.engine automatically
+#          using CineRTX --build-rife-engine if missing (Phase 11.4-F PKG-F2).
 
 if(NOT DEFINED EXE_DIR OR NOT DEFINED EXT_MODELS_DIR)
     message(FATAL_ERROR "[EnsureRifeEngine] EXE_DIR and EXT_MODELS_DIR must be specified.")
 endif()
 
-set(_dest_engine "${EXE_DIR}/models/rife_v4.25.engine")
-set(_cache_engine "${EXT_MODELS_DIR}/rife_v4.25.engine")
 set(_dest_onnx "${EXE_DIR}/models/rife_v4.25.onnx")
 set(_cache_onnx "${EXT_MODELS_DIR}/rife_v4.25.onnx")
 
-# 1. If destination engine already exists and valid (>= 5 MB), nothing to do!
-if(EXISTS "${_dest_engine}")
-    file(SIZE "${_dest_engine}" _sz)
-    if(_sz GREATER_EQUAL 5242880)
-        # Also ensure external cache has it for future rebuilds
-        if(NOT EXISTS "${_cache_engine}")
-            file(COPY_FILE "${_dest_engine}" "${_cache_engine}")
-        endif()
-        return()
-    endif()
-endif()
-
-# 2. If external cache has a valid engine, copy it into destination
-if(EXISTS "${_cache_engine}")
-    file(SIZE "${_cache_engine}" _csz)
-    if(_csz GREATER_EQUAL 5242880)
-        message(STATUS "[CineRTX] Deploying cached RIFE v4.25 TensorRT engine to ${_dest_engine} ...")
-        file(COPY_FILE "${_cache_engine}" "${_dest_engine}")
-        return()
-    endif()
-endif()
-
-# 3. Neither exists. Locate ONNX source
+# 1. Locate ONNX source
 if(NOT EXISTS "${_dest_onnx}")
     if(EXISTS "${_cache_onnx}")
         file(COPY_FILE "${_cache_onnx}" "${_dest_onnx}")
@@ -47,46 +23,65 @@ if(NOT EXISTS "${_dest_onnx}")
     return()
 endif()
 
-# 4. We have CineRTX.exe and rife_v4.25.onnx, but no .engine!
-# Compile it now during POST_BUILD so the user NEVER faces a 3-minute freeze at runtime!
 set(_cinertx_exe "${EXE_DIR}/CineRTX.exe")
 if(NOT EXISTS "${_cinertx_exe}")
     return()
 endif()
 
-message(STATUS "================================================================================")
-message(STATUS "[CineRTX] Compiling RIFE v4.25 TensorRT engine for this GPU (one-time build step)...")
-message(STATUS "  Executable: ${_cinertx_exe}")
-message(STATUS "  ONNX:       ${_dest_onnx}")
-message(STATUS "  Output:     ${_dest_engine}")
-message(STATUS "  Note:       TensorRT optimizer is selecting fastest kernel tactics (~1-2 mins)...")
-message(STATUS "================================================================================")
+# 2. Macro to ensure single orientation engine exists and is valid (< 32 MB and >= 5 MB)
+macro(ensure_orientation_engine _name _opt_w _opt_h)
+    set(_dest_eng "${EXE_DIR}/models/${_name}")
+    set(_cache_eng "${EXT_MODELS_DIR}/${_name}")
+    set(_need_build TRUE)
 
-execute_process(
-    COMMAND "${_cinertx_exe}"
-            --build-rife-engine
-            --onnx "${_dest_onnx}"
-            --engine "${_dest_engine}"
-            --opt-w 1920
-            --opt-h 1080
-    WORKING_DIRECTORY "${EXE_DIR}"
-    RESULT_VARIABLE _build_rc
-    OUTPUT_VARIABLE _build_out
-    ERROR_VARIABLE _build_err
-)
-
-if(_build_rc EQUAL 0 AND EXISTS "${_dest_engine}")
-    file(SIZE "${_dest_engine}" _final_sz)
-    if(_final_sz GREATER_EQUAL 5242880)
-        message(STATUS "[CineRTX] SUCCESS: RIFE v4.25 TensorRT engine compiled (${_final_sz} bytes).")
-        file(COPY_FILE "${_dest_engine}" "${_cache_engine}")
-        return()
+    if(EXISTS "${_dest_eng}")
+        file(SIZE "${_dest_eng}" _sz)
+        if(_sz GREATER_EQUAL 5242880 AND _sz LESS 33554432)
+            if(NOT EXISTS "${_cache_eng}")
+                file(COPY_FILE "${_dest_eng}" "${_cache_eng}")
+            endif()
+            set(_need_build FALSE)
+        endif()
     endif()
-endif()
 
-message(WARNING
-    "[CineRTX] Automated RIFE engine compilation returned code ${_build_rc}.\n"
-    "Details: ${_build_err}\n"
-    "CineRTX will continue to build normally. If running in a headless environment without an NVIDIA GPU,\n"
-    "the engine will be synthesized or probed when an RTX GPU becomes active."
-)
+    if(_need_build AND EXISTS "${_cache_eng}")
+        file(SIZE "${_cache_eng}" _csz)
+        if(_csz GREATER_EQUAL 5242880 AND _csz LESS 33554432)
+            message(STATUS "[CineRTX] Deploying cached ${_name} to ${_dest_eng} ...")
+            file(COPY_FILE "${_cache_eng}" "${_dest_eng}")
+            set(_need_build FALSE)
+        endif()
+    endif()
+
+    if(_need_build)
+        message(STATUS "================================================================================")
+        message(STATUS "[CineRTX] Compiling RIFE ${_name} for this GPU...")
+        message(STATUS "  Profile (Opt): ${_opt_w}x${_opt_h}")
+        message(STATUS "================================================================================")
+        execute_process(
+            COMMAND "${_cinertx_exe}"
+                    --build-rife-engine
+                    --onnx "${_dest_onnx}"
+                    --engine "${_dest_eng}"
+                    --opt-w ${_opt_w}
+                    --opt-h ${_opt_h}
+            WORKING_DIRECTORY "${EXE_DIR}"
+            RESULT_VARIABLE _rc
+            OUTPUT_VARIABLE _out
+            ERROR_VARIABLE _err
+        )
+        if(_rc EQUAL 0 AND EXISTS "${_dest_eng}")
+            file(SIZE "${_dest_eng}" _final_sz)
+            if(_final_sz GREATER_EQUAL 5242880 AND _final_sz LESS 33554432)
+                message(STATUS "[CineRTX] SUCCESS: ${_name} compiled (${_final_sz} bytes).")
+                file(COPY_FILE "${_dest_eng}" "${_cache_eng}")
+            endif()
+        else()
+            message(WARNING "[CineRTX] Automated build of ${_name} returned ${_rc}: ${_err}")
+        endif()
+    endif()
+endmacro()
+
+ensure_orientation_engine("rife_v4.25_landscape.engine" 1920 1152)
+ensure_orientation_engine("rife_v4.25_portrait.engine" 1152 1920)
+

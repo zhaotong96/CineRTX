@@ -31,7 +31,7 @@
 extern "C" {
 #endif
 
-#define RTX_SHIM_ABI_VERSION 2u
+#define RTX_SHIM_ABI_VERSION 3u
 #define RTX_MAX_ERROR_MESSAGE 512
 #define RTX_MAX_DEVICE_NAME 128
 #define RTX_MAX_COMPONENTS 16
@@ -286,6 +286,15 @@ rtx_shim_decoder_receive(RtxDecoder* decoder, RtxFrameDesc* frame);
 
 /* Signals end of stream to the CUVID parser and drains display-order frames. */
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_decoder_flush(RtxDecoder* decoder);
+
+/* Phase 11.2 (ABI v3): non-terminal sequence reset for realtime playback.
+ * Synchronises the decode stream, clears the ready queue, returns every slot
+ * to the pool, clears the end_of_stream/flushed flags and feeds the parser an
+ * empty CUVID_PKT_DISCONTINUITY packet so reference-frame state is rebuilt on
+ * the next IDR.  The decoder instance and its CUDA primary context survive,
+ * so GOP seek never has to recreate the session.  The terminal
+ * rtx_shim_decoder_flush keeps its EOS semantics for transcode finalisation. */
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_decoder_reset(RtxDecoder* decoder);
 
 /* Returns a slot to the decode pool after NVENC has consumed the frame. */
 RTX_SHIM_API RtxResult RTX_SHIM_CALL

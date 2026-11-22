@@ -31,7 +31,6 @@ namespace rtx::str {
     }
     return sv;
 }
-
 [[nodiscard]] inline std::string toLowerAscii(std::string_view sv) {
     std::string out;
     out.reserve(sv.size());
@@ -40,7 +39,6 @@ namespace rtx::str {
     }
     return out;
 }
-
 [[nodiscard]] inline std::string escapeJson(std::string_view input) {
     std::string out;
     out.reserve(input.size() + 8);
@@ -64,7 +62,6 @@ namespace rtx::str {
     }
     return out;
 }
-
 template <typename IntT = int>
 [[nodiscard]] constexpr std::optional<IntT> parseInt(std::string_view sv) noexcept {
     sv = trimAscii(sv);
@@ -74,17 +71,14 @@ template <typename IntT = int>
     if (ec != std::errc{} || ptr != sv.data() + sv.size()) return std::nullopt;
     return val;
 }
-
 [[nodiscard]] inline std::string pathToUtf8(const std::filesystem::path& p) {
     const std::u8string u8 = p.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
-
 [[nodiscard]] inline std::filesystem::path utf8ToPath(std::string_view s) {
     const std::u8string_view u8(reinterpret_cast<const char8_t*>(s.data()), s.size());
     return std::filesystem::path(u8);
 }
-
 #if defined(_WIN32)
 [[nodiscard]] inline std::wstring utf8ToWide(std::string_view utf8) {
     if (utf8.empty()) return {};
@@ -94,7 +88,6 @@ template <typename IntT = int>
     ::MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), out.data(), len);
     return out;
 }
-
 [[nodiscard]] inline std::string wideToUtf8(std::wstring_view wide) {
     if (wide.empty()) return {};
     const int len = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);

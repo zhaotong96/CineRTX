@@ -44,6 +44,10 @@ using CUstream = void*;
 
 constexpr CUresult kSuccess = 0;
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct DriverApi {
     CUresult (*init)(unsigned int) = nullptr;
     CUresult (*device_get)(int*, int) = nullptr;
@@ -60,13 +64,12 @@ struct DriverApi {
 
 #if defined(_WIN32)
 void* openCudaDriver() {
-    // nvcuda.dll is the driver, not the runtime; it is present on any machine
-    // with an NVIDIA display driver.
+// nvcuda.dll is the driver, not the runtime; it is present on any machine
+// with an NVIDIA display driver.
     HMODULE module = LoadLibraryExW(L"nvcuda.dll", nullptr,
                                     LOAD_LIBRARY_SEARCH_SYSTEM32);
     return reinterpret_cast<void*>(module);
 }
-
 void* resolveSymbol(void* library, const char* name) {
     return reinterpret_cast<void*>(
         GetProcAddress(reinterpret_cast<HMODULE>(library), name));
@@ -107,26 +110,32 @@ bool resolveDriver(DriverApi& api, std::string* error) {
     }
     return true;
 }
-
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 struct PackState {
     std::mutex mutex;
     DriverApi api{};
     CUmodule module = nullptr;
     CUfunction kernel = nullptr;
-    // P0-1.3: the remaster chain adds the preprocess kernel (NV12/P010 ->
-    // R10G10B10A2) and the pack v2 kernel (TrueHDR scRGB -> BT.2020 PQ P010).
     CUfunction preprocess_kernel = nullptr;
+    CUfunction preprocess_buffer_kernel = nullptr;
+// P0-1.3: the remaster chain adds the preprocess kernel (NV12/P010 ->
+// R10G10B10A2) and the pack v2 kernel (TrueHDR scRGB -> BT.2020 PQ P010).
     CUfunction pack_v2_kernel = nullptr;
-    // Phase 9: the headless fused remaster kernel (optional in older PTX).
+// Phase 11.2 (C-02): raw-pointer variant for the D3D12 shared preview ring
+// (optional in PTX blobs that predate 11.2).
     CUfunction fused_remaster_kernel = nullptr;
     CUmodule interp_module = nullptr;
+// Phase 9: the headless fused remaster kernel (optional in older PTX).
     CUfunction interp_kernel = nullptr;
-    // The primary context retained at load time.  CUcontext follows strict
-    // thread-local binding semantics: a worker thread that never ran the load
-    // path has no current context, and D3D12 calls can detach the context at
-    // any time.  The handle is persisted so every launch can re-bind it.
     void* primary_context = nullptr;
     bool attempted = false;
+// The primary context retained at load time.  CUcontext follows strict
+// thread-local binding semantics: a worker thread that never ran the load
+// path has no current context, and D3D12 calls can detach the context at
+// any time.  The handle is persisted so every launch can re-bind it.
     bool ready = false;
     std::string error;
 };
@@ -135,13 +144,12 @@ PackState& state() {
     static PackState instance;
     return instance;
 }
-
-// Binds the retained primary context to the calling thread.  Returns false
-// with a diagnostic when the driver refuses, instead of letting the launch
-// fail later with a bare CUDA_ERROR_INVALID_CONTEXT.
 bool bindPrimaryContext(PackState& pack) {
     if (pack.api.ctx_set_current == nullptr || pack.primary_context == nullptr) {
         pack.error = "the CUDA driver lacks the context API needed to bind the pack kernel";
+// Binds the retained primary context to the calling thread.  Returns false
+// with a diagnostic when the driver refuses, instead of letting the launch
+// fail later with a bare CUDA_ERROR_INVALID_CONTEXT.
         return false;
     }
     const CUresult bound = pack.api.ctx_set_current(pack.primary_context);
@@ -155,7 +163,6 @@ bool bindPrimaryContext(PackState& pack) {
     }
     return true;
 }
-
 bool ensureLoaded(PackState& pack) {
     if (pack.attempted) {
         return pack.ready;
@@ -164,13 +171,13 @@ bool ensureLoaded(PackState& pack) {
     if (!resolveDriver(pack.api, &pack.error)) {
         return false;
     }
-    // cuModuleLoadData needs an initialised driver and a current context.  In
-    // the transcode pipeline the shim has already made the primary context
-    // current; a standalone caller (the pack self-test) has not.
     if (pack.api.init != nullptr) {
         const CUresult initialised = pack.api.init(0);
         if (initialised != kSuccess) {
             pack.error = "cuInit failed with CUDA error " + std::to_string(initialised);
+// cuModuleLoadData needs an initialised driver and a current context.  In
+// the transcode pipeline the shim has already made the primary context
+// current; a standalone caller (the pack self-test) has not.
             return false;
         }
     }
@@ -185,18 +192,18 @@ bool ensureLoaded(PackState& pack) {
             void* primary = nullptr;
             if (pack.api.primary_ctx_retain(&primary, device) == kSuccess) {
                 (void)pack.api.ctx_set_current(primary);
-                // The retain is intentionally kept for the process lifetime:
-                // the module and the context must outlive every launch.
                 pack.primary_context = primary;
             }
         }
     } else if (current != nullptr) {
-        // A context is already current on the loading thread; remember it so
-        // later launches on other threads can re-bind the same one.
+// The retain is intentionally kept for the process lifetime:
+// the module and the context must outlive every launch.
         pack.primary_context = current;
     }
     const CUresult loaded =
         pack.api.module_load_data(&pack.module, static_cast<const void*>(rtx_ngx::kP010PackPtx));
+// A context is already current on the loading thread; remember it so
+// later launches on other threads can re-bind the same one.
     if (loaded != kSuccess) {
         pack.error = "cuModuleLoadData failed with CUDA error " + std::to_string(loaded) +
                      " (PTX JIT rejected the embedded kernel)";
@@ -210,27 +217,32 @@ bool ensureLoaded(PackState& pack) {
         pack.module = nullptr;
         return false;
     }
-    // The remaster kernels were added with the v2 ABI bridge; a PTX that
-    // predates them still supports the legacy pack path, so their absence is
-    // only fatal for the remaster entry (reported by launchPreprocess /
-    // launchPackV2 through RTX_ERR_UNSUPPORTED).
     const CUresult preprocess_found = pack.api.module_get_function(
         &pack.preprocess_kernel, pack.module, "rtx_yuv_to_rgb10");
     const CUresult pack2_found = pack.api.module_get_function(
         &pack.pack_v2_kernel, pack.module, "rtx_rgba16f_to_p010_bt2020nc_v2");
+// The remaster kernels were added with the v2 ABI bridge; a PTX that
+// predates them still supports the legacy pack path, so their absence is
+// only fatal for the remaster entry (reported by launchPreprocess /
+// launchPackV2 through RTX_ERR_UNSUPPORTED).
     if (preprocess_found != kSuccess || pack2_found != kSuccess) {
         pack.preprocess_kernel = preprocess_found == kSuccess ? pack.preprocess_kernel : nullptr;
         pack.pack_v2_kernel = pack2_found == kSuccess ? pack.pack_v2_kernel : nullptr;
     }
-    // Phase 9: the fused Linux remaster kernel is optional in the same way.
+    CUfunction buffer_kernel = nullptr;
+    const CUresult buffer_found = pack.api.module_get_function(
+        &buffer_kernel, pack.module, "rtx_yuv_to_rgb10_buf");
+    pack.preprocess_buffer_kernel = buffer_found == kSuccess ? buffer_kernel : nullptr;
+// Phase 11.2 (C-02): the raw-pointer preview kernel is optional in the same
+// way; its absence only disables the playback zero-readback path.
     CUfunction fused_kernel = nullptr;
     const CUresult fused_found = pack.api.module_get_function(
         &fused_kernel, pack.module, "rtx_cuda_remaster_fused_p010");
     pack.fused_remaster_kernel = fused_found == kSuccess ? fused_kernel : nullptr;
+// Phase 9: the fused Linux remaster kernel is optional in the same way.
     pack.ready = true;
     return true;
 }
-
 }  // namespace
 
 namespace rtx_ngx {
@@ -238,7 +250,6 @@ namespace rtx_ngx {
 const char* packLastError() {
     return rtx_ngx_pack_last_error();
 }
-
 RtxResult launchPreprocess(const PreprocessLaunch& launch, void* stream) {
     if (launch.y_plane == 0 || launch.uv_plane == 0 || launch.output_surface == 0 ||
         launch.width <= 0 || launch.height <= 0 || launch.y_pitch_bytes <= 0 ||
@@ -258,7 +269,6 @@ RtxResult launchPreprocess(const PreprocessLaunch& launch, void* stream) {
     if (!bindPrimaryContext(pack)) {
         return RTX_ERR_INTERNAL;
     }
-
     unsigned long long y_plane = launch.y_plane;
     unsigned long long uv_plane = launch.uv_plane;
     unsigned long long surface = launch.output_surface;
@@ -288,7 +298,56 @@ RtxResult launchPreprocess(const PreprocessLaunch& launch, void* stream) {
     }
     return RTX_OK;
 }
+RtxResult launchPreprocessBuffer(const PreprocessBufferLaunch& launch, void* stream) {
+    if (launch.y_plane == 0 || launch.uv_plane == 0 || launch.output_ptr == 0 ||
+        launch.output_pitch_bytes <= 0 || launch.width <= 0 || launch.height <= 0 ||
+        launch.y_pitch_bytes <= 0 || launch.uv_pitch_bytes <= 0 ||
+        (launch.format != RTX_PIXEL_NV12 && launch.format != RTX_PIXEL_P010)) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    PackState& pack = state();
+    std::lock_guard<std::mutex> lock(pack.mutex);
+    if (!ensureLoaded(pack)) {
+        return RTX_ERR_NGX;
+    }
+    if (pack.preprocess_buffer_kernel == nullptr) {
+        pack.error = "kernel rtx_yuv_to_rgb10_buf is missing from the PTX module";
+        return RTX_ERR_UNSUPPORTED;
+    }
+    if (!bindPrimaryContext(pack)) {
+        return RTX_ERR_INTERNAL;
+    }
+    unsigned long long y_plane = launch.y_plane;
+    unsigned long long uv_plane = launch.uv_plane;
+    unsigned long long out_ptr = launch.output_ptr;
+    int out_pitch = launch.output_pitch_bytes;
+    int width = launch.width;
+    int height = launch.height;
+    int y_pitch = launch.y_pitch_bytes;
+    int uv_pitch = launch.uv_pitch_bytes;
+    int format = launch.format == RTX_PIXEL_P010 ? 2 : 1;
+    int full_range = launch.full_range != 0 ? 1 : 0;
+    int matrix = launch.matrix;
 
+    void* arguments[] = {&y_plane, &uv_plane, &out_ptr,  &out_pitch, &width,
+                         &height,  &y_pitch,  &uv_pitch, &format,    &full_range,
+                         &matrix};
+    const unsigned block = 16;
+    const unsigned grid_x = (static_cast<unsigned>(width) + block - 1u) / block;
+    const unsigned grid_y = (static_cast<unsigned>(height) + block - 1u) / block;
+    const CUresult launched =
+        pack.api.launch_kernel(pack.preprocess_buffer_kernel, grid_x, grid_y, 1, block, block, 1,
+                               0, reinterpret_cast<CUstream>(stream), arguments, nullptr);
+    if (launched != kSuccess) {
+        const char* name = "CUDA error";
+        if (pack.api.get_error_name != nullptr) {
+            (void)pack.api.get_error_name(launched, &name);
+        }
+        pack.error = std::string("cuLaunchKernel failed for rtx_yuv_to_rgb10_buf: ") + name;
+        return RTX_ERR_INTERNAL;
+    }
+    return RTX_OK;
+}
 RtxResult launchPackV2(const PackV2Launch& launch, void* stream) {
     if (launch.input_surface == 0 || launch.y_plane == 0 || launch.uv_plane == 0 ||
         launch.width <= 0 || launch.height <= 0 || (launch.width & 1) != 0 ||
@@ -308,7 +367,6 @@ RtxResult launchPackV2(const PackV2Launch& launch, void* stream) {
     if (!bindPrimaryContext(pack)) {
         return RTX_ERR_INTERNAL;
     }
-
     unsigned long long surface = launch.input_surface;
     unsigned long long y_plane = launch.y_plane;
     unsigned long long uv_plane = launch.uv_plane;
@@ -319,7 +377,6 @@ RtxResult launchPackV2(const PackV2Launch& launch, void* stream) {
     int input_is_pq = launch.input_is_pq != 0 ? 1 : 0;
     int input_is_scrgb = launch.input_is_scrgb != 0 ? 1 : 0;
     float nits = launch.linear_scale_nits > 0.0f ? launch.linear_scale_nits : 80.0f;
-    // Phase 7 fused stages.
     unsigned long long lut_tex = launch.lut_tex;
     int lut_dim = launch.lut_dim;
     unsigned long long stats_devptr = launch.stats_devptr;
@@ -331,6 +388,7 @@ RtxResult launchPackV2(const PackV2Launch& launch, void* stream) {
     unsigned long long src_surface = launch.src_surface;
 
     void* arguments[] = {&surface,   &y_plane,       &uv_plane,       &width,
+// Phase 7 fused stages.
                          &height,    &y_pitch,       &uv_pitch,       &input_is_pq,
                          &input_is_scrgb, &nits,     &lut_tex,        &lut_dim,
                          &stats_devptr, &preview_ptr, &preview_width, &preview_height,
@@ -352,7 +410,6 @@ RtxResult launchPackV2(const PackV2Launch& launch, void* stream) {
     }
     return RTX_OK;
 }
-
 RtxResult launchFusedRemaster(const FusedRemasterLaunch& launch, void* stream) {
     if (launch.src_y == 0 || launch.src_uv == 0 || launch.dst_y == 0 || launch.dst_uv == 0 ||
         launch.src_width <= 0 || launch.src_height <= 0 || launch.dst_width <= 0 ||
@@ -372,7 +429,6 @@ RtxResult launchFusedRemaster(const FusedRemasterLaunch& launch, void* stream) {
     if (!bindPrimaryContext(pack)) {
         return RTX_ERR_INTERNAL;
     }
-
     unsigned long long src_y = launch.src_y;
     unsigned long long src_uv = launch.src_uv;
     int src_y_pitch = static_cast<int>(launch.src_y_pitch);
@@ -419,7 +475,6 @@ RtxResult launchFusedRemaster(const FusedRemasterLaunch& launch, void* stream) {
     }
     return RTX_OK;
 }
-
 }  // namespace rtx_ngx
 
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_available(void) {
@@ -427,7 +482,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_available(void) {
     std::lock_guard<std::mutex> lock(pack.mutex);
     return ensureLoaded(pack) ? RTX_OK : RTX_ERR_NGX;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_launch(
     const RtxNgxPackSurfaces* surfaces, const RtxNgxPackConfig* config, uint64_t cuda_stream) {
     if (surfaces == nullptr || config == nullptr || surfaces->input_surface == 0 ||
@@ -443,15 +497,9 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_launch(
     if (!ensureLoaded(pack)) {
         return RTX_ERR_NGX;
     }
-    // Expert hardening (RTX verdict 3.1): CUcontext is thread-local.  The
-    // scheduler's pack worker thread is not the thread that loaded the module,
-    // and D3D12 calls can detach the context at any time, so re-bind the
-    // retained primary context before every launch instead of relying on the
-    // load-time binding.
     if (!bindPrimaryContext(pack)) {
         return RTX_ERR_INTERNAL;
     }
-
     unsigned long long surface = surfaces->input_surface;
     unsigned long long y_plane = surfaces->y_plane;
     unsigned long long uv_plane = surfaces->uv_plane;
@@ -464,6 +512,11 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_launch(
     void* arguments[] = {&surface, &y_plane, &uv_plane, &width, &height,
                          &y_pitch, &uv_pitch, &input_is_pq};
     const unsigned block = 16;
+// Expert hardening (RTX verdict 3.1): CUcontext is thread-local.  The
+// scheduler's pack worker thread is not the thread that loaded the module,
+// and D3D12 calls can detach the context at any time, so re-bind the
+// retained primary context before every launch instead of relying on the
+// load-time binding.
     const unsigned grid_x = (static_cast<unsigned>(width) / 2u + block - 1u) / block;
     const unsigned grid_y = (static_cast<unsigned>(height) / 2u + block - 1u) / block;
     const CUresult launched =
@@ -480,9 +533,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_pack_launch(
     }
     return RTX_OK;
 }
-
-
-
 static const char kNvofWarpPtx[] =
     ".version 7.5\n"
     ".target sm_75\n"
@@ -725,14 +775,12 @@ RtxResult rtx_ngx::launchNvofWarpNv12(
     }
     return RTX_OK;
 }
-
 RtxResult rtx_ngx::launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,
                                uint32_t pitch, uint32_t width, uint32_t height,
                                float alpha, uint64_t out_nv12, void* stream) {
     return launchNvofWarpNv12(prev_nv12, curr_nv12, 0, 0, 0, pitch, width, height,
                               (width + 3u) / 4u, (height + 3u) / 4u, alpha, out_nv12, stream);
 }
-
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_ngx_pack_last_error(void) {
     PackState& pack = state();
     std::lock_guard<std::mutex> lock(pack.mutex);

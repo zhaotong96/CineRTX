@@ -2,6 +2,7 @@
  * Copyright (c) 2026 RTX Transcode Engine contributors
  *
  * Runtime loader and launcher for RIFE pre/post-processing CUDA kernels.
+ * Phase 11.4 (C-06): embedded PTX targets conservative ISA 7.5 / sm_75 with reflect101 mirror padding.
  * Phase 9: the deployed PTX module exposes
  *   - rife_nv12_to_nchw_7ch_fp32     (single NV12 base pointer ABI)
  *   - rife_nchw_3ch_fp32_to_nv12     (single NV12 base pointer ABI)
@@ -39,9 +40,14 @@ using CUmodule = void*;
 using CUfunction = void*;
 using CUstream = void*;
 using CUcontext = void*;
+using CUdeviceptr = unsigned long long;
 
 constexpr CUresult kSuccess = 0;
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct DriverApi {
     CUresult (*init)(unsigned int) = nullptr;
     CUresult (*device_get)(int*, int) = nullptr;
@@ -53,6 +59,7 @@ struct DriverApi {
     CUresult (*module_unload)(CUmodule) = nullptr;
     CUresult (*launch_kernel)(CUfunction, unsigned, unsigned, unsigned, unsigned, unsigned,
                               unsigned, unsigned, CUstream, void**, void**) = nullptr;
+    CUresult (*memset_d32_async)(CUdeviceptr, unsigned int, size_t, CUstream) = nullptr;
     CUresult (*get_error_name)(CUresult, const char**) = nullptr;
 };
 
@@ -61,7 +68,6 @@ void* openCudaDriver() {
     HMODULE module = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     return reinterpret_cast<void*>(module);
 }
-
 void* resolveSymbol(void* library, const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(library), name));
 }
@@ -85,6 +91,7 @@ bool resolveDriver(DriverApi& api, std::string* error) {
     api.module_get_function = reinterpret_cast<decltype(api.module_get_function)>(resolveSymbol(library, "cuModuleGetFunction"));
     api.module_unload = reinterpret_cast<decltype(api.module_unload)>(resolveSymbol(library, "cuModuleUnload"));
     api.launch_kernel = reinterpret_cast<decltype(api.launch_kernel)>(resolveSymbol(library, "cuLaunchKernel"));
+    api.memset_d32_async = reinterpret_cast<decltype(api.memset_d32_async)>(resolveSymbol(library, "cuMemsetD32Async"));
     api.get_error_name = reinterpret_cast<decltype(api.get_error_name)>(resolveSymbol(library, "cuGetErrorName"));
 
     if (!api.module_load_data || !api.module_get_function || !api.launch_kernel) {
@@ -93,7 +100,10 @@ bool resolveDriver(DriverApi& api, std::string* error) {
     }
     return true;
 }
-
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 struct RifePackState {
     std::mutex mutex;
     DriverApi api{};
@@ -115,7 +125,6 @@ RifePackState& state() {
     static RifePackState instance;
     return instance;
 }
-
 /* Formats a precise CUDA driver diagnostic: "<message>: <code> (<name>)". */
 std::string driverError(const DriverApi& api, const char* message, CUresult code) {
     std::string text = std::string(message) + " " + std::to_string(code);
@@ -127,7 +136,6 @@ std::string driverError(const DriverApi& api, const char* message, CUresult code
     }
     return text;
 }
-
 bool bindPrimaryContext(RifePackState& s) {
     /* Reuse the caller's active CUDA context when present: overwriting a live
      * thread context with the primary context corrupts driver state. */
@@ -136,7 +144,6 @@ bool bindPrimaryContext(RifePackState& s) {
         s.api.ctx_get_current(&current) == kSuccess && current != nullptr) {
         return true;
     }
-
     /* Only retain the device primary context when no context is active. */
     if (!s.primary_context_retained) {
         if (!s.api.device_get) {
@@ -160,7 +167,6 @@ bool bindPrimaryContext(RifePackState& s) {
         }
         s.primary_context_retained = true;
     }
-
     if (!s.primary_context) {
         s.error = "no CUDA context available for RIFE kernels";
         return false;
@@ -176,7 +182,6 @@ bool bindPrimaryContext(RifePackState& s) {
     }
     return true;
 }
-
 bool ensureLoaded(RifePackState& s) {
     if (s.ready) return true;
     if (s.attempted) return false;
@@ -190,13 +195,11 @@ bool ensureLoaded(RifePackState& s) {
     if (!bindPrimaryContext(s)) {
         return false;
     }
-
     const CUresult load_res = s.api.module_load_data(&s.module, rtx_ngx::kRifePackPtx);
     if (load_res != kSuccess) {
         s.error = driverError(s.api, "cuModuleLoadData failed for rife_pack:", load_res);
         return false;
     }
-
     /* Phase 9 kernel names first; legacy names remain as fallback aliases. */
     (void)s.api.module_get_function(&s.preprocess_kernel, s.module, "rife_nv12_to_nchw_7ch_fp32");
     if (!s.preprocess_kernel) {
@@ -221,12 +224,10 @@ bool ensureLoaded(RifePackState& s) {
         s.error = "failed to locate RIFE kernels in loaded module";
         return false;
     }
-
     s.ready = true;
     s.error.clear();
     return true;
 }
-
 }  // namespace
 
 namespace rtx_ngx {
@@ -236,13 +237,11 @@ bool isRifePackAvailable() {
     std::lock_guard<std::mutex> lock(s.mutex);
     return ensureLoaded(s);
 }
-
 const char* rifePackLastError() {
     RifePackState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     return s.error.c_str();
 }
-
 RtxResult launchRifePreprocess(const RifePreprocessLaunch& launch, void* stream) {
     /* Phase 9 ABI: prev/curr are single NV12 base pointers; the UV plane is
      * derived in-kernel from base + height * pitch. */
@@ -250,13 +249,11 @@ RtxResult launchRifePreprocess(const RifePreprocessLaunch& launch, void* stream)
         launch.output_tensor == 0 || launch.padded_width == 0 || launch.padded_height == 0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-
     RifePackState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!ensureLoaded(s) || !bindPrimaryContext(s)) {
         return RTX_ERR_NGX;
     }
-
     unsigned long long p_prev = launch.y_plane_0;
     unsigned long long p_curr = launch.y_plane_1;
     unsigned int p_pitch = launch.y_pitch;
@@ -268,10 +265,13 @@ RtxResult launchRifePreprocess(const RifePreprocessLaunch& launch, void* stream)
     float p_alpha = launch.alpha;
     unsigned long long p_out = launch.output_tensor;
     unsigned long long p_sad = launch.d_sad_sum;
+    unsigned int p_infer_w = (launch.infer_width > 0u) ? launch.infer_width : launch.width;
+    unsigned int p_infer_h = (launch.infer_height > 0u) ? launch.infer_height : launch.height;
 
     void* args[] = {
         &p_prev, &p_curr, &p_pitch, &p_w, &p_h,
-        &p_padw, &p_padh, &p_full, &p_alpha, &p_out, &p_sad
+        &p_padw, &p_padh, &p_full, &p_alpha, &p_out, &p_sad,
+        &p_infer_w, &p_infer_h
     };
 
     const unsigned block_x = 16;
@@ -289,7 +289,6 @@ RtxResult launchRifePreprocess(const RifePreprocessLaunch& launch, void* stream)
     }
     return RTX_OK;
 }
-
 RtxResult launchRifePreprocessSeparate(const RifePreprocessSeparateLaunch& launch, void* stream) {
     if (launch.y_plane_0 == 0 || launch.uv_plane_0 == 0 ||
         launch.y_plane_1 == 0 || launch.uv_plane_1 == 0 ||
@@ -297,18 +296,15 @@ RtxResult launchRifePreprocessSeparate(const RifePreprocessSeparateLaunch& launc
         launch.padded_width == 0 || launch.padded_height == 0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-
     RifePackState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!ensureLoaded(s) || !bindPrimaryContext(s)) {
         return RTX_ERR_NGX;
     }
-
     if (!s.preprocess_separate_kernel) {
         s.error = "rife_preprocess_nv12_to_separate_rgb is not in the Phase 9 PTX module";
         return RTX_ERR_UNSUPPORTED;
     }
-
     unsigned long long p_y0 = launch.y_plane_0;
     unsigned long long p_uv0 = launch.uv_plane_0;
     unsigned long long p_y1 = launch.y_plane_1;
@@ -347,7 +343,6 @@ RtxResult launchRifePreprocessSeparate(const RifePreprocessSeparateLaunch& launc
     }
     return RTX_OK;
 }
-
 RtxResult launchRifePostprocess(const RifePostprocessLaunch& launch, void* stream) {
     /* Phase 9 ABI: dst is a single NV12 base pointer (UV plane written at
      * base + height * pitch in-kernel). Phase 9.1 (RW-P9-05): the full_range
@@ -356,13 +351,11 @@ RtxResult launchRifePostprocess(const RifePostprocessLaunch& launch, void* strea
         launch.width == 0 || launch.height == 0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-
     RifePackState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!ensureLoaded(s) || !bindPrimaryContext(s)) {
         return RTX_ERR_NGX;
     }
-
     unsigned long long p_src = launch.rgb_tensor;
     unsigned long long p_dst = launch.y_plane;
     unsigned int p_pitch = launch.y_pitch;
@@ -371,9 +364,12 @@ RtxResult launchRifePostprocess(const RifePostprocessLaunch& launch, void* strea
     unsigned int p_padw = launch.padded_width;
     unsigned int p_padh = launch.padded_height;
     unsigned int p_full = static_cast<unsigned int>(launch.full_range);
+    unsigned int p_infer_w = (launch.infer_width > 0u) ? launch.infer_width : launch.width;
+    unsigned int p_infer_h = (launch.infer_height > 0u) ? launch.infer_height : launch.height;
 
     void* args[] = {
-        &p_src, &p_dst, &p_pitch, &p_w, &p_h, &p_padw, &p_padh, &p_full
+        &p_src, &p_dst, &p_pitch, &p_w, &p_h, &p_padw, &p_padh, &p_full,
+        &p_infer_w, &p_infer_h
     };
 
     const unsigned block_x = 16;
@@ -391,14 +387,12 @@ RtxResult launchRifePostprocess(const RifePostprocessLaunch& launch, void* strea
     }
     return RTX_OK;
 }
-
 /* Phase 9.1 (RW-P9-02): element-wise fp32 -> fp16 conversion launch.
  * Grid (count + 255) / 256, block 256 (one element per thread). */
 RtxResult launchFp32ToFp16(uint64_t src_fp32, uint64_t dst_fp16, uint32_t count, void* stream) {
     if (src_fp32 == 0 || dst_fp16 == 0 || count == 0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-
     RifePackState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!ensureLoaded(s) || !bindPrimaryContext(s)) {
@@ -408,7 +402,6 @@ RtxResult launchFp32ToFp16(uint64_t src_fp32, uint64_t dst_fp16, uint32_t count,
         s.error = "rife_fp32_to_fp16 is not in the PTX module";
         return RTX_ERR_UNSUPPORTED;
     }
-
     unsigned long long p_src = src_fp32;
     unsigned long long p_dst = dst_fp16;
     unsigned int p_count = count;
@@ -427,14 +420,12 @@ RtxResult launchFp32ToFp16(uint64_t src_fp32, uint64_t dst_fp16, uint32_t count,
     }
     return RTX_OK;
 }
-
 /* Phase 9.1 (RW-P9-02): element-wise fp16 -> fp32 conversion launch.
  * Grid (count + 255) / 256, block 256 (one element per thread). */
 RtxResult launchFp16ToFp32(uint64_t src_fp16, uint64_t dst_fp32, uint32_t count, void* stream) {
     if (src_fp16 == 0 || dst_fp32 == 0 || count == 0) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-
     RifePackState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!ensureLoaded(s) || !bindPrimaryContext(s)) {
@@ -444,7 +435,6 @@ RtxResult launchFp16ToFp32(uint64_t src_fp16, uint64_t dst_fp32, uint32_t count,
         s.error = "rife_fp16_to_fp32 is not in the PTX module";
         return RTX_ERR_UNSUPPORTED;
     }
-
     unsigned long long p_src = src_fp16;
     unsigned long long p_dst = dst_fp32;
     unsigned int p_count = count;
@@ -463,7 +453,6 @@ RtxResult launchFp16ToFp32(uint64_t src_fp16, uint64_t dst_fp32, uint32_t count,
     }
     return RTX_OK;
 }
-
 RtxResult launchEvalBlockSad8x8(uint64_t prev_y, uint64_t curr_y, uint32_t pitch,
                                uint32_t width, uint32_t height,
                                uint64_t d_block_sad_64, void* stream) {
@@ -479,7 +468,9 @@ RtxResult launchEvalBlockSad8x8(uint64_t prev_y, uint64_t curr_y, uint32_t pitch
         s.error = "kernel rtx_eval_block_sad_8x8 is missing from rife_pack.ptx";
         return RTX_ERR_UNSUPPORTED;
     }
-
+    if (s.api.memset_d32_async) {
+        s.api.memset_d32_async(static_cast<CUdeviceptr>(d_block_sad_64), 0, 64, reinterpret_cast<CUstream>(stream));
+    }
     unsigned long long p_prev = prev_y;
     unsigned long long p_curr = curr_y;
     int p_pitch = static_cast<int>(pitch);
@@ -502,5 +493,4 @@ RtxResult launchEvalBlockSad8x8(uint64_t prev_y, uint64_t curr_y, uint32_t pitch
     }
     return RTX_OK;
 }
-
 }  // namespace rtx_ngx

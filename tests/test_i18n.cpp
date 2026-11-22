@@ -32,7 +32,6 @@ RTX_TEST(i18n_table_bounds) {
             RTX_CHECK(strIdName(id) != std::string("Unknown"));
         }
     }
-
     RTX_CHECK(trW(static_cast<StrId>(9999))[0] == L'\0');
     RTX_CHECK_EQ(std::string(strIdName(static_cast<StrId>(9999))), std::string("Unknown"));
 
@@ -50,7 +49,6 @@ RTX_TEST(i18n_table_bounds) {
     RTX_CHECK(json_dict.find("\"OptFps60Rife\":") != std::string::npos);
     setLanguage(saved);
 }
-
 RTX_TEST(i18n_switch_latency) {
     const Language saved = currentLanguage();
     constexpr int kIterations = 2000;
@@ -84,7 +82,6 @@ RTX_TEST(i18n_switch_latency) {
 
     setLanguage(saved);
 }
-
 RTX_TEST(param_schema_ssot_contract) {
     RTX_CHECK_EQ(kParamSchema.size(), static_cast<size_t>(20));
 
@@ -101,31 +98,30 @@ RTX_TEST(param_schema_ssot_contract) {
     RTX_CHECK_EQ(profile.fps_mode, std::string("60-nvofa"));
     RTX_CHECK_EQ(profile.pipeline_order, std::string("vsr-first"));
 
-    // Changing codec to hevc with auto_output=true updates auto-generated output suffix.
     profile.codec = "hevc";
     RTX_REQUIRE(validateAndNormalizeProfile(profile, true).has_value());
     RTX_CHECK_EQ(profile.output, std::string("clip_remaster_hevc.mp4"));
+// Changing codec to hevc with auto_output=true updates auto-generated output suffix.
 
-    // CPU codecs
     profile.codec = "av1_cpu";
-    profile.rate_control = "cq"; // Should map to crf
-    RTX_REQUIRE(validateAndNormalizeProfile(profile, true).has_value());
-    RTX_CHECK_EQ(profile.rate_control, std::string("crf"));
-    RTX_CHECK_EQ(profile.output, std::string("clip_remaster_av1_cpu.mp4"));
+    auto r_cpu_av1 = validateAndNormalizeProfile(profile, true);
+    RTX_REQUIRE(!r_cpu_av1.has_value());
+// CPU codecs return structured ErrorCode::Unsupported
+    RTX_CHECK(r_cpu_av1.error().code == ErrorCode::Unsupported);
 
     profile.codec = "hevc_cpu";
-    profile.rate_control = "crf";
-    RTX_REQUIRE(validateAndNormalizeProfile(profile, true).has_value());
-    RTX_CHECK_EQ(profile.output, std::string("clip_remaster_hevc_cpu.mp4"));
+    auto r_cpu_hevc = validateAndNormalizeProfile(profile, true);
+    RTX_REQUIRE(!r_cpu_hevc.has_value());
+    RTX_CHECK(r_cpu_hevc.error().code == ErrorCode::Unsupported);
 
-    // Deprecated 8-bit SDR H.264 output is rejected by the 10-bit HDR10 pipeline.
     profile.codec = "h264";
     RTX_CHECK(!validateAndNormalizeProfile(profile, true).has_value());
 
-    // JSON parsing and schema export round-trip.
+// Deprecated 8-bit SDR H.264 output is rejected by the 10-bit HDR10 pipeline.
     const std::string schema_json = exportSchemaJson();
     RTX_CHECK(schema_json.find("\"defaults\":") != std::string::npos);
     RTX_CHECK(schema_json.find("\"qp\": 22") != std::string::npos);
+// JSON parsing and schema export round-trip.
     RTX_CHECK(schema_json.find("\"pipelineOrder\": \"vsr-first\"") != std::string::npos);
 
     auto parsed = parseProfileFromJson(

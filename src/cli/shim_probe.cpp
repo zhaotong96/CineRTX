@@ -23,7 +23,6 @@ std::string safeString(const char* value, size_t capacity) {
     }
     return std::string(value, length);
 }
-
 void appendUnicodeEscape(std::string& output, uint32_t codepoint) {
     char buffer[16] = {};
     if (codepoint <= 0xFFFFu) {
@@ -39,7 +38,6 @@ void appendUnicodeEscape(std::string& output, uint32_t codepoint) {
                   static_cast<unsigned int>(high), static_cast<unsigned int>(low));
     output += buffer;
 }
-
 bool decodeUtf8(const std::string& value, size_t offset, uint32_t* codepoint, size_t* length) {
     const auto byte = [&value](size_t index) {
         return static_cast<unsigned char>(value[index]);
@@ -99,15 +97,14 @@ bool decodeUtf8(const std::string& value, size_t offset, uint32_t* codepoint, si
     }
     return false;
 }
-
 }  // namespace
 
-// Emit pure ASCII.  \uXXXX escapes survive shells and log collectors that
-// decode a child process's UTF-8 stdout with a legacy code page before saving
-// it.  Invalid UTF-8 is replaced with U+FFFD so the JSON is always well formed.
 std::string escapeJson(const std::string& value) {
     std::string output;
     output.reserve(value.size());
+// Emit pure ASCII.  \uXXXX escapes survive shells and log collectors that
+// decode a child process's UTF-8 stdout with a legacy code page before saving
+// it.  Invalid UTF-8 is replaced with U+FFFD so the JSON is always well formed.
     for (size_t index = 0; index < value.size();) {
         const unsigned char c = static_cast<unsigned char>(value[index]);
         switch (c) {
@@ -154,7 +151,6 @@ std::string escapeJson(const std::string& value) {
     }
     return output;
 }
-
 namespace {
 const char* resultLabel(int32_t result) {
     switch (static_cast<RtxResult>(result)) {
@@ -189,7 +185,6 @@ const char* resultLabel(int32_t result) {
     }
     return "RTX_ERR_UNKNOWN";
 }
-
 }  // namespace
 
 std::string capabilityList(uint32_t caps) {
@@ -222,25 +217,23 @@ std::string capabilityList(uint32_t caps) {
     }
     return out.str();
 }
-
 ShimProbeResult probeShim() {
     ShimProbeResult outcome;
-    // NvidiaShim owns the sidecar/embedded resolution: it prefers rtx_shim.dll
-    // next to the executable and falls back to the statically linked table in
-    // the single-EXE build.
     rtx::NvidiaShim shim;
     std::string error;
     if (!shim.open(&error)) {
         outcome.error = error;
         return outcome;
     }
+// NvidiaShim owns the sidecar/embedded resolution: it prefers rtx_shim.dll
+// next to the executable and falls back to the statically linked table in
+// the single-EXE build.
     outcome.loaded = true;
     outcome.path = shim.path();
     outcome.abi_version = RTX_SHIM_ABI_VERSION;
     outcome.result = static_cast<int32_t>(shim.probe(&outcome.diagnostics));
     return outcome;
 }
-
 std::string formatProbeHuman(const ShimProbeResult& probe) {
     std::ostringstream out;
     out << "NVIDIA shim probe\n";
@@ -283,7 +276,6 @@ std::string formatProbeHuman(const ShimProbeResult& probe) {
     }
     return out.str();
 }
-
 std::string formatProbeJson(const ShimProbeResult& probe) {
     std::ostringstream out;
     out.imbue(std::locale::classic());
@@ -329,5 +321,4 @@ std::string formatProbeJson(const ShimProbeResult& probe) {
     out << "}\n";
     return out.str();
 }
-
 }  // namespace rtx::cli

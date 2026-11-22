@@ -32,7 +32,6 @@ std::wstring widen(const std::string& text) {
                         static_cast<int>(text.size()), wide.data(), required);
     return wide;
 }
-
 std::string narrow(const std::wstring& text) {
     if (text.empty()) {
         return {};
@@ -48,7 +47,6 @@ std::string narrow(const std::wstring& text) {
                         required, nullptr, nullptr);
     return output;
 }
-
 std::string windowsError(DWORD code) {
     wchar_t* buffer = nullptr;
     const DWORD length = FormatMessageW(
@@ -69,11 +67,9 @@ std::string windowsError(DWORD code) {
     }
     return message;
 }
-
 bool containsPathSeparator(const std::string& name) {
     return name.find('\\') != std::string::npos || name.find('/') != std::string::npos;
 }
-
 }  // namespace
 
 std::string DynLibrary::platformName() { return "windows"; }
@@ -90,7 +86,6 @@ bool DynLibrary::openSystemLibrary(const std::string& name, std::string* error) 
     if (containsPathSeparator(name)) {
         return openExplicitPath(name, error);
     }
-
     wchar_t system_directory[MAX_PATH] = {};
     const UINT length = GetSystemDirectoryW(system_directory, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) {
@@ -110,13 +105,13 @@ bool DynLibrary::openSystemLibrary(const std::string& name, std::string* error) 
                                     LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
     if (module == nullptr) {
         const DWORD first_error = GetLastError();
-        // Older Windows versions reject the search flags; retry with the plain
-        // loader only for the fully qualified System32 path (still safe).
         module = LoadLibraryExW(full_path.c_str(), nullptr, 0);
         if (module == nullptr) {
             last_error_ = "LoadLibraryExW(" + narrow(full_path) + ") failed: " +
                           windowsError(first_error);
             if (error != nullptr) {
+// Older Windows versions reject the search flags; retry with the plain
+// loader only for the fully qualified System32 path (still safe).
                 *error = last_error_;
             }
             return false;
@@ -127,7 +122,6 @@ bool DynLibrary::openSystemLibrary(const std::string& name, std::string* error) 
     last_error_.clear();
     return true;
 }
-
 bool DynLibrary::openExplicitPath(const std::string& path, std::string* error) {
     close();
     if (path.empty()) {
@@ -160,7 +154,6 @@ bool DynLibrary::openExplicitPath(const std::string& path, std::string* error) {
     last_error_.clear();
     return true;
 }
-
 void DynLibrary::close() {
     if (handle_ != nullptr) {
         FreeLibrary(reinterpret_cast<HMODULE>(handle_));
@@ -169,7 +162,6 @@ void DynLibrary::close() {
     path_.clear();
     last_error_.clear();
 }
-
 void* DynLibrary::symbol(const char* name) const noexcept {
     if (handle_ == nullptr || name == nullptr) {
         return nullptr;
@@ -177,7 +169,6 @@ void* DynLibrary::symbol(const char* name) const noexcept {
     FARPROC address = GetProcAddress(reinterpret_cast<HMODULE>(handle_), name);
     return reinterpret_cast<void*>(address);
 }
-
 }  // namespace rtx_shim
 
 #endif  // _WIN32

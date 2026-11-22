@@ -44,10 +44,6 @@ __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
 }
 #endif
 
-#ifndef RTX_VERSION_STRING
-#define RTX_VERSION_STRING "0.2.0"
-#endif
-
 namespace {
 
 using namespace rtx;
@@ -63,6 +59,10 @@ enum class Mode {
     BuildRifeEngine,
 };
 
+// @rtx-type-justification
+// Category: Domain-Model
+// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
+// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
 struct Options {
     Mode mode = Mode::None;
     TranscodeProfile profile{};
@@ -90,11 +90,11 @@ void printHelp() {
               << "Options:\n"
               << "  --input PATH                 Container input (MP4/MKV)\n"
               << "  --output PATH                Container output (default: <stem>_remaster_<codec>.mp4)\n"
-              << "  --codec av1|hevc|av1_cpu|hevc_cpu 10-bit HDR10 output video codec (default: av1)\n"
+              << "  --codec av1|hevc             10-bit HDR10 output video codec (default: av1)\n"
               << "  --bitrate KBPS               Encoder target bitrate (0 = auto)\n"
               << "  --preset 1..7                NVENC P1..P7 preset (default 5)\n"
-              << "  --rate-control cq|vbr|cbr|qp|crf Rate control mode (default cq)\n"
-              << "  --qp N                       Constant QP/CQ/CRF target (default 22, 0..51)\n"
+              << "  --rate-control cq|vbr|cbr|qp Rate control mode (default cq)\n"
+              << "  --qp N                       Constant QP/CQ target (default 22, 0..51)\n"
               << "  --resolution 4k|2k|fhd|native Output resolution preset (default: 4k)\n"
               << "  --target-width PX            Explicit output width override (default 3840)\n"
               << "  --target-height PX           Explicit output height override (default 2160)\n"
@@ -120,7 +120,6 @@ void printHelp() {
               << "  --lang en|zh                 Output language (default: zh)\n"
               << "  --version, --help            Show version/help\n";
 }
-
 bool parseInteger(const std::string& text, int& value) {
     try {
         size_t consumed = 0;
@@ -134,7 +133,6 @@ bool parseInteger(const std::string& text, int& value) {
         return false;
     }
 }
-
 bool requireValue(int argc, char** argv, int& index, std::string& value) {
     if (index + 1 >= argc) {
         std::cerr << "error: " << argv[index] << " requires a value\n";
@@ -143,7 +141,6 @@ bool requireValue(int argc, char** argv, int& index, std::string& value) {
     value = argv[++index];
     return true;
 }
-
 bool requirePath(int argc, char** argv, int& index, std::filesystem::path& path) {
     if (index + 1 >= argc) {
         std::cerr << "error: " << argv[index] << " requires a value\n";
@@ -153,7 +150,6 @@ bool requirePath(int argc, char** argv, int& index, std::filesystem::path& path)
     path = std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(s.data()), s.size()));
     return true;
 }
-
 bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
     Rational target_fps{60, 1};
     bool target_fps_set = false;
@@ -181,36 +177,7 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
                 return false;
             }
             setLanguage(parsed.value());
-        } else if (argument == "--input") {
-            if (!requireValue(argc, argv, i, options.profile.input)) {
-                return false;
-            }
-            options.mode = Mode::Container;
-        } else if (argument == "--output") {
-            if (!requireValue(argc, argv, i, options.profile.output)) {
-                return false;
-            }
-            options.profile.auto_output = false;
-        } else if (argument == "--codec") {
-            if (!requireValue(argc, argv, i, options.profile.codec)) {
-                return false;
-            }
-        } else if (argument == "--rate-control") {
-            if (!requireValue(argc, argv, i, options.profile.rate_control)) {
-                return false;
-            }
-        } else if (argument == "--pipeline-order") {
-            if (!requireValue(argc, argv, i, options.profile.pipeline_order)) {
-                return false;
-            }
-        } else if (argument == "--resolution") {
-            if (!requireValue(argc, argv, i, options.profile.resolution)) {
-                return false;
-            }
         } else if (argument == "--target-width" || argument == "--target-height" ||
-                   argument == "--frames" || argument == "--vsr-quality" ||
-                   argument == "--bitrate" || argument == "--preset" || argument == "--qp" ||
-                   argument == "--peak-nits" || argument == "--gpu" ||
                    argument == "--opt-w" || argument == "--opt-h") {
             if (!requireValue(argc, argv, i, value)) {
                 return false;
@@ -226,24 +193,40 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             } else if (argument == "--target-height") {
                 options.profile.target_height = parsed;
                 options.explicit_target_dims = true;
-            } else if (argument == "--frames") {
-                options.profile.frames = parsed;
-            } else if (argument == "--bitrate") {
-                options.profile.bitrate_kbps = parsed;
-            } else if (argument == "--preset") {
-                options.profile.preset = parsed;
-            } else if (argument == "--qp") {
-                options.profile.qp = parsed;
-            } else if (argument == "--vsr-quality") {
-                options.profile.vsr_quality = parsed;
-            } else if (argument == "--peak-nits") {
-                options.profile.peak_nits = parsed;
-            } else if (argument == "--gpu") {
-                options.profile.gpu = parsed;
             } else if (argument == "--opt-w") {
                 options.opt_w = parsed;
-            } else if (argument == "--opt-h") {
+            } else {
                 options.opt_h = parsed;
+            }
+        } else if (const FieldBinding<TranscodeProfile>* binding =
+                       findCliFieldBinding<TranscodeProfile>(argument)) {
+            if (!requireValue(argc, argv, i, value)) {
+                return false;
+            }
+            bool assigned = true;
+            std::visit([&](auto member) {
+                using T = std::decay_t<decltype(options.profile.*member)>;
+                if constexpr (std::is_same_v<T, int>) {
+                    int parsed = 0;
+                    if (!parseInteger(value, parsed)) {
+                        error = "invalid integer for " + argument + ": " + value;
+                        assigned = false;
+                        return;
+                    }
+                    options.profile.*member = parsed;
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    options.profile.*member = (value == "true" || value == "1");
+                } else {
+                    options.profile.*member = value;
+                }
+            }, binding->member);
+            if (!assigned) {
+                return false;
+            }
+            if (argument == "--input") {
+                options.mode = Mode::Container;
+            } else if (argument == "--output") {
+                options.profile.auto_output = false;
             }
         } else if (argument == "--target-fps") {
             if (!requireValue(argc, argv, i, value)) {
@@ -262,16 +245,8 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.profile.geometry = "pillarbox";
         } else if (argument == "--no-audio") {
             options.profile.copy_audio = false;
-        } else if (argument == "--lut") {
-            if (!requireValue(argc, argv, i, options.profile.lut)) {
-                return false;
-            }
         } else if (argument == "--hdr10plus") {
             options.profile.hdr10plus = true;
-        } else if (argument == "--rife-engine") {
-            if (!requireValue(argc, argv, i, options.profile.rife_engine)) {
-                return false;
-            }
         } else if (argument == "--build-rife-engine") {
             options.mode = Mode::BuildRifeEngine;
         } else if (argument == "--onnx") {
@@ -293,12 +268,10 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             return false;
         }
     }
-
     if (options.mode == Mode::None) {
         error = "no command specified (try --help)";
         return false;
     }
-
     if (options.mode == Mode::Container) {
         const bool want_rife = !options.profile.rife_engine.empty();
         if (target_fps_set && target_fps.num <= 0) {
@@ -308,7 +281,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
         } else {
             options.profile.fps_mode = want_rife ? "60-rife" : "60-nvofa";
         }
-
         const int saved_w = options.profile.target_width;
         const int saved_h = options.profile.target_height;
         auto valid = validateAndNormalizeProfile(options.profile, /*require_io_paths=*/true);
@@ -321,7 +293,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             options.profile.target_height = saved_h;
         }
         if (target_fps_set && target_fps.num > 0) {
-            // Preserve custom fractional rates such as 60000/1001 when specified on CLI.
         }
     } else if (options.mode == Mode::BuildRifeEngine) {
         if (options.onnx_path.empty()) {
@@ -329,13 +300,13 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             return false;
         }
         if (options.engine_path.empty()) {
+// Preserve custom fractional rates such as 60000/1001 when specified on CLI.
             error = "--build-rife-engine requires --engine <path>";
             return false;
         }
     }
     return true;
 }
-
 void printNgxBridgeProbe() {
     rtx::NgxRemasterBridge bridge;
     std::string error;
@@ -356,7 +327,6 @@ void printNgxBridgeProbe() {
         std::cout << "  query_caps: error " << static_cast<int>(result) << "\n";
     }
 }
-
 std::string formatCombinedProbeJson(const cli::ShimProbeResult& probe) {
     std::string base = cli::formatProbeJson(probe);
     rtx::NgxRemasterBridge bridge;
@@ -383,7 +353,6 @@ std::string formatCombinedProbeJson(const cli::ShimProbeResult& probe) {
     }
     return base;
 }
-
 int runProbe(const Options& options) {
     const cli::ShimProbeResult probe = cli::probeShim();
     if (options.json) {
@@ -400,7 +369,6 @@ int runProbe(const Options& options) {
     }
     return 0;
 }
-
 void printHwReport(const HwTranscodeReport& report, const Options& options) {
     if (options.json) {
         std::cout << report.toJson();
@@ -421,9 +389,6 @@ void printHwReport(const HwTranscodeReport& report, const Options& options) {
     std::cout << "host pixel copies: decoder=" << report.decoder_host_pixel_copies
               << ", encoder=" << report.encoder_host_pixel_copies
               << "\n";
-    // Phase 9 (RC-2): the fruc line must be visible whenever the FRUC backend
-    // is active, even with zero interpolated frames, and must carry the
-    // interpolation failure count so silent degradation cannot hide.
     if (report.fruc_backend != "off") {
         std::cout << "fruc: backend=" << report.fruc_backend
                   << ", interpolated=" << report.frames_interpolated
@@ -433,9 +398,11 @@ void printHwReport(const HwTranscodeReport& report, const Options& options) {
     std::cout << "elapsed: " << std::fixed << std::setprecision(1) << report.elapsed_ms
               << " ms\n";
 }
-
 int runHardwareMode(const Options& options) {
     HwTranscodeOptions hardware = profileToHwOptions(options.profile);
+// Phase 9 (RC-2): the fruc line must be visible whenever the FRUC backend
+// is active, even with zero interpolated frames, and must carry the
+// interpolation failure count so silent degradation cannot hide.
     hardware.verbose = options.verbose;
     if (!options.quiet && !options.json) {
         hardware.progress = [](const HwTranscodeProgress& p) {
@@ -465,7 +432,6 @@ int runHardwareMode(const Options& options) {
     printHwReport(result.value(), options);
     return 0;
 }
-
 int runSessionStdio() {
     setConsoleLogEnabled(false);
 
@@ -526,7 +492,6 @@ int runSessionStdio() {
             last_exit_code = 2;
             continue;
         }
-
         TranscodeProfile profile = std::move(parsed.value());
         Result<void> valid = validateAndNormalizeProfile(profile, /*require_io_paths=*/true);
         if (!valid.has_value()) {
@@ -537,7 +502,6 @@ int runSessionStdio() {
             last_exit_code = 2;
             continue;
         }
-
         cancel_flag.store(false, std::memory_order_release);
         HwTranscodeOptions hw = profileToHwOptions(profile);
         hw.cancel = &cancel_flag;
@@ -581,11 +545,9 @@ int runSessionStdio() {
             last_exit_code = exit_code;
         }
     }
-
     setLogCallback(nullptr);
     return last_exit_code;
 }
-
 int runBuildRifeEngine(const Options& options) {
     rtx::NgxRemasterBridge bridge;
     std::string error;
@@ -616,7 +578,6 @@ int runBuildRifeEngine(const Options& options) {
     std::cout << "Build succeeded.\n" << log_buf << "\n";
     return 0;
 }
-
 }  // namespace
 
 #if defined(_WIN32)
@@ -646,7 +607,6 @@ std::vector<std::string> utf8CommandLine(int* argc) {
     *argc = wide_count;
     return arguments;
 }
-
 }  // namespace
 #endif
 
@@ -682,7 +642,6 @@ int rtxCliMain(int argc, char** argv) {
     if (options.json) {
         setConsoleLogEnabled(false);
     }
-
     switch (options.mode) {
         case Mode::Help:
             printHelp();

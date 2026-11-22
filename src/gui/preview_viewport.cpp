@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
-//
-// Phase 7 (Task 7-C1) implementation.  See preview_viewport.h for the design
-// contract.  Everything is COM RAII; no dcomp.dll is ever touched and the
-// import surface is limited to the d3d12.dll/dxgi.dll entries the GUI target
-// already links.
 
 #ifndef UNICODE
 #define UNICODE
@@ -15,35 +10,71 @@
 
 #include "preview_viewport.h"
 
-#include <d3d12.h>
-#include <dxgi1_5.h>
-
-#include <cstring>
 #include <utility>
+
+#include "preview_tone_map_cs.h"
 
 namespace rtx::gui {
 namespace {
 
 constexpr wchar_t kPreviewChildClass[] = L"CineRTXPreviewChild";
-// Double-click forwarding for fullscreen quick-play toggling.
 constexpr LONG_PTR kChildClassStyle = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
 
+constexpr UINT kSwapChainBuffers = 2;
+constexpr UINT kSwapChainFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+constexpr float kSdrReferenceNits = 100.0f;
+constexpr UINT kComputeGroup = 16;
+constexpr UINT kRootConstantDwords = 12;
+
+// @rtx-type-justification
+// Category: Hardware-Layout
+// Why-Std-Fails: DXBC cbuffer 的 DWORD 布局由着色器逐字段消费，std 聚合无法表达
+// Invariant: sizeof == 12 * 4；reserved[0] 携带 input_is_pq 传递函数语义。
+struct ViewportConstants {
+    std::uint32_t src_size[2];
+    std::uint32_t dst_size[2];
+    std::uint32_t pitch_words;
+    std::uint32_t hdr_mode;
+    float split;
+    float max_nits;
+    std::uint32_t split_on;
+    std::uint32_t reserved[3];
+};
+static_assert(sizeof(ViewportConstants) == kRootConstantDwords * 4);
+
+inline void resourceBarrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
+                            D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) noexcept {
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &barrier);
+}
+template <typename T, typename Host, typename MemFn, typename... Args>
+inline bool callComOut(Host* host, MemFn method, ComPtr<T>& target, Args&&... args) noexcept {
+    target.reset();
+    T* raw = nullptr;
+    if (FAILED((host->*method)(std::forward<Args>(args)..., __uuidof(T),
+                               reinterpret_cast<void**>(&raw)))) {
+        return false;
+    }
+    target.reset(raw);
+    return true;
+}
 LRESULT CALLBACK previewChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
         case WM_MOUSEMOVE:
         case WM_LBUTTONDBLCLK:
-            // A/B split dragging: the parent computes the split ratio from the
-            // child-relative coordinates and republishes it to the pipeline.
-            // WM_LBUTTONDBLCLK toggles borderless fullscreen quick-play.
             SendMessageW(GetParent(hwnd), WM_APP_SPLIT_DRAG, static_cast<WPARAM>(msg), lParam);
             return 0;
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 }
-
 bool ensureChildClass(HINSTANCE instance) {
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -58,440 +89,516 @@ bool ensureChildClass(HINSTANCE instance) {
     }
     return true;
 }
+bool buildComputePipeline(ID3D12Device* device, ComPtr<ID3D12RootSignature>& root_signature,
+                          ComPtr<ID3D12PipelineState>& pipeline) noexcept {
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 1;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].RegisterSpace = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[1].NumDescriptors = 1;
+    ranges[1].BaseShaderRegister = 0;
+    ranges[1].RegisterSpace = 0;
+    ranges[1].OffsetInDescriptorsFromTableStart = 1;
 
-template <typename T>
-void safeRelease(T*& pointer) noexcept {
-    if (pointer != nullptr) {
-        pointer->Release();
-        pointer = nullptr;
+    D3D12_ROOT_PARAMETER params[2]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[0].DescriptorTable.NumDescriptorRanges = 2;
+    params[0].DescriptorTable.pDescriptorRanges = ranges;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[1].Constants.ShaderRegister = 0;
+    params[1].Constants.RegisterSpace = 0;
+    params[1].Constants.Num32BitValues = kRootConstantDwords;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC signature{};
+    signature.NumParameters = 2;
+    signature.pParameters = params;
+    signature.NumStaticSamplers = 0;
+    signature.pStaticSamplers = nullptr;
+    signature.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+    ComPtr<ID3DBlob> blob;
+    ID3DBlob* raw_blob = nullptr;
+    ID3DBlob* raw_errors = nullptr;
+    if (FAILED(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &raw_blob,
+                                           &raw_errors))) {
+        return false;
     }
+    blob.reset(raw_blob);
+    if (raw_errors != nullptr) {
+        raw_errors->Release();
+    }
+    if (!callComOut(device, &ID3D12Device::CreateRootSignature, root_signature, 0,
+                    blob->GetBufferPointer(), blob->GetBufferSize())) {
+        return false;
+    }
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = root_signature.get();
+    pso.CS.pShaderBytecode = g_preview_tone_map_cs;
+    pso.CS.BytecodeLength = sizeof(g_preview_tone_map_cs);
+    return callComOut(device, &ID3D12Device::CreateComputePipelineState, pipeline, &pso);
 }
-
 }  // namespace
 
 Result<PreviewViewport> PreviewViewport::create(HWND parent_hwnd, int width, int height) {
     if (parent_hwnd == nullptr || width <= 0 || height <= 0) {
         return err(ErrorCode::InvalidArgument, "preview viewport needs a parent and a size");
     }
-    HINSTANCE instance = reinterpret_cast<HINSTANCE>(
-        GetWindowLongPtrW(parent_hwnd, GWLP_HINSTANCE));
+    HINSTANCE instance =
+        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(parent_hwnd, GWLP_HINSTANCE));
     if (instance == nullptr) {
         instance = GetModuleHandleW(nullptr);
     }
     if (!ensureChildClass(instance)) {
         return err(ErrorCode::Internal, "cannot register the preview child window class");
     }
-    constexpr DWORD kChildStyle =
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+    constexpr DWORD kChildStyle = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
     HWND child = CreateWindowExW(0, kPreviewChildClass, L"", kChildStyle, 0, 0, width, height,
                                  parent_hwnd, nullptr, instance, nullptr);
     if (child == nullptr) {
         return err(ErrorCode::Internal, "cannot create the preview child window");
     }
-
     PreviewViewport viewport;
-    viewport.child_hwnd_ = child;
+    viewport.child_hwnd_.reset(child);
     viewport.width_ = width;
     viewport.height_ = height;
 
-    IDXGIFactory2* factory = nullptr;
-    ID3D12Device* device = nullptr;
-    ID3D12CommandQueue* queue = nullptr;
-    ID3D12CommandAllocator* allocator = nullptr;
-    ID3D12GraphicsCommandList* list = nullptr;
-    ID3D12Fence* fence = nullptr;
-    ID3D12Resource* upload = nullptr;
-    IDXGISwapChain1* swap_chain = nullptr;
-    IDXGISwapChain3* swap_chain3 = nullptr;
-    ID3D12Resource* rts[2] = {nullptr, nullptr};
-    HANDLE fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (fence_event == nullptr) {
-        safeRelease(factory);
-        DestroyWindow(child);
-        return err(ErrorCode::OutOfMemory, "cannot create the preview fence event");
+    viewport.dcomp_module_.reset(LoadLibraryExW(L"dcomp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
+    if (!viewport.dcomp_module_) {
+        return err(ErrorCode::DllMissing, "dcomp.dll is unavailable for the preview viewport");
     }
-    viewport.fence_event_ = fence_event;
-
-    auto fail = [&](const char* message) {
-        safeRelease(rts[0]);
-        safeRelease(rts[1]);
-        safeRelease(swap_chain3);
-        safeRelease(swap_chain);
-        safeRelease(upload);
-        safeRelease(fence);
-        safeRelease(list);
-        safeRelease(allocator);
-        safeRelease(queue);
-        safeRelease(device);
-        safeRelease(factory);
-        DestroyWindow(child);
-        return err(ErrorCode::Internal, message);
-    };
-
-    IDXGIFactory5* factory5 = nullptr;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-        return fail("CreateDXGIFactory1 failed for the preview viewport");
+    viewport.dcomp_create_ = reinterpret_cast<PreviewViewport::DCompositionCreateDeviceFn>(
+        GetProcAddress(viewport.dcomp_module_.get(), "DCompositionCreateDevice"));
+    if (viewport.dcomp_create_ == nullptr) {
+        return err(ErrorCode::DllMissing, "DCompositionCreateDevice is missing from dcomp.dll");
     }
-    if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5)))) {
-        BOOL tearing = FALSE;
-        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
-                                                    &tearing, sizeof(tearing)))) {
-            viewport.tearing_supported_ = tearing != FALSE;
-        }
-        safeRelease(factory5);
-    }
-    if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
-        return fail("D3D12CreateDevice failed for the preview viewport");
-    }
-    D3D12_COMMAND_QUEUE_DESC queue_desc{};
-    queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    if (FAILED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue)))) {
-        return fail("cannot create the preview command queue");
-    }
-    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                              IID_PPV_ARGS(&allocator)))) {
-        return fail("cannot create the preview command allocator");
-    }
-    // Older d3d12.h headers (mingw) only declare CreateCommandList, which
-    // returns the list in the recording state; close it immediately.
-    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator,
-                                         nullptr, IID_PPV_ARGS(&list)))) {
-        return fail("cannot create the preview command list");
-    }
-    (void)list->Close();
-    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) {
-        return fail("cannot create the preview fence");
-    }
-
-    // Upload heap sized to one full preview frame (rows padded to 256 bytes).
-    D3D12_HEAP_PROPERTIES heap_props{};
-    heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
-    const UINT64 row_pitch = ((static_cast<UINT64>(width) * 4u) + 255u) & ~255ull;
-    D3D12_RESOURCE_DESC upload_desc{};
-    upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    upload_desc.Width = row_pitch * static_cast<UINT64>(height);
-    upload_desc.Height = 1;
-    upload_desc.DepthOrArraySize = 1;
-    upload_desc.MipLevels = 1;
-    upload_desc.SampleDesc.Count = 1;
-    upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &upload_desc,
-                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                               IID_PPV_ARGS(&upload)))) {
-        return fail("cannot create the preview upload buffer");
-    }
-    D3D12_RANGE read_range{0, 0};
-    void* mapped = nullptr;
-    if (FAILED(upload->Map(0, &read_range, &mapped)) || mapped == nullptr) {
-        return fail("cannot map the preview upload buffer");
-    }
-
-    DXGI_SWAP_CHAIN_DESC1 swap_desc{};
-    swap_desc.Width = static_cast<UINT>(width);
-    swap_desc.Height = static_cast<UINT>(height);
-    swap_desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-    swap_desc.SampleDesc.Count = 1;
-    swap_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swap_desc.BufferCount = 2;  // double buffered: 2 x 2.07 MB = 4.14 MB VRAM
-    swap_desc.Scaling = DXGI_SCALING_STRETCH;
-    swap_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    swap_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-    if (viewport.tearing_supported_) {
-        swap_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-    }
-    if (FAILED(factory->CreateSwapChainForHwnd(queue, child, &swap_desc, nullptr, nullptr,
-                                               &swap_chain))) {
-        return fail("CreateSwapChainForHwnd (FLIP_DISCARD) failed for the preview viewport");
-    }
-    if (FAILED(swap_chain->QueryInterface(IID_PPV_ARGS(&swap_chain3)))) {
-        return fail("QueryInterface(IDXGISwapChain3) failed for the preview viewport");
-    }
-    for (UINT i = 0; i < 2; ++i) {
-        if (FAILED(swap_chain->GetBuffer(i, IID_PPV_ARGS(&rts[i])))) {
-            return fail("GetBuffer failed for swap chain render target");
-        }
-    }
-
-    viewport.factory_ = factory;
-    viewport.device_ = device;
-    viewport.cmd_queue_ = queue;
-    viewport.cmd_allocator_ = allocator;
-    viewport.cmd_list_ = list;
-    viewport.cmd_fence_ = fence;
-    viewport.upload_buffer_ = upload;
-    viewport.upload_map_ = mapped;
-    viewport.upload_pitch_ = static_cast<uint32_t>(row_pitch);
-    viewport.swap_chain_ = swap_chain;
-    viewport.swap_chain3_ = swap_chain3;
-    viewport.render_targets_[0] = rts[0];
-    viewport.render_targets_[1] = rts[1];
     return viewport;
 }
-
 PreviewViewport::~PreviewViewport() { release(); }
-
-PreviewViewport::PreviewViewport(PreviewViewport&& other) noexcept { *this = std::move(other); }
 
 PreviewViewport& PreviewViewport::operator=(PreviewViewport&& other) noexcept {
     if (this != &other) {
         release();
-        child_hwnd_ = std::exchange(other.child_hwnd_, nullptr);
-        factory_ = std::exchange(other.factory_, nullptr);
-        device_ = std::exchange(other.device_, nullptr);
-        cmd_queue_ = std::exchange(other.cmd_queue_, nullptr);
-        cmd_allocator_ = std::exchange(other.cmd_allocator_, nullptr);
-        cmd_list_ = std::exchange(other.cmd_list_, nullptr);
-        cmd_fence_ = std::exchange(other.cmd_fence_, nullptr);
-        fence_event_ = std::exchange(other.fence_event_, nullptr);
-        fence_value_ = std::exchange(other.fence_value_, uint64_t{0});
-        upload_buffer_ = std::exchange(other.upload_buffer_, nullptr);
-        upload_map_ = std::exchange(other.upload_map_, nullptr);
-        upload_pitch_ = std::exchange(other.upload_pitch_, uint32_t{0});
-        swap_chain_ = std::exchange(other.swap_chain_, nullptr);
-        swap_chain3_ = std::exchange(other.swap_chain3_, nullptr);
-        render_targets_[0] = std::exchange(other.render_targets_[0], nullptr);
-        render_targets_[1] = std::exchange(other.render_targets_[1], nullptr);
+        child_hwnd_ = std::move(other.child_hwnd_);
+        dcomp_module_ = std::move(other.dcomp_module_);
+        dcomp_create_ = std::exchange(other.dcomp_create_, nullptr);
+        dcomp_device_ = std::move(other.dcomp_device_);
+        dcomp_target_ = std::move(other.dcomp_target_);
+        visual_ = std::move(other.visual_);
+        factory_ = std::move(other.factory_);
+        device_ = std::move(other.device_);
+        cmd_queue_ = std::move(other.cmd_queue_);
+        cmd_allocator_ = std::move(other.cmd_allocator_);
+        cmd_list_ = std::move(other.cmd_list_);
+        cmd_fence_ = std::move(other.cmd_fence_);
+        fence_event_ = std::move(other.fence_event_);
+        fence_value_ = std::exchange(other.fence_value_, std::uint64_t{0});
+        retirement_ = std::move(other.retirement_);
+        view_heap_ = std::move(other.view_heap_);
+        root_signature_ = std::move(other.root_signature_);
+        pipeline_ = std::move(other.pipeline_);
+        for (int i = 0; i < 2; ++i) render_targets_[i] = std::move(other.render_targets_[i]);
+        swap_chain_ = std::move(other.swap_chain_);
+        view_descriptor_size_ = std::exchange(other.view_descriptor_size_, UINT{0});
         width_ = std::exchange(other.width_, 960);
         height_ = std::exchange(other.height_, 540);
         split_ratio_ = std::exchange(other.split_ratio_, 0.5f);
+        hdr_output_ = std::exchange(other.hdr_output_, false);
         last_present_skipped_ = std::exchange(other.last_present_skipped_, false);
-        tearing_supported_ = std::exchange(other.tearing_supported_, false);
+        device_lost_ = std::exchange(other.device_lost_, false);
     }
     return *this;
 }
+Result<void> PreviewViewport::markDeviceLost(const char* message) noexcept {
+    const HRESULT reason = device_ ? device_->GetDeviceRemovedReason() : DXGI_ERROR_DEVICE_REMOVED;
+    device_lost_ = true;
+    return err(ErrorCode::DeviceLost, message, std::to_string(static_cast<long>(reason)));
+}
+Result<void> PreviewViewport::waitForGpuIdle(std::uint32_t timeout_ms) noexcept {
+    if (device_lost_) {
+        return err(ErrorCode::DeviceLost, "the preview D3D12 device has been removed");
+    }
+    if (!cmd_fence_ || !cmd_queue_) {
+        return {};
+    }
+    const unsigned long long completed = cmd_fence_->GetCompletedValue();
+    if (completed == UINT64_MAX) {
+        retirement_.releaseAll();
+        return markDeviceLost("the preview D3D12 device was removed (fence saturated)");
+    }
+    if (fence_value_ == 0 || completed >= fence_value_) {
+        retirement_.collect();
+        if (retirement_.deviceLostSeen()) {
+            retirement_.resetDeviceLostSeen();
+            return markDeviceLost("the preview D3D12 device was removed");
+        }
+        return {};
+    }
+    if (!fence_event_) {
+        return err(ErrorCode::State, "the preview fence has no completion event");
+    }
+    if (FAILED(cmd_fence_->SetEventOnCompletion(fence_value_, fence_event_.get()))) {
+        return err(ErrorCode::Internal, "SetEventOnCompletion failed for the preview fence");
+    }
+    if (WaitForSingleObject(fence_event_.get(), timeout_ms) == WAIT_OBJECT_0) {
+        retirement_.collect();
+        if (retirement_.deviceLostSeen()) {
+            retirement_.resetDeviceLostSeen();
+            return markDeviceLost("the preview D3D12 device was removed");
+        }
+        return {};
+    }
+    const HRESULT reason = device_ ? device_->GetDeviceRemovedReason() : DXGI_ERROR_DEVICE_REMOVED;
+    if (reason == S_OK) {
+        return err(ErrorCode::Timeout, "the GPU is still executing the submitted preview commands");
+    }
+    retirement_.releaseAll();
+    return markDeviceLost("the preview D3D12 device was removed while draining");
+}
+void PreviewViewport::retireAllGpuResources() noexcept {
+    const std::uint64_t bound = fence_value_;
+    for (auto& rt : render_targets_) {
+        retirement_.retire(bound, std::move(rt));
+    }
+    retirement_.retire(bound, std::move(view_heap_));
+    retirement_.retire(bound, std::move(swap_chain_));
+    retirement_.retire(bound, std::move(cmd_list_));
+    retirement_.retire(bound, std::move(cmd_allocator_));
+    retirement_.retire(bound, std::move(pipeline_));
+    retirement_.retire(bound, std::move(root_signature_));
+    retirement_.retire(bound, std::move(cmd_queue_));
+    retirement_.retire(bound, std::move(device_));
+}
+void PreviewViewport::release() noexcept { releaseGpu(true); }
 
-void PreviewViewport::release() noexcept {
-    if (cmd_queue_ != nullptr && cmd_fence_ != nullptr) {
-        auto* fence = reinterpret_cast<ID3D12Fence*>(cmd_fence_);
-        if (fence->GetCompletedValue() < fence_value_) {
-            if (fence_event_ != nullptr &&
-                SUCCEEDED(fence->SetEventOnCompletion(fence_value_, fence_event_))) {
-                WaitForSingleObject(fence_event_, 1000);
-            }
+void PreviewViewport::releaseGpu(bool viewport_dying) noexcept {
+    if (!cmd_fence_ || !cmd_queue_) {
+        return;
+    }
+    const auto drained = waitForGpuIdle(1000);
+    if (drained.has_value() || drained.error().code != ErrorCode::Timeout) {
+        return;
+    }
+    retireAllGpuResources();
+    ID3D12Fence* fence = cmd_fence_.get();
+    retirement_.setProbe([fence] { return fence->GetCompletedValue(); });
+    retirement_.setKeepalive(ComPtr<IUnknown>(cmd_fence_.release()));
+    retirement_.setEventKeepalive(std::move(fence_event_));
+    if (viewport_dying) {
+        retirement_.setWindowKeepalive(std::move(child_hwnd_));
+    }
+    deferRetirement(std::move(retirement_));
+}
+bool PreviewViewport::createViewHeap() noexcept {
+    D3D12_DESCRIPTOR_HEAP_DESC heap{};
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heap.NumDescriptors = 2;
+    heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    heap.NodeMask = 0;
+    if (!callComOut(device_.get(), &ID3D12Device::CreateDescriptorHeap, view_heap_, &heap)) {
+        return false;
+    }
+    view_descriptor_size_ =
+        device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return true;
+}
+bool PreviewViewport::createCompositionSwapChain() noexcept {
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = static_cast<UINT>(width_);
+    desc.Height = static_cast<UINT>(height_);
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_UNORDERED_ACCESS;
+    desc.BufferCount = kSwapChainBuffers;
+    desc.Scaling = DXGI_SCALING_ASPECT_RATIO_STRETCH;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    desc.Flags = kSwapChainFlags;
+
+    swap_chain_.reset();
+    IDXGISwapChain1* raw_chain = nullptr;
+    if (FAILED(factory_->CreateSwapChainForComposition(cmd_queue_.get(), &desc, nullptr,
+                                                       &raw_chain))) {
+        return false;
+    }
+    IDXGISwapChain4* raw_swap = nullptr;
+    const bool queried = SUCCEEDED(raw_chain->QueryInterface(
+        __uuidof(IDXGISwapChain4), reinterpret_cast<void**>(&raw_swap)));
+    raw_chain->Release();
+    if (!queried) {
+        return false;
+    }
+    swap_chain_.reset(raw_swap);
+
+    hdr_output_ = false;
+    UINT support = 0;
+    if (SUCCEEDED(swap_chain_->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+                                                      &support)) &&
+        (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0) {
+        if (SUCCEEDED(swap_chain_->ResizeBuffers(kSwapChainBuffers, desc.Width, desc.Height,
+                                                 DXGI_FORMAT_R16G16B16A16_FLOAT, kSwapChainFlags)) &&
+            SUCCEEDED(swap_chain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            hdr_output_ = true;
         }
     }
-    if (upload_buffer_ != nullptr && upload_map_ != nullptr) {
-        D3D12_RANGE written{0, 0};
-        reinterpret_cast<ID3D12Resource*>(upload_buffer_)->Unmap(0, &written);
-        upload_map_ = nullptr;
+    if (FAILED(swap_chain_->SetMaximumFrameLatency(1))) {
+        return false;
     }
-    safeRelease(reinterpret_cast<ID3D12Resource*&>(render_targets_[0]));
-    safeRelease(reinterpret_cast<ID3D12Resource*&>(render_targets_[1]));
-    safeRelease(reinterpret_cast<IDXGISwapChain3*&>(swap_chain3_));
-    safeRelease(reinterpret_cast<IDXGISwapChain1*&>(swap_chain_));
-    safeRelease(reinterpret_cast<ID3D12Resource*&>(upload_buffer_));
-    safeRelease(reinterpret_cast<ID3D12Fence*&>(cmd_fence_));
-    safeRelease(reinterpret_cast<ID3D12GraphicsCommandList*&>(cmd_list_));
-    safeRelease(reinterpret_cast<ID3D12CommandAllocator*&>(cmd_allocator_));
-    safeRelease(reinterpret_cast<ID3D12CommandQueue*&>(cmd_queue_));
-    safeRelease(reinterpret_cast<ID3D12Device*&>(device_));
-    safeRelease(reinterpret_cast<IDXGIFactory2*&>(factory_));
-    if (fence_event_ != nullptr) {
-        CloseHandle(fence_event_);
-        fence_event_ = nullptr;
+    for (UINT i = 0; i < kSwapChainBuffers; ++i) {
+        ID3D12Resource* raw_target = nullptr;
+        if (FAILED(swap_chain_->GetBuffer(i, __uuidof(ID3D12Resource),
+                                          reinterpret_cast<void**>(&raw_target)))) {
+            return false;
+        }
+        render_targets_[i].reset(raw_target);
     }
-    if (child_hwnd_ != nullptr) {
-        DestroyWindow(child_hwnd_);
-        child_hwnd_ = nullptr;
-    }
+    return true;
 }
+bool PreviewViewport::adoptDevice(void* borrowed_device) noexcept {
+    auto* raw = static_cast<ID3D12Device*>(borrowed_device);
+    if (raw == nullptr) {
+        return false;
+    }
+    if (device_.get() != raw) {
+        if (visual_) {
+            (void)visual_->SetContent(nullptr);
+        }
+        if (dcomp_target_) {
+            (void)dcomp_target_->SetRoot(nullptr);
+        }
+        if (dcomp_device_) {
+            (void)dcomp_device_->Commit();
+        }
+        releaseGpu(false);
+    }
+    raw->AddRef();
+    device_.reset(raw);
 
+    D3D12_COMMAND_QUEUE_DESC queue{};
+    queue.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queue.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+    queue.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    queue.NodeMask = 0;
+    if (!callComOut(device_.get(), &ID3D12Device::CreateCommandQueue, cmd_queue_, &queue)) {
+        return false;
+    }
+    if (!callComOut(device_.get(), &ID3D12Device::CreateCommandAllocator, cmd_allocator_,
+                    D3D12_COMMAND_LIST_TYPE_DIRECT)) {
+        return false;
+    }
+    if (!callComOut(device_.get(), &ID3D12Device::CreateCommandList, cmd_list_, 0u,
+                    D3D12_COMMAND_LIST_TYPE_DIRECT, cmd_allocator_.get(), nullptr)) {
+        return false;
+    }
+    (void)cmd_list_->Close();
+    if (!callComOut(device_.get(), &ID3D12Device::CreateFence, cmd_fence_, 0u,
+                    D3D12_FENCE_FLAG_NONE)) {
+        return false;
+    }
+    fence_event_.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+    if (!fence_event_) {
+        return false;
+    }
+    fence_value_ = 0;
+    device_lost_ = false;
+    ID3D12Fence* fence = cmd_fence_.get();
+    retirement_.setProbe([fence] { return fence->GetCompletedValue(); });
+
+    if (!buildComputePipeline(device_.get(), root_signature_, pipeline_)) {
+        return false;
+    }
+    if (!createViewHeap()) {
+        return false;
+    }
+    IDXGIFactory2* raw_factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory2),
+                                  reinterpret_cast<void**>(&raw_factory)))) {
+        return false;
+    }
+    factory_.reset(raw_factory);
+    if (!createCompositionSwapChain()) {
+        return false;
+    }
+    dcomp_device_.reset();
+    IDCompositionDevice* raw_dcomp = nullptr;
+    if (FAILED(dcomp_create_(nullptr, __uuidof(IDCompositionDevice),
+                             reinterpret_cast<void**>(&raw_dcomp)))) {
+        return false;
+    }
+    dcomp_device_.reset(raw_dcomp);
+    dcomp_target_.reset();
+    IDCompositionTarget* raw_target = nullptr;
+    if (FAILED(dcomp_device_->CreateTargetForHwnd(child_hwnd_.get(), TRUE, &raw_target))) {
+        return false;
+    }
+    dcomp_target_.reset(raw_target);
+    visual_.reset();
+    IDCompositionVisual* raw_visual = nullptr;
+    if (FAILED(dcomp_device_->CreateVisual(&raw_visual))) {
+        return false;
+    }
+    visual_.reset(raw_visual);
+    if (FAILED(visual_->SetContent(swap_chain_.get()))) {
+        return false;
+    }
+    if (FAILED(dcomp_target_->SetRoot(visual_.get()))) {
+        return false;
+    }
+    return SUCCEEDED(dcomp_device_->Commit());
+}
 void PreviewViewport::setBounds(int x, int y, int w, int h) noexcept {
-    if (child_hwnd_ != nullptr) {
-        MoveWindow(child_hwnd_, x, y, w, h, TRUE);
+    if (child_hwnd_) {
+        MoveWindow(child_hwnd_.get(), x, y, w, h, TRUE);
     }
 }
-
 void PreviewViewport::resizeSwapChain(int width, int height) noexcept {
-    auto* swap = reinterpret_cast<IDXGISwapChain1*>(swap_chain_);
-    if (swap == nullptr || width <= 0 || height <= 0) {
+    if (!swap_chain_ || width <= 0 || height <= 0 || device_lost_) {
         return;
     }
     if (width == width_ && height == height_) {
         return;
     }
-    // RW-1 fix: geometry is owned exclusively by setBounds() (no MoveWindow
-    // here — the viewport never teleports).  1. Drain the in-flight frame.
-    auto* queue = reinterpret_cast<ID3D12CommandQueue*>(cmd_queue_);
-    auto* fence = reinterpret_cast<ID3D12Fence*>(cmd_fence_);
-    if (queue != nullptr && fence != nullptr && fence_event_ != nullptr) {
-        const UINT64 fence_val = ++fence_value_;
-        if (SUCCEEDED(queue->Signal(fence, fence_val))) {
-            if (fence->GetCompletedValue() < fence_val) {
-                if (SUCCEEDED(fence->SetEventOnCompletion(fence_val, fence_event_))) {
-                    WaitForSingleObject(fence_event_, 100);
-                }
-            }
-        }
-    }
-
-    // 2. Release back buffers (FLIP_DISCARD needs zero RTs across ResizeBuffers).
-    for (auto*& rt : render_targets_) {
-        safeRelease(reinterpret_cast<ID3D12Resource*&>(rt));
-    }
-
-    // 3. Release the old upload heap (RW-1: it MUST track the swap chain size).
-    auto* up_buf = reinterpret_cast<ID3D12Resource*>(upload_buffer_);
-    if (up_buf != nullptr) {
-        if (upload_map_ != nullptr) {
-            D3D12_RANGE written{0, 0};
-            up_buf->Unmap(0, &written);
-            upload_map_ = nullptr;
-        }
-        safeRelease(reinterpret_cast<ID3D12Resource*&>(upload_buffer_));
-    }
-
-    // 4. Resize the swap chain to the new viewport size.
-    if (FAILED(swap->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height),
-                                   DXGI_FORMAT_UNKNOWN,
-                                   tearing_supported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u))) {
+    if (!waitForGpuIdle(100).has_value()) {
         return;
     }
-    width_ = width;
-    height_ = height;
+    for (auto& rt : render_targets_) {
+        rt.reset();
+    }
+    view_heap_.reset();
+    (void)cmd_allocator_->Reset();
+    (void)cmd_list_->Reset(cmd_allocator_.get(), nullptr);
+    (void)cmd_list_->Close();
 
-    // 5. Re-acquire the resized back buffers.
-    for (UINT i = 0; i < 2; ++i) {
-        if (FAILED(swap->GetBuffer(i, IID_PPV_ARGS(
-                        reinterpret_cast<ID3D12Resource**>(&render_targets_[i]))))) {
+    if (SUCCEEDED(swap_chain_->ResizeBuffers(kSwapChainBuffers, static_cast<UINT>(width),
+                                             static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN,
+                                             kSwapChainFlags))) {
+        width_ = width;
+        height_ = height;
+    }
+    for (UINT i = 0; i < kSwapChainBuffers; ++i) {
+        ID3D12Resource* raw_target = nullptr;
+        if (FAILED(swap_chain_->GetBuffer(i, __uuidof(ID3D12Resource),
+                                          reinterpret_cast<void**>(&raw_target)))) {
+            return;
+        }
+        render_targets_[i].reset(raw_target);
+    }
+    (void)createViewHeap();
+}
+void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_resource,
+                                    std::uint32_t pitch, std::uint32_t src_width,
+                                    std::uint32_t src_height, bool input_is_pq, float max_nits,
+                                    const PreviewSlotTicket& ticket) noexcept {
+    last_present_skipped_ = true;
+    if (borrowed_d3d12_device == nullptr || shared_resource == nullptr || pitch == 0 ||
+        src_width == 0 || src_height == 0) {
+        return;
+    }
+    if (device_lost_) {
+        return;
+    }
+    if (device_.get() != static_cast<ID3D12Device*>(borrowed_d3d12_device)) {
+        if (!adoptDevice(borrowed_d3d12_device)) {
             return;
         }
     }
-
-    // 6. Reallocate the aligned D3D12 upload heap for the new frame size.
-    auto* device = reinterpret_cast<ID3D12Device*>(device_);
-    if (device == nullptr) {
+    if (!swap_chain_ || !pipeline_ || !view_heap_ || !cmd_list_) {
         return;
     }
-    upload_pitch_ = (static_cast<uint32_t>(width) * 4u + 255u) & ~255u;
-    const UINT64 upload_size =
-        static_cast<UINT64>(upload_pitch_) * static_cast<UINT64>(height);
-    D3D12_HEAP_PROPERTIES upload_heap{};
-    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC buffer_desc{};
-    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer_desc.Width = upload_size;
-    buffer_desc.Height = 1;
-    buffer_desc.DepthOrArraySize = 1;
-    buffer_desc.MipLevels = 1;
-    buffer_desc.Format = DXGI_FORMAT_UNKNOWN;
-    buffer_desc.SampleDesc.Count = 1;
-    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    ID3D12Resource* new_upload = nullptr;
-    if (SUCCEEDED(device->CreateCommittedResource(
-            &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&new_upload)))) {
-        upload_buffer_ = new_upload;
-        D3D12_RANGE read_range{0, 0};
-        new_upload->Map(0, &read_range, &upload_map_);
-    }
-}
-
-void PreviewViewport::presentFromHostOrShared(const void* r10g10b10a2_data,
-                                              std::uint32_t pitch) noexcept {
-    last_present_skipped_ = true;
-    if (swap_chain_ == nullptr || swap_chain3_ == nullptr || r10g10b10a2_data == nullptr ||
-        upload_map_ == nullptr) {
+    if (device_->GetDeviceRemovedReason() != S_OK) {
+        device_lost_ = true;
         return;
     }
-    auto* swap = reinterpret_cast<IDXGISwapChain1*>(swap_chain_);
-    auto* swap3 = reinterpret_cast<IDXGISwapChain3*>(swap_chain3_);
-    auto* device = reinterpret_cast<ID3D12Device*>(device_);
-    auto* queue = reinterpret_cast<ID3D12CommandQueue*>(cmd_queue_);
-    auto* allocator = reinterpret_cast<ID3D12CommandAllocator*>(cmd_allocator_);
-    auto* list = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd_list_);
-    auto* upload = reinterpret_cast<ID3D12Resource*>(upload_buffer_);
-    auto* fence = reinterpret_cast<ID3D12Fence*>(cmd_fence_);
-
-    if (device != nullptr && device->GetDeviceRemovedReason() != S_OK) {
+    if (!waitForGpuIdle(0).has_value()) {
         return;
     }
-
-    // 1. Wait on CPU for previous command list execution to complete before resetting allocator
-    if (fence_value_ > 0 && fence != nullptr) {
-        if (fence->GetCompletedValue() < fence_value_) {
-            if (fence_event_ != nullptr &&
-                SUCCEEDED(fence->SetEventOnCompletion(fence_value_, fence_event_))) {
-                if (WaitForSingleObject(fence_event_, 50) != WAIT_OBJECT_0) {
-                    return;  // GPU still busy with previous present; skip frame
-                }
-            }
-        }
-    }
-
-    // 2. Query active back buffer index from the flip swap chain
-    const UINT back_buffer_idx = swap3->GetCurrentBackBufferIndex();
-    if (back_buffer_idx >= 2) {
+    if (WaitForSingleObject(swap_chain_->GetFrameLatencyWaitableObject(), 0) != WAIT_OBJECT_0) {
         return;
     }
-    auto* back_buffer = reinterpret_cast<ID3D12Resource*>(render_targets_[back_buffer_idx]);
-    if (back_buffer == nullptr) {
+    const UINT back_buffer_idx = swap_chain_->GetCurrentBackBufferIndex();
+    if (back_buffer_idx >= kSwapChainBuffers || !render_targets_[back_buffer_idx]) {
         return;
     }
+    ID3D12Resource* back_buffer = render_targets_[back_buffer_idx].get();
+    const DXGI_FORMAT back_format =
+        hdr_output_ ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
 
-    // 3. Bounds-defended host copy: never read past the staged 960x540
-    // source frame nor write past the upload heap (RW-1 fix).
-    const uint32_t copy_bytes =
-        (static_cast<uint32_t>(width_) * 4u < pitch) ? (static_cast<uint32_t>(width_) * 4u) : pitch;
-    const uint8_t* source = static_cast<const uint8_t*>(r10g10b10a2_data);
-    uint8_t* target = static_cast<uint8_t*>(upload_map_);
-    const int copy_rows = (std::min)(height_, 540);
-    for (int row = 0; row < copy_rows; ++row) {
-        std::memcpy(target + static_cast<size_t>(row) * upload_pitch_,
-                    source + static_cast<size_t>(row) * pitch, copy_bytes);
-    }
+    const D3D12_CPU_DESCRIPTOR_HANDLE cpu = view_heap_->GetCPUDescriptorHandleForHeapStart();
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_R32_UINT;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Buffer.FirstElement = 0;
+    srv.Buffer.NumElements = (pitch / 4u) * src_height;
+    srv.Buffer.StructureByteStride = 0;
+    srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+    device_->CreateShaderResourceView(static_cast<ID3D12Resource*>(shared_resource), &srv, cpu);
 
-    if (FAILED(allocator->Reset()) || FAILED(list->Reset(allocator, nullptr))) {
+    D3D12_CPU_DESCRIPTOR_HANDLE uav_handle = cpu;
+    uav_handle.ptr += view_descriptor_size_;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    uav.Format = back_format;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    uav.Texture2D.MipSlice = 0;
+    uav.Texture2D.PlaneSlice = 0;
+    device_->CreateUnorderedAccessView(back_buffer, nullptr, &uav, uav_handle);
+
+    if (FAILED(cmd_allocator_->Reset()) || FAILED(cmd_list_->Reset(cmd_allocator_.get(), nullptr))) {
         return;
     }
+    cmd_list_->SetComputeRootSignature(root_signature_.get());
+    cmd_list_->SetPipelineState(pipeline_.get());
+    ID3D12DescriptorHeap* heaps[] = {view_heap_.get()};
+    cmd_list_->SetDescriptorHeaps(1, heaps);
+    cmd_list_->SetComputeRootDescriptorTable(0, view_heap_->GetGPUDescriptorHandleForHeapStart());
 
-    D3D12_RESOURCE_BARRIER to_dest{};
-    to_dest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_dest.Transition.pResource = back_buffer;
-    to_dest.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    to_dest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    to_dest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    list->ResourceBarrier(1, &to_dest);
+    const bool split_on = split_ratio_ > 0.0f && split_ratio_ < 1.0f;
+    ViewportConstants constants{};
+    constants.src_size[0] = src_width;
+    constants.src_size[1] = src_height;
+    constants.dst_size[0] = static_cast<std::uint32_t>(width_);
+    constants.dst_size[1] = static_cast<std::uint32_t>(height_);
+    constants.pitch_words = pitch / 4u;
+    constants.hdr_mode = hdr_output_ ? 1u : 0u;
+    constants.split = split_ratio_;
+    constants.max_nits = max_nits > 0.0f ? max_nits : kSdrReferenceNits;
+    constants.split_on = split_on ? 1u : 0u;
+    constants.reserved[0] = input_is_pq ? 1u : 0u;
+    cmd_list_->SetComputeRoot32BitConstants(1, kRootConstantDwords, &constants, 0);
 
-    D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = upload;
-    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-    src.PlacedFootprint.Footprint.Width = static_cast<UINT>(width_);
-    src.PlacedFootprint.Footprint.Height = static_cast<UINT>(height_);
-    src.PlacedFootprint.Footprint.Depth = 1;
-    src.PlacedFootprint.Footprint.RowPitch = upload_pitch_;
-    D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = back_buffer;
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    resourceBarrier(cmd_list_.get(), back_buffer, D3D12_RESOURCE_STATE_PRESENT,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd_list_->Dispatch((static_cast<UINT>(width_) + kComputeGroup - 1) / kComputeGroup,
+                        (static_cast<UINT>(height_) + kComputeGroup - 1) / kComputeGroup, 1);
+    resourceBarrier(cmd_list_.get(), back_buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_PRESENT);
 
-    D3D12_RESOURCE_BARRIER to_present{};
-    to_present.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_present.Transition.pResource = back_buffer;
-    to_present.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    to_present.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    to_present.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    list->ResourceBarrier(1, &to_present);
-
-    if (FAILED(list->Close())) {
+    if (FAILED(cmd_list_->Close())) {
         return;
     }
+    ID3D12CommandList* lists[] = {cmd_list_.get()};
+    cmd_queue_->ExecuteCommandLists(1, lists);
 
-    ID3D12CommandList* lists[] = {list};
-    queue->ExecuteCommandLists(1, lists);
-
-    const UINT flags =
-        (tearing_supported_ ? DXGI_PRESENT_ALLOW_TEARING : 0u) | DXGI_PRESENT_DO_NOT_WAIT;
-    const HRESULT presented = swap->Present(0, flags);
-    if (SUCCEEDED(presented)) {
-        last_present_skipped_ = false;
-    } else {
-        last_present_skipped_ = true;
-    }
+    last_present_skipped_ = FAILED(swap_chain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT));
 
     ++fence_value_;
-    (void)queue->Signal(fence, fence_value_);
+    if (FAILED(cmd_queue_->Signal(cmd_fence_.get(), fence_value_))) {
+        device_lost_ = true;
+        retirement_.releaseAll();
+        return;
+    }
+    auto* res = static_cast<IUnknown*>(shared_resource);
+    res->AddRef();
+    auto flags = ticket.first;
+    const std::uint32_t slot_index = ticket.second;
+    retirement_.retire(fence_value_, res, [flags = std::move(flags), slot_index] {
+        if (flags != nullptr && slot_index < flags->size()) {
+            (*flags)[slot_index].store(0, std::memory_order_release);
+        }
+    });
 }
-
 }  // namespace rtx::gui

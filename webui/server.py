@@ -52,16 +52,13 @@ CHUNK_BYTES = 64 * 1024
 MAX_BODY = 4 * 1024 * 1024
 state_lock = threading.RLock()
 
-
 class BridgeError(Exception):
     def __init__(self, msg: str, status: int = 400) -> None:
         super().__init__(msg)
         self.status = status
 
-
 def stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
-
 
 def load_state() -> dict:
     with state_lock:
@@ -73,14 +70,12 @@ def load_state() -> dict:
             raise BridgeError("state.json must hold an object", 500)
         return doc
 
-
 def save_state(doc: dict) -> None:
     with state_lock:
         payload = (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         tmp = STATE_PATH.with_suffix(".json.tmp")
         tmp.write_bytes(payload)
         os.replace(tmp, STATE_PATH)
-
 
 def derive_output_path(input_path: str, codec: str) -> str:
     if not input_path:
@@ -93,11 +88,9 @@ def derive_output_path(input_path: str, codec: str) -> str:
     suffix = OUTPUT_SUFFIX.get((codec or "av1").lower(), OUTPUT_SUFFIX["av1"])
     return prefix + stem + suffix
 
-
 def basename_str(path_str: str) -> str:
     cut = max(path_str.rfind("/"), path_str.rfind("\\"))
     return path_str[cut + 1 :] if cut >= 0 else path_str
-
 
 def job0() -> dict:
     return {
@@ -110,8 +103,6 @@ def job0() -> dict:
         "report": None,
         "logTail": [],
     }
-
-
 runtime = {
     "probe": None,
     "engine": {"found": False, "resolved": "", "version": ""},
@@ -133,28 +124,23 @@ clients: list = []
 last_publish = 0.0
 _ver_cache: dict = {}
 
-
 def bus(ev: dict) -> None:
     with bus_lock:
         targets = list(clients)
     for queue in targets:
         queue.append(ev)
 
-
 def snapshot() -> dict:
     with rt_lock:
         return copy.deepcopy(runtime)
-
 
 def sections(doc: dict | None = None) -> dict:
     target = doc if doc is not None else load_state()
     return {key: target.get(key) for key in SECTIONS}
 
-
 def broadcast_state(doc: dict | None = None) -> None:
     target = doc if doc is not None else load_state()
     bus({"type": "state-file", "state": sections(target)})
-
 
 def house(fn, force: bool = False, persist: bool = False) -> None:
     global last_publish
@@ -179,10 +165,8 @@ def house(fn, force: bool = False, persist: bool = False) -> None:
         except (BridgeError, OSError):
             pass
 
-
 def no_window() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-
 
 def resolve_engine(doc: dict | None = None) -> tuple[str, bool, str]:
     cfg = (doc or load_state()).get("engine") or {}
@@ -208,7 +192,6 @@ def resolve_engine(doc: dict | None = None) -> tuple[str, bool, str]:
             _ver_cache[str(path)] = ""
     return str(path), path.is_file(), _ver_cache.get(str(path), "")
 
-
 def engine_json(*args: str, timeout: int = 30) -> dict:
     path, found, _ = resolve_engine()
     if not found:
@@ -228,10 +211,8 @@ def engine_json(*args: str, timeout: int = 30) -> dict:
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise BridgeError(f"{args[0]}: {exc}", 502) from exc
 
-
 def schema() -> dict:
     return engine_json("--schema-json")
-
 
 def probe() -> dict:
     try:
@@ -244,7 +225,6 @@ def probe() -> dict:
         result = {"available": False, "error": str(exc)}
     house(lambda rt: rt.update({"probe": result}), force=True, persist=True)
     return result
-
 
 def apply_event(rt: dict, ev: dict) -> None:
     job = rt["job"]
@@ -280,7 +260,6 @@ def apply_event(rt: dict, ev: dict) -> None:
         )
         if job["status"] == "done":
             job["progress"]["pct"] = 100.0
-
 
 def normalize_job_entry(
     raw_inputs: list[str],
@@ -342,8 +321,6 @@ def normalize_job_entry(
         "error": None,
         "profile": snap_profile,
     }
-
-
 class JobRunner:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -877,9 +854,7 @@ class JobRunner:
             return "failed", code, "engine exited without a report event", file_report
         return file_status, (file_exit if file_exit is not None else code), file_error, file_report
 
-
 JOB = JobRunner()
-
 
 def state_doc() -> dict:
     doc = load_state()
@@ -891,7 +866,6 @@ def state_doc() -> dict:
     )
     doc["runtime"] = snapshot()
     return doc
-
 
 def list_dir(raw: str) -> dict:
     if not raw or raw == "roots":
@@ -936,7 +910,6 @@ def list_dir(raw: str) -> dict:
     parent = str(target.parent) if target.parent != target else None
     return {"path": str(target), "parent": parent, "entries": entries[:2000]}
 
-
 def parse_range(header: str, size: int) -> tuple[int, int] | None:
     """Return an inclusive byte window, or None for an unsatisfiable range."""
     if not header.startswith("bytes="):
@@ -959,7 +932,6 @@ def parse_range(header: str, size: int) -> tuple[int, int] | None:
     if start < 0 or start >= size or end < start:
         return None
     return start, min(end, size - 1)
-
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -1134,7 +1106,6 @@ class Handler(BaseHTTPRequestHandler):
         body = f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
         self.wfile.write(body)
 
-
 def main() -> int:
     global STATE_PATH
 
@@ -1162,7 +1133,6 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

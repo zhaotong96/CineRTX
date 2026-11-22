@@ -30,7 +30,6 @@ inline void trace(const char* format, ...) {
     std::fputc('\n', stderr);
     std::fflush(stderr);
 }
-
 }  // namespace rtx_shim
 
 #define RTX_TRACE(...) ::rtx_shim::trace(__VA_ARGS__)

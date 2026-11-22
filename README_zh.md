@@ -28,12 +28,12 @@
 ```powershell
 ./CineRTX.exe
 ```
-- `[1] Encoder`：19 项 SSOT 参数转码矩阵，支持视频拖拽；
+- `[1] Encoder`：20 项 SSOT 参数转码矩阵，支持视频拖拽；
 - `[2] Player`：播放审片；`[3] NLE`：四轨 Flicks 时间轴非线编；
 - `+1` 第 4 形态：将视频文件打开方式关联为 `CineRTX.exe` 后，双击视频直接进入无边框全屏动态 VSR 超分快播（视口分辨率自适应倍率如 `2.00x`，竖屏 `1.6875x`）；
 - **语言切换**：随时按下 `Ctrl+L` 原地切换中英双语。
 
-### 2. WebUI 浏览器三态工作站 (Encoder / Player / NLE)
+### 2. WebUI v3 浏览器三态工作站 (Encoder / Player / NLE)
 ```powershell
 python webui/server.py --port 8787
 ```
@@ -99,7 +99,7 @@ cmake --build --preset windows-msvc-ninja
 ```powershell
 cmake -DBUILD_DIR=.vs/build/cmake/windows-msvc-ninja -P cmake/PackageRelease.cmake
 ```
-生成包含 SHA-256 完整性清单与说明文档的 `.vs/build/dist/CineRTX-v0.1.0-windows-x64.zip`。
+生成包含 SHA-256 完整性清单与说明文档的 `.vs/build/dist/CineRTX-v0.3.0-windows-x64.zip`。
 
 ---
 

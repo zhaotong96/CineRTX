@@ -13,7 +13,6 @@
 // Hardware NVDEC surface decoding and asynchronous cuMemcpy2DAsync into GPU VRAM pool.
 // Bypasses host staging memory entirely, delivering zero-copy NV12/P010 surfaces to NGX and NVENC.
 // Surface mappings must be strictly unmapped upon export event signaling to prevent VRAM leaks.
-
 #include "dyn_library.h"
 #include "nv_cuda_context.h"
 #include "nv_func_tables.h"
@@ -56,7 +55,10 @@ cudaVideoCodec mapCodec(int32_t codec) {
             return cudaVideoCodec_NumCodecs;
     }
 }
-
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct DecoderFunctions {
     tcuvidCreateVideoParser* createParser = nullptr;
     tcuvidParseVideoData* parseVideoData = nullptr;
@@ -91,23 +93,31 @@ struct DecoderFunctions {
     }
 };
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 struct Slot {
     CUdeviceptr pointer = 0;
     size_t pitch = 0;
     size_t bytes = 0;
     bool in_use = false;
-    // Completion event for the export copy.  The surface is unmapped as soon as
-    // the copy is enqueued (the driver keeps it alive until the stream work
-    // completes), and the consumer waits on this event before handing the
-    // buffer to NVENC.
-    // DriverTable declares its own opaque CUevent (void*) so that the shim does
-    // not depend on the global cuda.h typedef; keep the member in that type.
     rtx_shim::cuda::CUevent ready_event = nullptr;
     bool event_valid = false;
+// Completion event for the export copy.  The surface is unmapped as soon as
+// the copy is enqueued (the driver keeps it alive until the stream work
+// completes), and the consumer waits on this event before handing the
+// buffer to NVENC.
+// DriverTable declares its own opaque CUevent (void*) so that the shim does
+// not depend on the global cuda.h typedef; keep the member in that type.
 };
 
 }  // namespace
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct RtxDecoder {
     RtxDecoderConfig config{};
     Context cuda;
@@ -124,12 +134,12 @@ struct RtxDecoder {
     int width = 0;
     int height = 0;
     int bit_depth = 8;
-    // The CUVID parser hands out CurrPicIdx values from its own surface space,
-    // so the decoder must be created with exactly the same count.  A smaller
-    // decoder makes cuvidDecodePicture fail with CUDA_ERROR_INVALID_VALUE as
-    // soon as the stream needs more reference surfaces than we allocated.
     unsigned int surface_count = 32;
     bool end_of_stream = false;
+// The CUVID parser hands out CurrPicIdx values from its own surface space,
+// so the decoder must be created with exactly the same count.  A smaller
+// decoder makes cuvidDecodePicture fail with CUDA_ERROR_INVALID_VALUE as
+// soon as the stream needs more reference surfaces than we allocated.
     bool flushed = false;
     bool failed = false;
 
@@ -137,11 +147,11 @@ struct RtxDecoder {
     static int CUDAAPI decodeCallback(void* user, CUVIDPICPARAMS* params);
     static int CUDAAPI displayCallback(void* user, CUVIDPARSERDISPINFO* info);
 
-    // Guarantees that a frame handed to the encoder is fully copied.  NVENC
-    // consumes the pointer on its own engine, so CUDA stream ordering alone is
-    // not enough; the export event must have signalled.
     void waitSlotReady(uint32_t index) {
         Slot& slot = slots[index];
+// Guarantees that a frame handed to the encoder is fully copied.  NVENC
+// consumes the pointer on its own engine, so CUDA stream ordering alone is
+// not enough; the export event must have signalled.
         if (!slot.event_valid || slot.ready_event == nullptr) {
             return;
         }
@@ -149,13 +159,11 @@ struct RtxDecoder {
             (void)cuda.driver().cuEventSynchronize(slot.ready_event);
         }
     }
-
     RtxResult fail(RtxResult result, const std::string& message) {
         last_error = message;
         failed = true;
         return result;
     }
-
     bool ensureSlots(int frame_width, int frame_height) {
         if (frame_width <= 0 || frame_height <= 0) {
             return false;
@@ -166,12 +174,12 @@ struct RtxDecoder {
         if (stream != nullptr && cuda.driver().cuStreamSynchronize != nullptr) {
             (void)cuda.driver().cuStreamSynchronize(stream);
         }
-        // Format change or first frame: rebuild the pool.  Frames still queued
-        // for the encoder belong to the old geometry and are invalidated.
         ready.clear();
         for (Slot& slot : slots) {
             if (slot.ready_event != nullptr && cuda.driver().cuEventDestroy != nullptr) {
                 (void)cuda.driver().cuEventDestroy(slot.ready_event);
+// Format change or first frame: rebuild the pool.  Frames still queued
+// for the encoder belong to the old geometry and are invalidated.
                 slot.ready_event = nullptr;
             }
             slot.event_valid = false;
@@ -205,7 +213,6 @@ struct RtxDecoder {
         }
         return true;
     }
-
     int onSequence(CUVIDEOFORMAT* format) {
         if (format == nullptr) {
             last_error = "CUVID sequence callback received null format";
@@ -213,23 +220,23 @@ struct RtxDecoder {
         }
         bit_depth = static_cast<int>(format->bit_depth_luma_minus8) + 8;
         if (format->chroma_format != cudaVideoChromaFormat_420) {
-            // The stage-1 pool and the NVENC input formats are 4:2:0 only.
             last_error = "stage 1 supports 4:2:0 sources only (stream chroma format " +
                          std::to_string(static_cast<int>(format->chroma_format)) + ")";
             failed = true;
             return 0;
         }
+// The stage-1 pool and the NVENC input formats are 4:2:0 only.
         const int coded_width = static_cast<int>(format->coded_width);
         const int coded_height = static_cast<int>(format->coded_height);
-        // Container geometry is the display area (e.g. 1920x1080), while the
-        // coded size is macroblock aligned (1920x1088).  The decode pool and the
-        // NVENC session must use the display geometry, otherwise the muxer
-        // declares 1080 lines for a 1088-line bitstream.
         int display_width = static_cast<int>(format->display_area.right);
         int display_height = static_cast<int>(format->display_area.bottom);
         if (display_width <= 0 || display_width > coded_width) {
             display_width = coded_width;
         }
+// Container geometry is the display area (e.g. 1920x1080), while the
+// coded size is macroblock aligned (1920x1088).  The decode pool and the
+// NVENC session must use the display geometry, otherwise the muxer
+// declares 1080 lines for a 1088-line bitstream.
         if (display_height <= 0 || display_height > coded_height) {
             display_height = coded_height;
         }
@@ -254,7 +261,6 @@ struct RtxDecoder {
             failed = true;
             return 0;
         }
-
         CUVIDDECODECREATEINFO create{};
         create.CodecType = format->codec;
         create.ChromaFormat = format->chroma_format;
@@ -268,19 +274,19 @@ struct RtxDecoder {
         create.bitDepthMinus8 = static_cast<unsigned long>(bit_depth > 8 ? bit_depth - 8 : 0);
         create.OutputFormat = bit_depth > 8 ? cudaVideoSurfaceFormat_P016
                                             : cudaVideoSurfaceFormat_NV12;
-        // The export copy is asynchronous (ACT-04): the parser thread enqueues
-        // cuMemcpy2DAsync and unmaps immediately, so several decoded frames can
-        // be in flight at once.  The output surface pool must cover the whole
-        // decode ring, otherwise cuvidMapVideoFrame64 fails with
-        // CUDA_ERROR_NOT_MAPPED (205) once the third concurrent frame arrives.
-        // ulNumOutputSurfaces is the pool size, not the DPB size; matching it
-        // to the slot ring (floor of 8) keeps every display callback mappable.
         create.ulNumOutputSurfaces = static_cast<unsigned long>(
             std::max<unsigned long>(static_cast<unsigned long>(slots.size()), 8ul));
         create.DeinterlaceMode = cudaVideoDeinterlaceMode_Weave;
         create.target_rect.left = 0;
         create.target_rect.top = 0;
         create.target_rect.right = static_cast<short>(display_width);
+// The export copy is asynchronous (ACT-04): the parser thread enqueues
+// cuMemcpy2DAsync and unmaps immediately, so several decoded frames can
+// be in flight at once.  The output surface pool must cover the whole
+// decode ring, otherwise cuvidMapVideoFrame64 fails with
+// CUDA_ERROR_NOT_MAPPED (205) once the third concurrent frame arrives.
+// ulNumOutputSurfaces is the pool size, not the DPB size; matching it
+// to the slot ring (floor of 8) keeps every display callback mappable.
         create.target_rect.bottom = static_cast<short>(display_height);
 
         const CUresult result = functions.createDecoder(&decoder, &create);
@@ -291,14 +297,14 @@ struct RtxDecoder {
             last_error = "cuvidCreateDecoder failed (CUDA error " +
                          std::to_string(static_cast<int>(result)) +
                          "); the GPU may not provide an NVDEC engine for this codec";
-            // Surface the failure through every subsequent entry point instead
-            // of letting cuvidParseVideoData retry a session that cannot exist.
             failed = true;
             return 0;
         }
         if (stream == nullptr) {
             if (cuda.driver().cuStreamCreate == nullptr) {
                 last_error = "cuStreamCreate is unavailable";
+// Surface the failure through every subsequent entry point instead
+// of letting cuvidParseVideoData retry a session that cannot exist.
                 return 0;
             }
             void* raw_stream = nullptr;
@@ -310,7 +316,6 @@ struct RtxDecoder {
         }
         return 1;
     }
-
     int onDecode(CUVIDPICPARAMS* params) {
         if (decoder == nullptr || params == nullptr) {
             last_error = "cuvidDecodePicture called without a decoder";
@@ -320,20 +325,17 @@ struct RtxDecoder {
         if (result != CUDA_SUCCESS) {
             last_error = "cuvidDecodePicture failed (CUDA error " +
                          std::to_string(static_cast<int>(result)) + ")";
-            RTX_TRACE("decoder: cuvidDecodePicture -> %d (pic idx %d, %u slices)", 
+            RTX_TRACE("decoder: cuvidDecodePicture -> %d (pic idx %d, %u slices)",
                       static_cast<int>(result), params->CurrPicIdx, params->nNumSlices);
             failed = true;
             return 0;
         }
         return 1;
     }
-
     int onDisplay(CUVIDPARSERDISPINFO* info) {
         if (decoder == nullptr || info == nullptr) {
             return 1;
         }
-        // CUVID_PKT_NOTIFY_EOS delivers a sentinel display callback with a
-        // negative picture index; it is not a decoded surface.
         if (info->picture_index < 0) {
             return 1;
         }
@@ -342,14 +344,10 @@ struct RtxDecoder {
         if (free_slots.empty()) {
             last_error = "decode pool exhausted; release frames before submitting more";
             RTX_TRACE("decoder: display callback rejected - decode pool exhausted");
+// CUVID_PKT_NOTIFY_EOS delivers a sentinel display callback with a
+// negative picture index; it is not a decoded surface.
             return 0;
         }
-        // Bound the number of NVDEC surfaces kept mapped for the asynchronous
-        // export.  CUVID recycles its DPB indices; if a surface is still mapped
-        // when the parser comes back around, cuvidMapVideoFrame64 fails with
-        // CUDA_ERROR_MAP_FAILED (205).  Keeping the outstanding set strictly
-        // below the surface count makes that impossible, and the wait is almost
-        // always already satisfied because the copy was issued frames ago.
         const uint32_t slot_index = free_slots.front();
         free_slots.pop_front();
         Slot& slot = slots[slot_index];
@@ -358,6 +356,12 @@ struct RtxDecoder {
         unsigned int source_pitch = 0;
         CUVIDPROCPARAMS process{};
         process.progressive_frame = info->progressive_frame;
+// Bound the number of NVDEC surfaces kept mapped for the asynchronous
+// export.  CUVID recycles its DPB indices; if a surface is still mapped
+// when the parser comes back around, cuvidMapVideoFrame64 fails with
+// CUDA_ERROR_MAP_FAILED (205).  Keeping the outstanding set strictly
+// below the surface count makes that impossible, and the wait is almost
+// always already satisfied because the copy was issued frames ago.
         process.top_field_first = info->top_field_first;
         process.second_field = 0;
         process.unpaired_field = 0;
@@ -374,7 +378,6 @@ struct RtxDecoder {
             free_slots.push_front(slot_index);
             return 0;
         }
-
         const size_t sample_bytes = bit_depth > 8 ? 2u : 1u;
         const size_t plane_width = static_cast<size_t>(width) * sample_bytes;
         DriverTable& driver = cuda.driver();
@@ -398,10 +401,6 @@ struct RtxDecoder {
             chroma.Height = static_cast<size_t>(height) / 2;
             result = driver.cuMemcpy2DAsync(&chroma, stream);
         }
-        // Record completion instead of blocking the parser thread, then unmap
-        // right away: the driver keeps the surface alive until the enqueued copy
-        // retires, which is the pattern cuvid clients use.  The consumer waits
-        // on the event before handing the buffer to NVENC.
         if (result == CUDA_SUCCESS) {
             if (slot.ready_event == nullptr && driver.cuEventCreate != nullptr) {
                 if (driver.cuEventCreate(&slot.ready_event, CU_EVENT_DISABLE_TIMING) !=
@@ -411,10 +410,12 @@ struct RtxDecoder {
             }
             if (slot.ready_event != nullptr && driver.cuEventRecord != nullptr &&
                 driver.cuEventRecord(slot.ready_event, stream) == CUDA_SUCCESS) {
+// Record completion instead of blocking the parser thread, then unmap
+// right away: the driver keeps the surface alive until the enqueued copy
+// retires, which is the pattern cuvid clients use.  The consumer waits
+// on the event before handing the buffer to NVENC.
                 slot.event_valid = true;
             } else if (driver.cuStreamSynchronize != nullptr) {
-                // No event objects on this driver: fall back to a synchronous
-                // export so the buffer is safe to hand over.
                 result = driver.cuStreamSynchronize(stream);
                 slot.event_valid = false;
             }
@@ -424,8 +425,9 @@ struct RtxDecoder {
             last_error = "cuMemcpy2DAsync failed while exporting a decoded surface";
             free_slots.push_front(slot_index);
             return 0;
+// No event objects on this driver: fall back to a synchronous
+// export so the buffer is safe to hand over.
         }
-
         slot.in_use = true;
         RtxFrameDesc frame{};
         frame.planes[0] = slot.pointer;
@@ -449,15 +451,12 @@ struct RtxDecoder {
 int CUDAAPI RtxDecoder::sequenceCallback(void* user, CUVIDEOFORMAT* format) {
     return static_cast<RtxDecoder*>(user)->onSequence(format);
 }
-
 int CUDAAPI RtxDecoder::decodeCallback(void* user, CUVIDPICPARAMS* params) {
     return static_cast<RtxDecoder*>(user)->onDecode(params);
 }
-
 int CUDAAPI RtxDecoder::displayCallback(void* user, CUVIDPARSERDISPINFO* info) {
     return static_cast<RtxDecoder*>(user)->onDisplay(info);
 }
-
 extern "C" {
 
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
@@ -496,10 +495,6 @@ rtx_shim_decoder_create(const RtxDecoderConfig* config, RtxDecoder** decoder) {
         delete self;
         return RTX_ERR_DLL_MISSING;
     }
-
-    // Query the NVDEC capability matrix before building a parser.  Maxwell
-    // GM204, for example, has no HEVC decode engine: cuvidCreateDecoder would
-    // only fail later, inside the first sequence callback.
     if (self->functions.getDecoderCaps != nullptr) {
         CUVIDDECODECAPS caps{};
         caps.eCodecType = mapCodec(config->codec);
@@ -514,7 +509,9 @@ rtx_shim_decoder_create(const RtxDecoderConfig* config, RtxDecoder** decoder) {
             return RTX_ERR_ARCH_UNSUPPORTED;
         }
     }
-
+// Query the NVDEC capability matrix before building a parser.  Maxwell
+// GM204, for example, has no HEVC decode engine: cuvidCreateDecoder would
+// only fail later, inside the first sequence callback.
     CUVIDPARSERPARAMS params{};
     params.CodecType = mapCodec(config->codec);
     params.ulMaxNumDecodeSurfaces = self->surface_count;
@@ -536,7 +533,6 @@ rtx_shim_decoder_create(const RtxDecoderConfig* config, RtxDecoder** decoder) {
     *decoder = self;
     return RTX_OK;
 }
-
 RTX_SHIM_API void RTX_SHIM_CALL rtx_shim_decoder_destroy(RtxDecoder* decoder) {
     if (decoder == nullptr) {
         return;
@@ -565,7 +561,6 @@ RTX_SHIM_API void RTX_SHIM_CALL rtx_shim_decoder_destroy(RtxDecoder* decoder) {
     }
     delete decoder;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_decoder_submit(RtxDecoder* decoder, const uint8_t* data, size_t size, int64_t pts,
                         int64_t /*dts*/, int32_t flags) {
@@ -593,16 +588,12 @@ rtx_shim_decoder_submit(RtxDecoder* decoder, const uint8_t* data, size_t size, i
     ++decoder->stats.frames_in;
     return RTX_OK;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_decoder_receive(RtxDecoder* decoder, RtxFrameDesc* frame) {
     if (decoder == nullptr || frame == nullptr) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-    // Opportunistically retire export copies that have already completed.
     if (!decoder->ready.empty()) {
-        // The encoder reads the surface on its own engine, so the export copy
-        // for this specific slot must have finished before we hand it over.
         decoder->waitSlotReady(static_cast<uint32_t>(decoder->ready.front().slot_index));
         *frame = decoder->ready.front();
         decoder->ready.pop_front();
@@ -616,24 +607,20 @@ rtx_shim_decoder_receive(RtxDecoder* decoder, RtxFrameDesc* frame) {
     }
     return RTX_ERR_NOT_FOUND;
 }
-
-RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_decoder_flush(RtxDecoder* decoder) {
-    if (decoder == nullptr) {
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_decoder_flush(RtxDecoder* decoder) {    if (decoder == nullptr) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
     if (decoder->failed) {
-        // A failed sequence/decode callback leaves the CUVID parser in an
-        // undefined state; submitting EOS can block indefinitely.
+// Opportunistically retire export copies that have already completed.
         return RTX_ERR_INTERNAL;
+// The encoder reads the surface on its own engine, so the export copy
+// for this specific slot must have finished before we hand it over.
     }
     if (decoder->end_of_stream) {
         return RTX_OK;
     }
     decoder->end_of_stream = true;
     CUVIDSOURCEDATAPACKET packet{};
-    // CUVID_PKT_NOTIFY_EOS makes the parser deliver a sentinel display
-    // callback; CUVID_PKT_ENDOFSTREAM alone drains the DPB and returns, which
-    // is what a synchronous transcode loop needs.
     packet.flags = CUVID_PKT_ENDOFSTREAM;
     packet.payload = nullptr;
     packet.payload_size = 0;
@@ -646,13 +633,62 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_decoder_flush(RtxDecoder* decoder)
     }
     return RTX_OK;
 }
-
+// A failed sequence/decode callback leaves the CUVID parser in an
+// undefined state; submitting EOS can block indefinitely.
+RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_decoder_reset(RtxDecoder* decoder) {
+    if (decoder == nullptr) {
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    if (decoder->failed) {
+        return RTX_ERR_INTERNAL;
+    }
+// CUVID_PKT_NOTIFY_EOS makes the parser deliver a sentinel display
+// callback; CUVID_PKT_ENDOFSTREAM alone drains the DPB and returns, which
+// is what a synchronous transcode loop needs.
+    DriverTable& driver = decoder->cuda.driver();
+    if (decoder->stream != nullptr && driver.cuStreamSynchronize != nullptr) {
+        const int synced = driver.cuStreamSynchronize(decoder->stream);
+        if (synced != rtx_shim::cuda::CUDA_SUCCESS) {
+            return decoder->fail(mapResult(static_cast<CUresult>(synced)),
+                                 "cuStreamSynchronize failed for the non-terminal reset");
+        }
+    }
+    decoder->ready.clear();
+    decoder->free_slots.clear();
+    for (uint32_t index = 0; index < decoder->slots.size(); ++index) {
+        decoder->slots[index].in_use = false;
+        decoder->free_slots.push_back(index);
+    }
+    decoder->end_of_stream = false;
+    decoder->flushed = false;
+    CUVIDSOURCEDATAPACKET packet{};
+    packet.flags = CUVID_PKT_DISCONTINUITY;
+// 与终态 flush 同一裁决：回调失败后的解析器状态未定义，复位同样拒绝。
+    packet.payload = nullptr;
+    packet.payload_size = 0;
+    packet.timestamp = 0;
+// 1. 同步 stream：前序异步导出拷贝（slot -> NVENC/消费方）必须先安全落盘，
+//    之后槽位才能立刻复用。
+    RTX_TRACE("decoder: cuvidParseVideoData(discontinuity) submitting");
+    const CUresult result = decoder->functions.parseVideoData(decoder->parser, &packet);
+    RTX_TRACE("decoder: cuvidParseVideoData(discontinuity) -> %d", static_cast<int>(result));
+    if (result != CUDA_SUCCESS) {
+        return decoder->fail(mapResult(result),
+                             "cuvidParseVideoData(discontinuity) failed");
+    }
+// 2. 清空 ready 队列，全部槽位复原为 in_use = false 并归还 free_slots。
+    return RTX_OK;
+}
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_decoder_release_frame(RtxDecoder* decoder, uint64_t slot_index) {
     if (decoder == nullptr) {
         return RTX_ERR_INVALID_ARGUMENT;
+// 3. 非终态：清零 end_of_stream 与 flushed，submit/receive 立即可用。
     }
     if (slot_index >= decoder->slots.size()) {
+// 4. 提交 CUVID_PKT_DISCONTINUITY（0x04）空包：解析器据此复位参考帧状态，
+//    下一个 IDR 之前的包按新序列重建参考。与 flush 的 ENDOFSTREAM 不同，
+//    解码器实例与 CUDA 主上下文引用计数原封不动，GOP Seek 不再重建会话。
         return RTX_ERR_INVALID_ARGUMENT;
     }
     Slot& slot = decoder->slots[static_cast<size_t>(slot_index)];
@@ -663,7 +699,6 @@ rtx_shim_decoder_release_frame(RtxDecoder* decoder, uint64_t slot_index) {
     decoder->free_slots.push_back(static_cast<uint32_t>(slot_index));
     return RTX_OK;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_decoder_download(RtxDecoder* decoder, const RtxFrameDesc* frame, uint8_t* destination,
                           size_t destination_pitch) {
@@ -688,7 +723,6 @@ rtx_shim_decoder_download(RtxDecoder* decoder, const RtxFrameDesc* frame, uint8_
     if (destination_pitch < row_bytes) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
-
     DriverTable& driver = decoder->cuda.driver();
     rtx_shim::cuda::CUDA_MEMCPY2D copy{};
     copy.srcMemoryType = rtx_shim::cuda::CU_MEMORYTYPE_DEVICE;
@@ -719,7 +753,6 @@ rtx_shim_decoder_download(RtxDecoder* decoder, const RtxFrameDesc* frame, uint8_
     ++decoder->stats.host_pixel_copies;
     return RTX_OK;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL
 rtx_shim_decoder_get_stats(RtxDecoder* decoder, RtxHwStats* stats) {
     if (decoder == nullptr || stats == nullptr) {
@@ -728,12 +761,10 @@ rtx_shim_decoder_get_stats(RtxDecoder* decoder, RtxHwStats* stats) {
     *stats = decoder->stats;
     return RTX_OK;
 }
-
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_shim_decoder_last_error(RtxDecoder* decoder) {
     if (decoder == nullptr) {
         return "invalid RtxDecoder handle";
     }
     return decoder->last_error.c_str();
 }
-
 }  // extern "C"

@@ -48,6 +48,10 @@ typedef struct CUDA_MEMCPY2D_st {
     size_t Height;
 } CUDA_MEMCPY2D_V2;
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct CudaDriverApi {
     CUresult (*memcpy_2d_async)(const CUDA_MEMCPY2D_V2*, void*) = nullptr;
     CUresult (*stream_sync)(void*) = nullptr;
@@ -85,6 +89,10 @@ static CudaDriverApi g_cuda;
 
 }  // namespace
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 struct NvofEngine::Impl {
 #if defined(_WIN32)
     HMODULE nvof_module = nullptr;
@@ -126,7 +134,6 @@ struct NvofEngine::Impl {
             nvof_module = nullptr;
         }
     }
-
     void releaseBuffers() {
         if (!api.nvOFDestroyGPUBufferCuda) return;
         if (input_buffer) { api.nvOFDestroyGPUBufferCuda(input_buffer); input_buffer = nullptr; }
@@ -150,18 +157,15 @@ NvofEngine::~NvofEngine() = default;
 bool NvofEngine::isLoaded() const noexcept {
     return impl_ && impl_->hof != nullptr;
 }
-
 bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* stream, std::string* error) {
     if (!cuContext || width == 0 || height == 0) {
         if (error) *error = "Invalid NVOFA parameters or CUDA context";
         return false;
     }
-
     if (!g_cuda.init()) {
         if (error) *error = "Failed to bind CUDA driver functions for NVOFA";
         return false;
     }
-
 #if defined(_WIN32)
     impl_->nvof_module = LoadLibraryExW(L"nvofapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!impl_->nvof_module) {
@@ -184,22 +188,18 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
         if (error) *error = "NvOFAPICreateInstanceCuda entry point not found in nvofapi64.dll";
         return false;
     }
-
-    // Initialize function table (API version 5.0 = 0x50)
     constexpr uint32_t kApiVer = (5 << 4) | 0;
     NV_OF_STATUS st = pfnCreate(kApiVer, &impl_->api);
     if (st != NV_OF_SUCCESS) {
         if (error) *error = "NvOFAPICreateInstanceCuda failed with status " + std::to_string(st);
         return false;
+// Initialize function table (API version 5.0 = 0x50)
     }
-
     st = impl_->api.nvCreateOpticalFlowCuda(cuContext, &impl_->hof);
     if (st != NV_OF_SUCCESS || !impl_->hof) {
         if (error) *error = "nvCreateOpticalFlowCuda failed with status " + std::to_string(st);
         return false;
     }
-
-    // Configure 4x4 output grid, forward optical flow and cost calculation
     NV_OF_INIT_PARAMS initParams{};
     initParams.width = width;
     initParams.height = height;
@@ -207,6 +207,7 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
     initParams.mode = NV_OF_MODE_OPTICALFLOW;
     initParams.perfLevel = NV_OF_PERF_LEVEL_FAST;
     initParams.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
+// Configure 4x4 output grid, forward optical flow and cost calculation
     initParams.enableOutputCost = 1;
     initParams.inputBufferFormat = NV_OF_BUFFER_FORMAT_NV12;
 
@@ -215,7 +216,6 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
         if (error) *error = "nvOFInit failed with status " + std::to_string(st);
         return false;
     }
-
     (void)impl_->api.nvOFSetIOCudaStreams(impl_->hof, stream, stream);
 
     width_ = width;
@@ -223,7 +223,6 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
     grid_width_ = (width + 3u) / 4u;
     grid_height_ = (height + 3u) / 4u;
 
-    // Allocate Input buffers (NV12 format)
     NV_OF_BUFFER_DESCRIPTOR inDesc{};
     inDesc.width = width_;
     inDesc.height = height_;
@@ -232,6 +231,7 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
 
     st = impl_->api.nvOFCreateGPUBufferCuda(impl_->hof, &inDesc, NV_OF_CUDA_BUFFER_TYPE_CUDEVICEPTR, &impl_->input_buffer);
     if (st != NV_OF_SUCCESS) {
+// Allocate Input buffers (NV12 format)
         if (error) *error = "nvOFCreateGPUBufferCuda for input buffer failed: " + std::to_string(st);
         return false;
     }
@@ -245,7 +245,6 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
     }
     impl_->ref_devptr = impl_->api.nvOFGPUBufferGetCUdeviceptr(impl_->ref_buffer);
 
-    // Allocate Forward & Backward Flow Vector buffers (SHORT2 format, 4x4 grid resolution)
     NV_OF_BUFFER_DESCRIPTOR flowDesc{};
     flowDesc.width = grid_width_;
     flowDesc.height = grid_height_;
@@ -254,6 +253,7 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
 
     st = impl_->api.nvOFCreateGPUBufferCuda(impl_->hof, &flowDesc, NV_OF_CUDA_BUFFER_TYPE_CUDEVICEPTR, &impl_->fwd_buffer);
     if (st != NV_OF_SUCCESS) {
+// Allocate Forward & Backward Flow Vector buffers (SHORT2 format, 4x4 grid resolution)
         if (error) *error = "nvOFCreateGPUBufferCuda for forward flow buffer failed: " + std::to_string(st);
         return false;
     }
@@ -264,7 +264,6 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
                              ? impl_->flow_stride.strideInfo[0].strideXInBytes
                              : grid_width_ * 4u;
 
-    // Allocate Cost buffer (UINT8 format, 4x4 grid resolution)
     NV_OF_BUFFER_DESCRIPTOR costDesc{};
     costDesc.width = grid_width_;
     costDesc.height = grid_height_;
@@ -273,6 +272,7 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
 
     st = impl_->api.nvOFCreateGPUBufferCuda(impl_->hof, &costDesc, NV_OF_CUDA_BUFFER_TYPE_CUDEVICEPTR, &impl_->cost_buffer);
     if (st != NV_OF_SUCCESS) {
+// Allocate Cost buffer (UINT8 format, 4x4 grid resolution)
         if (error) *error = "nvOFCreateGPUBufferCuda for cost buffer failed: " + std::to_string(st);
         return false;
     }
@@ -285,7 +285,6 @@ bool NvofEngine::init(void* cuContext, uint32_t width, uint32_t height, void* st
 
     return true;
 }
-
 bool NvofEngine::execute(
     uint64_t prev_nv12, uint64_t curr_nv12, uint32_t pitch, void* stream,
     uint64_t* out_fwd_flow, uint64_t* out_bwd_flow, uint64_t* out_cost,
@@ -295,7 +294,6 @@ bool NvofEngine::execute(
         if (error) *error = "NVOFA engine is not initialized";
         return false;
     }
-
     const uint32_t dst_pitch = impl_->input_stride.numPlanes > 0
                                    ? impl_->input_stride.strideInfo[0].strideXInBytes
                                    : width_;
@@ -304,7 +302,6 @@ bool NvofEngine::execute(
                                     ? impl_->input_stride.strideInfo[0].strideYInBytes
                                     : height_;
 
-    // 1. Copy prev_nv12 -> input_buffer (Y plane & UV plane)
     CUDA_MEMCPY2D_V2 copy{};
     copy.srcMemoryType = 2; // CU_MEMORYTYPE_DEVICE
     copy.dstMemoryType = 2; // CU_MEMORYTYPE_DEVICE
@@ -315,25 +312,25 @@ bool NvofEngine::execute(
     copy.dstDevice = impl_->input_devptr;
     copy.dstPitch = dst_pitch;
     g_cuda.memcpy_2d_async(&copy, stream);
+// 1. Copy prev_nv12 -> input_buffer (Y plane & UV plane)
 
-    // UV Plane
     copy.Height = height_ / 2;
     copy.srcDevice = prev_nv12 + static_cast<uint64_t>(pitch) * height_;
     copy.dstDevice = impl_->input_devptr + static_cast<uint64_t>(dst_pitch) * dst_y_rows;
     g_cuda.memcpy_2d_async(&copy, stream);
 
-    // 2. Copy curr_nv12 -> ref_buffer (Y plane & UV plane)
     copy.Height = height_;
     copy.srcDevice = curr_nv12;
     copy.dstDevice = impl_->ref_devptr;
     g_cuda.memcpy_2d_async(&copy, stream);
 
+// UV Plane
     copy.Height = height_ / 2;
     copy.srcDevice = curr_nv12 + static_cast<uint64_t>(pitch) * height_;
     copy.dstDevice = impl_->ref_devptr + static_cast<uint64_t>(dst_pitch) * dst_y_rows;
     g_cuda.memcpy_2d_async(&copy, stream);
 
-    // 3. Execute NVOFA hardware optical flow (disableTemporalHints=1 prevents cross-pair state drift)
+// 2. Copy curr_nv12 -> ref_buffer (Y plane & UV plane)
     NV_OF_EXECUTE_INPUT_PARAMS inParams{};
     inParams.inputFrame = impl_->input_buffer;
     inParams.referenceFrame = impl_->ref_buffer;
@@ -344,16 +341,15 @@ bool NvofEngine::execute(
     outParams.outputCostBuffer = impl_->cost_buffer;
 
     NV_OF_STATUS st = impl_->api.nvOFExecute(impl_->hof, &inParams, &outParams);
+// 3. Execute NVOFA hardware optical flow (disableTemporalHints=1 prevents cross-pair state drift)
     if (st != NV_OF_SUCCESS) {
         if (error) *error = "nvOFExecute failed with status " + std::to_string(st);
         return false;
     }
-
     if (out_fwd_flow) *out_fwd_flow = impl_->fwd_devptr;
     if (out_bwd_flow) *out_bwd_flow = 0;
     if (out_cost) *out_cost = impl_->cost_devptr;
 
     return true;
 }
-
 }  // namespace rtx_ngx

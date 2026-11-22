@@ -33,7 +33,6 @@ inline std::vector<TestCase>& registry() {
     static std::vector<TestCase> cases;
     return cases;
 }
-
 struct Registrar {
     Registrar(const char* name, TestFunction function) {
         registry().push_back(TestCase{name != nullptr ? name : "<unnamed>", function});
@@ -45,7 +44,6 @@ inline void fail(Context& context, const char* file, int line, const std::string
     out << file << ':' << line << ": " << message;
     context.failures.push_back(out.str());
 }
-
 template <typename T>
 std::string stringify(const T& value) {
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;
@@ -72,17 +70,16 @@ std::string stringify(const T& value) {
         return "<unprintable>";
     }
 }
-
 template <typename A, typename B>
 void checkEqual(Context& context, const char* file, int line, const char* actual_text,
                 const char* expected_text, const A& actual, const B& expected) {
     if constexpr (std::is_integral_v<A> && std::is_integral_v<B>) {
-        // Mixed-sign integer comparison is a legitimate test idiom (e.g. an
-        // unsigned field against a signed literal); normalize both sides so
-        // clang -Wall does not flag the sign mismatch itself.
         using Common = std::common_type_t<A, B>;
         if (static_cast<Common>(actual) == static_cast<Common>(expected)) {
             return;
+// Mixed-sign integer comparison is a legitimate test idiom (e.g. an
+// unsigned field against a signed literal); normalize both sides so
+// clang -Wall does not flag the sign mismatch itself.
         }
     } else if (actual == expected) {
         return;
@@ -91,7 +88,6 @@ void checkEqual(Context& context, const char* file, int line, const char* actual
          std::string(actual_text) + " == " + expected_text + " (actual " + stringify(actual) +
              ", expected " + stringify(expected) + ")");
 }
-
 inline void checkNear(Context& context, const char* file, int line, const char* actual_text,
                       const char* expected_text, double actual, double expected, double tolerance) {
     if (std::isfinite(actual) && std::isfinite(expected) &&
@@ -104,7 +100,6 @@ inline void checkNear(Context& context, const char* file, int line, const char* 
             << expected << ", tolerance " << tolerance << ")";
     fail(context, file, line, message.str());
 }
-
 }  // namespace rtx::test
 
 #define RTX_TEST(name)                                                              \

@@ -32,8 +32,12 @@
 
 namespace {
 
-__device__ __forceinline__ int clampi(int idx, int limit) {
-    return (idx < limit) ? idx : (limit - 1);
+/* Phase 11.4 (C-06): reflect101 symmetric mirror indexing (BORDER_REFLECT_101).
+ * Out-of-bounds padded pixels reflect cleanly across the border without black edges. */
+__device__ __forceinline__ int reflect101i(int idx, int limit) {
+    if (idx < limit) return idx;
+    const int mirrored = 2 * (limit - 1) - idx;
+    return (mirrored < 0) ? 0 : mirrored;
 }
 
 __device__ __forceinline__ float clamp01(float v) {
@@ -84,30 +88,58 @@ extern "C" __global__ void rife_nv12_to_nchw_7ch_fp32(
     unsigned int full_range,
     float alpha,
     float* __restrict__ dst_tensor,          /* [1, 7, padded_height, padded_width] */
-    unsigned long long* __restrict__ sad_accum) {
+    unsigned long long* __restrict__ sad_accum,
+    unsigned int infer_width,                /* Phase 11.4-F (PKG-G1): half-res width for scale=0.5 */
+    unsigned int infer_height) {             /* Phase 11.4-F (PKG-G1): half-res height for scale=0.5 */
 
     const int px = blockIdx.x * blockDim.x + threadIdx.x;
     const int py = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (px >= static_cast<int>(padded_width) || py >= static_cast<int>(padded_height)) return;
 
-    /* Clamp to [0, width-1] / [0, height-1]: edge replication fill. */
-    const int sx = clampi(px, static_cast<int>(width));
-    const int sy = clampi(py, static_cast<int>(height));
+    const int iw = (infer_width > 0u) ? static_cast<int>(infer_width) : static_cast<int>(width);
+    const int ih = (infer_height > 0u) ? static_cast<int>(infer_height) : static_cast<int>(height);
+    const int sx_s = reflect101i(px, iw);
+    const int sy_s = reflect101i(py, ih);
 
-    const int y_offset = sy * static_cast<int>(pitch) + sx;
-    const int uv_offset = (static_cast<int>(height) + sy / 2) * static_cast<int>(pitch) + (sx & ~1);
-
-    const uint8_t y0 = prev_nv12[y_offset];
-    const uint8_t u0 = prev_nv12[uv_offset];
-    const uint8_t v0 = prev_nv12[uv_offset + 1];
-
-    const uint8_t y1 = curr_nv12[y_offset];
-    const uint8_t u1 = curr_nv12[uv_offset];
-    const uint8_t v1 = curr_nv12[uv_offset + 1];
+    uint8_t y0, u0, v0, y1, u1, v1;
+    if (iw < static_cast<int>(width) || ih < static_cast<int>(height)) {
+        /* Phase 11.4-F (PKG-G1): 2x2 box-average luma downsample + direct 1:1 4:2:0 chroma read. */
+        const int x0 = reflect101i(sx_s * 2, static_cast<int>(width));
+        const int x1 = reflect101i(sx_s * 2 + 1, static_cast<int>(width));
+        const int ry0 = reflect101i(sy_s * 2, static_cast<int>(height));
+        const int ry1 = reflect101i(sy_s * 2 + 1, static_cast<int>(height));
+        const int ipitch = static_cast<int>(pitch);
+        const float y0_avg = 0.25f * (static_cast<float>(prev_nv12[ry0 * ipitch + x0]) +
+                                      static_cast<float>(prev_nv12[ry0 * ipitch + x1]) +
+                                      static_cast<float>(prev_nv12[ry1 * ipitch + x0]) +
+                                      static_cast<float>(prev_nv12[ry1 * ipitch + x1]));
+        const float y1_avg = 0.25f * (static_cast<float>(curr_nv12[ry0 * ipitch + x0]) +
+                                      static_cast<float>(curr_nv12[ry0 * ipitch + x1]) +
+                                      static_cast<float>(curr_nv12[ry1 * ipitch + x0]) +
+                                      static_cast<float>(curr_nv12[ry1 * ipitch + x1]));
+        y0 = static_cast<uint8_t>(y0_avg + 0.5f);
+        y1 = static_cast<uint8_t>(y1_avg + 0.5f);
+        const int uv_y = (sy_s < static_cast<int>(height) / 2) ? sy_s : (static_cast<int>(height) / 2 - 1);
+        const int uv_x = (sx_s * 2 < (static_cast<int>(width) & ~1)) ? (sx_s * 2) : ((static_cast<int>(width) & ~1) - 2);
+        const int uv_offset = (static_cast<int>(height) + uv_y) * ipitch + uv_x;
+        u0 = prev_nv12[uv_offset];
+        v0 = prev_nv12[uv_offset + 1];
+        u1 = curr_nv12[uv_offset];
+        v1 = curr_nv12[uv_offset + 1];
+    } else {
+        const int y_offset = sy_s * static_cast<int>(pitch) + sx_s;
+        const int uv_offset = (static_cast<int>(height) + sy_s / 2) * static_cast<int>(pitch) + (sx_s & ~1);
+        y0 = prev_nv12[y_offset];
+        u0 = prev_nv12[uv_offset];
+        v0 = prev_nv12[uv_offset + 1];
+        y1 = curr_nv12[y_offset];
+        u1 = curr_nv12[uv_offset];
+        v1 = curr_nv12[uv_offset + 1];
+    }
 
     int diff = 0;
-    if (px < static_cast<int>(width) && py < static_cast<int>(height)) {
+    if (px < iw && py < ih) {
         diff = (y1 > y0) ? (y1 - y0) : (y0 - y1);
     }
     #pragma unroll
@@ -148,7 +180,9 @@ extern "C" __global__ void rife_nchw_3ch_fp32_to_nv12(
     unsigned int height,
     unsigned int padded_width,
     unsigned int padded_height,
-    unsigned int full_range) {
+    unsigned int full_range,
+    unsigned int infer_width,                /* Phase 11.4-F (PKG-G1): half-res width for scale=0.5 */
+    unsigned int infer_height) {             /* Phase 11.4-F (PKG-G1): half-res height for scale=0.5 */
 
     const int px = blockIdx.x * blockDim.x + threadIdx.x;
     const int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -156,11 +190,43 @@ extern "C" __global__ void rife_nchw_3ch_fp32_to_nv12(
     if (px >= static_cast<int>(width) || py >= static_cast<int>(height)) return;
 
     const int plane_size = static_cast<int>(padded_width * padded_height);
-    const int pixel_idx = py * static_cast<int>(padded_width) + px;
+    const int iw = (infer_width > 0u) ? static_cast<int>(infer_width) : static_cast<int>(width);
+    const int ih = (infer_height > 0u) ? static_cast<int>(infer_height) : static_cast<int>(height);
 
-    const float r = clamp01(src_tensor[0 * plane_size + pixel_idx]);
-    const float g = clamp01(src_tensor[1 * plane_size + pixel_idx]);
-    const float b = clamp01(src_tensor[2 * plane_size + pixel_idx]);
+    float r, g, b;
+    if (iw < static_cast<int>(width) || ih < static_cast<int>(height)) {
+        /* Phase 11.4-F (PKG-G1): Half-pixel center-aligned 2D bilinear upsampling,
+         * strictly clamped to [0, infer_width-1] x [0, infer_height-1] (never reads padding). */
+        float fx = (static_cast<float>(px) + 0.5f) * (static_cast<float>(iw) / static_cast<float>(width)) - 0.5f;
+        float fy = (static_cast<float>(py) + 0.5f) * (static_cast<float>(ih) / static_cast<float>(height)) - 0.5f;
+        fx = fminf(fmaxf(fx, 0.0f), static_cast<float>(iw - 1));
+        fy = fminf(fmaxf(fy, 0.0f), static_cast<float>(ih - 1));
+        const int x0 = static_cast<int>(floorf(fx));
+        const int y0 = static_cast<int>(floorf(fy));
+        const int x1 = (x0 + 1 < iw) ? (x0 + 1) : (iw - 1);
+        const int y1 = (y0 + 1 < ih) ? (y0 + 1) : (ih - 1);
+        const float wx = fx - static_cast<float>(x0);
+        const float wy = fy - static_cast<float>(y0);
+        const float w00 = (1.0f - wx) * (1.0f - wy);
+        const float w10 = wx * (1.0f - wy);
+        const float w01 = (1.0f - wx) * wy;
+        const float w11 = wx * wy;
+        const int row0 = y0 * static_cast<int>(padded_width);
+        const int row1 = y1 * static_cast<int>(padded_width);
+        auto sample_ch = [&](int ch) -> float {
+            const float* p = src_tensor + ch * plane_size;
+            return clamp01(w00 * p[row0 + x0] + w10 * p[row0 + x1] +
+                           w01 * p[row1 + x0] + w11 * p[row1 + x1]);
+        };
+        r = sample_ch(0);
+        g = sample_ch(1);
+        b = sample_ch(2);
+    } else {
+        const int pixel_idx = py * static_cast<int>(padded_width) + px;
+        r = clamp01(src_tensor[0 * plane_size + pixel_idx]);
+        g = clamp01(src_tensor[1 * plane_size + pixel_idx]);
+        b = clamp01(src_tensor[2 * plane_size + pixel_idx]);
+    }
 
     const int uv_offset =
         (static_cast<int>(height) + py / 2) * static_cast<int>(pitch) + px;

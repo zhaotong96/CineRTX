@@ -15,6 +15,10 @@
 
 namespace rtx_ngx {
 
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct PreprocessLaunch {
     uint64_t y_plane = 0;        /* CUdeviceptr */
     uint64_t uv_plane = 0;       /* CUdeviceptr */
@@ -28,6 +32,31 @@ struct PreprocessLaunch {
     int32_t matrix = 0;       /* 0 = BT.709, 1 = BT.2020 NCL, 2 = BT.601 */
 };
 
+/* Phase 11.2 (C-02): raw-pointer variant targeting a linear D3D12 shared
+ * preview buffer (mapped through cuExternalMemoryGetMappedBuffer).  The
+ * rtx_yuv_to_rgb10_buf kernel writes plain 32-bit R10G10B10A2 words. */
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
+struct PreprocessBufferLaunch {
+    uint64_t y_plane = 0;            /* CUdeviceptr */
+    uint64_t uv_plane = 0;           /* CUdeviceptr */
+    uint64_t output_ptr = 0;         /* CUdeviceptr of the mapped preview buffer */
+    int32_t output_pitch_bytes = 0;  /* buffer row pitch (bytes) */
+    int32_t width = 0;
+    int32_t height = 0;
+    int32_t y_pitch_bytes = 0;
+    int32_t uv_pitch_bytes = 0;
+    int32_t format = 0;       /* RTX_PIXEL_NV12 / RTX_PIXEL_P010 */
+    int32_t full_range = 0;   /* 0 = limited */
+    int32_t matrix = 0;       /* 0 = BT.709, 1 = BT.2020 NCL, 2 = BT.601 */
+};
+
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct PackV2Launch {
     uint64_t input_surface = 0; /* CUsurfObject of the shared RGBA16F output */
     uint64_t y_plane = 0;       /* CUdeviceptr, uint16 elements */
@@ -53,6 +82,10 @@ struct PackV2Launch {
 };
 
 /* Phase 9 (Task 9-A1): Linux headless single-launch remaster kernel. */
+// @rtx-type-justification
+// Category: C-ABI
+// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
+// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
 struct FusedRemasterLaunch {
     uint64_t src_y = 0;          /* CUdeviceptr of the decoded NV12/P010 luma */
     uint64_t src_uv = 0;         /* CUdeviceptr of the interleaved chroma */
@@ -82,6 +115,7 @@ struct FusedRemasterLaunch {
  * the retained CUDA primary context before launching; callers still own
  * stream-level ordering. */
 RtxResult launchPreprocess(const PreprocessLaunch& launch, void* stream);
+RtxResult launchPreprocessBuffer(const PreprocessBufferLaunch& launch, void* stream);
 RtxResult launchPackV2(const PackV2Launch& launch, void* stream);
 RtxResult launchFusedRemaster(const FusedRemasterLaunch& launch, void* stream);
 RtxResult launchInterpolateNv12(uint64_t prev_nv12, uint64_t curr_nv12,

@@ -29,12 +29,12 @@ Simply run `CineRTX.exe` without arguments to launch the native four-state works
 ```powershell
 ./CineRTX.exe
 ```
-- `[1] Encoder`: 19-parameter SSOT transcode matrix with drag & drop.
+- `[1] Encoder`: 20-parameter SSOT transcode matrix with drag & drop.
 - `[2] Player`: review playback; `[3] NLE`: four-track editing on the Flicks timeline.
 - `+1` fourth form: after associating video files with `CineRTX.exe`, double-clicking a video opens borderless fullscreen dynamic VSR quick playback (viewport-adaptive scale such as `2.00x`, portrait `1.6875x`).
 - **Hot Language Switch**: Press `Ctrl+L` to dynamically toggle between English and Chinese.
 
-### 2. WebUI Browser Workstation (Encoder / Player / NLE)
+### 2. WebUI v3 Browser Workstation (Encoder / Player / NLE)
 ```powershell
 python webui/server.py --port 8787
 ```
@@ -100,7 +100,7 @@ To create a clean, standalone release package (~34 MB):
 ```powershell
 cmake -DBUILD_DIR=.vs/build/cmake/windows-msvc-ninja -P cmake/PackageRelease.cmake
 ```
-Generates `.vs/build/dist/CineRTX-v0.1.0-windows-x64.zip` accompanied by SHA-256 manifests and instructions.
+Generates `.vs/build/dist/CineRTX-v0.3.0-windows-x64.zip` accompanied by SHA-256 manifests and instructions.
 
 ---
 

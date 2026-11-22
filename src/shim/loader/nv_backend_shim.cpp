@@ -22,6 +22,10 @@
 
 namespace {
 
+// @rtx-type-justification
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
+// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
 struct ProbeState {
     rtx_shim::NvidiaRuntime runtime;
     rtx_shim::cuda::DriverTable driver;
@@ -37,8 +41,8 @@ struct ProbeState {
 template <size_t N>
 void copyText(char (&destination)[N], const std::string& source) {
     size_t count = std::min(source.size(), N - 1);
-    // Never split a multi-byte UTF-8 sequence.  Windows error strings are
-    // localized, and truncating mid-codepoint used to emit invalid JSON.
+// Never split a multi-byte UTF-8 sequence.  Windows error strings are
+// localized, and truncating mid-codepoint used to emit invalid JSON.
     while (count > 0 && count < source.size() &&
            (static_cast<unsigned char>(source[count]) & 0xC0) == 0x80) {
         --count;
@@ -48,14 +52,12 @@ void copyText(char (&destination)[N], const std::string& source) {
     }
     destination[count] = '\0';
 }
-
 std::string cudaVersionString(int version) {
     if (version <= 0) {
         return "unknown";
     }
     return std::to_string(version / 1000) + "." + std::to_string((version / 10) % 100);
 }
-
 const rtx_shim::ComponentStatus* findComponent(const ProbeState& state, const char* name) {
     for (const auto& component : state.runtime.components()) {
         if (component.name == name) {
@@ -64,12 +66,10 @@ const rtx_shim::ComponentStatus* findComponent(const ProbeState& state, const ch
     }
     return nullptr;
 }
-
 bool componentPresent(const ProbeState& state, const char* name) {
     const auto* component = findComponent(state, name);
     return component != nullptr && component->present;
 }
-
 void fillComponent(RtxComponentInfo& out, const rtx_shim::ComponentStatus& component) {
     copyText(out.name, component.name);
     copyText(out.path, component.path);
@@ -77,7 +77,6 @@ void fillComponent(RtxComponentInfo& out, const rtx_shim::ComponentStatus& compo
     out.version = static_cast<int32_t>(component.version);
     copyText(out.note, component.note);
 }
-
 void fillDiagnostics(const ProbeState& state, RtxDiagnostics* diagnostics) {
     if (diagnostics == nullptr) {
         return;
@@ -92,7 +91,6 @@ void fillDiagnostics(const ProbeState& state, RtxDiagnostics* diagnostics) {
     }
     copyText(diagnostics->summary, state.summary);
 }
-
 ProbeState probeNvidia() {
     ProbeState state;
     std::string ignored;
@@ -198,7 +196,6 @@ ProbeState probeNvidia() {
             }
         }
     }
-
     if (state.summary.empty()) {
         std::string reason;
         const auto* cuda = findComponent(state, "CUDA driver");
@@ -213,9 +210,12 @@ ProbeState probeNvidia() {
     }
     return state;
 }
-
 }  // namespace
 
+// @rtx-type-justification
+// Category: Polymorphic-Boundary
+// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
+// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
 struct RtxBackend {
     RtxBackendConfig config{};
     RtxDeviceInfo device{};
@@ -260,14 +260,11 @@ RTX_SHIM_API const char* RTX_SHIM_CALL rtx_shim_result_name(RtxResult result) {
     }
     return "RTX_ERR_UNKNOWN";
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_probe(RtxDiagnostics* diagnostics) {
     const ProbeState state = probeNvidia();
     fillDiagnostics(state, diagnostics);
     return RTX_OK;
 }
-
-// Phase 8 (Task 8-A1): every sm_75+ NVIDIA device visible to the driver.
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_enumerate_devices(RtxGpuTopology* topology) {
     if (topology == nullptr) {
         return RTX_ERR_INVALID_ARGUMENT;
@@ -278,6 +275,7 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_enumerate_devices(RtxGpuTopology* 
         return RTX_ERR_DLL_MISSING;
     }
     int device_count = 0;
+// Phase 8 (Task 8-A1): every sm_75+ NVIDIA device visible to the driver.
     using rtx_shim::cuda::CUDA_SUCCESS;
     if (state.driver.cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         return RTX_ERR_NOT_FOUND;
@@ -326,7 +324,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_enumerate_devices(RtxGpuTopology* 
     }
     return topology->device_count > 0 ? RTX_OK : RTX_ERR_NOT_FOUND;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendConfig* config,
                                                              RtxBackend** backend) {
     if (backend == nullptr) {
@@ -346,26 +343,20 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendCon
     if (config->target_width < config->width || config->target_height < config->height) {
         return RTX_ERR_UNSUPPORTED;
     }
-
     const ProbeState state = probeNvidia();
     if (!state.cuda_loaded || !state.has_device) {
         return RTX_ERR_DLL_MISSING;
     }
-
     const bool turing_or_newer =
         state.device.compute_major > 7 ||
         (state.device.compute_major == 7 && state.device.compute_minor >= 5);
     const bool upscale = config->target_width != config->width ||
                          config->target_height != config->height;
 
-    // NVDEC and NVENC are the only stage-1 requirements.  They exist on
-    // Maxwell (sm_52), so the hardware backend is created there as well; only
-    // the RTX Video features below are gated on Turing.
     if ((state.capabilities & RTX_CAP_NVDEC) == 0 ||
         !componentPresent(state, "NVENC")) {
         return RTX_ERR_ARCH_UNSUPPORTED;
     }
-
     if (upscale) {
         if (!turing_or_newer) {
             return RTX_ERR_ARCH_UNSUPPORTED;
@@ -375,6 +366,9 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendCon
         }
     }
     if (config->enable_truehdr != 0) {
+// NVDEC and NVENC are the only stage-1 requirements.  They exist on
+// Maxwell (sm_52), so the hardware backend is created there as well; only
+// the RTX Video features below are gated on Turing.
         if (!turing_or_newer) {
             return RTX_ERR_ARCH_UNSUPPORTED;
         }
@@ -393,7 +387,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendCon
     if (config->enable_rife != 0) {
         return RTX_ERR_UNSUPPORTED;
     }
-
     auto* created = new (std::nothrow) RtxBackend();
     if (created == nullptr) {
         return RTX_ERR_OUT_OF_MEMORY;
@@ -405,7 +398,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendCon
     *backend = created;
     return RTX_OK;
 }
-
 RTX_SHIM_API void RTX_SHIM_CALL rtx_shim_destroy_backend(RtxBackend* backend) { delete backend; }
 
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_get_device_info(RtxBackend* backend,
@@ -416,7 +408,6 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_get_device_info(RtxBackend* backen
     *info = backend->device;
     return RTX_OK;
 }
-
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_get_capabilities(RtxBackend* backend,
                                                                uint32_t* capabilities) {
     if (backend == nullptr || capabilities == nullptr) {
@@ -425,12 +416,10 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_get_capabilities(RtxBackend* backe
     *capabilities = backend->capabilities;
     return RTX_OK;
 }
-
 RTX_SHIM_API const char* RTX_SHIM_CALL rtx_shim_last_error(RtxBackend* backend) {
     if (backend == nullptr) {
         return "invalid RtxBackend handle";
     }
     return backend->error.c_str();
 }
-
 }  // extern "C"

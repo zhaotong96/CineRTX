@@ -95,7 +95,7 @@ if "!E_SIZE!" NEQ "%~3" (
     echo [CineRTX-Bootstrap] Downloading %~1 ^(%~3 bytes^) from %~2
     "!SYS32!\curl.exe" -L --retry 3 --retry-delay 2 -C - -o "!E_ARC!" "%~2"
     if errorlevel 1 (
-        REM Resume may be rejected by the server; retry from scratch.
+REM Resume may be rejected by the server; retry from scratch.
         "!SYS32!\curl.exe" -L --retry 3 --retry-delay 2 -o "!E_ARC!" "%~2"
     )
     if errorlevel 1 (
@@ -112,8 +112,8 @@ if "!E_SIZE!" NEQ "%~3" (
 
 if not "%~4"=="-" (
     set "E_HASH="
-    REM NB: unquoted certutil - for /f strips the outer quotes of a leading
-    REM quoted program path; System32 was prepended to PATH at startup.
+REM NB: unquoted certutil - for /f strips the outer quotes of a leading
+REM quoted program path; System32 was prepended to PATH at startup.
     for /f "skip=1 delims=" %%h in ('certutil.exe -hashfile "!E_ARC!" SHA256') do (
         if not defined E_HASH set "E_HASH=%%h"
     )

@@ -91,7 +91,6 @@ void setTestEnvVar(const char* name, const char* value) {
     ::setenv(name, value, 1);
 #endif
 }
-
 void unsetTestEnvVar(const char* name) {
 #if defined(_WIN32)
     _putenv_s(name, "");
@@ -99,7 +98,6 @@ void unsetTestEnvVar(const char* name) {
     ::unsetenv(name);
 #endif
 }
-
 /* MSVC-safe environment read (Phase 9): the project builds with /WX and MSVC
  * emits C4996 for getenv; suppress exactly that warning around the call. */
 const char* readEnvValue(const char* name) {
@@ -112,23 +110,21 @@ const char* readEnvValue(const char* name) {
     return std::getenv(name);
 #endif
 }
-
 constexpr uint32_t kProbeFrameSize = 256u;
 constexpr uint32_t kProbePitch = kProbeFrameSize;
 constexpr size_t kProbeNv12Bytes = static_cast<size_t>(kProbePitch) * kProbeFrameSize * 3u / 2u;
 constexpr uint32_t kCgaThreshold = 150u;  // "highlight" Y threshold for the centroid
 
 void fillSyntheticNv12(std::vector<unsigned char>& frame, int bar_start) {
-    // Background Y=40, moving vertical bar x=[bar_start, bar_start+23] Y=220,
-    // UV plane neutral 128.
     frame.assign(kProbeNv12Bytes, 128u);
     for (uint32_t row = 0; row < kProbeFrameSize; ++row) {
         unsigned char* y_line = frame.data() + static_cast<size_t>(row) * kProbePitch;
+// Background Y=40, moving vertical bar x=[bar_start, bar_start+23] Y=220,
+// UV plane neutral 128.
         std::memset(y_line, 40, kProbeFrameSize);
         std::memset(y_line + bar_start, 220, 24);
     }
 }
-
 double highlightCentroidX(const std::vector<unsigned char>& nv12) {
     double weighted = 0.0;
     double total = 0.0;
@@ -143,7 +139,6 @@ double highlightCentroidX(const std::vector<unsigned char>& nv12) {
     }
     return (total > 0.0) ? (weighted / total) : -1.0;
 }
-
 double frameL1(const std::vector<unsigned char>& a, const std::vector<unsigned char>& b) {
     double l1 = 0.0;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -151,20 +146,19 @@ double frameL1(const std::vector<unsigned char>& a, const std::vector<unsigned c
     }
     return l1;
 }
-
 }  // namespace
 
 RTX_TEST(rife_abi_contract) {
-    // Phase 8 ABI version must be at least 4.
     RTX_CHECK(rtx_ngx_bridge_abi_version() >= 4u);
 
-    // Check invalid arguments on bridge functions.
     RTX_CHECK_EQ(rtx_ngx_bridge_init_rife(nullptr, "fake.engine", 1920, 1080),
                  RTX_ERR_INVALID_ARGUMENT);
     rtx_ngx_bridge_destroy_rife(nullptr);
 
+// Phase 8 ABI version must be at least 4.
     int32_t scene_cut = 0;
     RTX_CHECK_EQ(rtx_ngx_bridge_interpolate_rife(nullptr, 0x1000, 0x2000, 1920, 0.5f, 0x3000, 0, &scene_cut),
+// Check invalid arguments on bridge functions.
                  RTX_ERR_INVALID_ARGUMENT);
 
     char log_buf[256] = {};
@@ -175,10 +169,8 @@ RTX_TEST(rife_abi_contract) {
     RTX_CHECK_EQ(rtx_ngx_bridge_build_rife_engine(nullptr, nullptr, 1920, 1080, log_buf, sizeof(log_buf)),
                  RTX_ERR_INVALID_ARGUMENT);
 }
-
 RTX_TEST(rife_bridge_loader_api_check) {
     rtx::NgxRemasterBridge bridge;
-    // Before loading, hasRifeApi is false.
     RTX_CHECK(!bridge.hasRifeApi());
 
     std::string error;
@@ -186,10 +178,9 @@ RTX_TEST(rife_bridge_loader_api_check) {
     if (opened) {
         RTX_CHECK(bridge.hasRifeApi());
     }
+// Before loading, hasRifeApi is false.
 }
-
 RTX_TEST(rife_scene_cut_threshold_logic) {
-    // Formula verification: norm_diff = sad_sum / (W * H * 255.0f)
     const uint32_t width = 1920;
     const uint32_t height = 1080;
     const double total_pixels = static_cast<double>(width) * static_cast<double>(height);
@@ -198,64 +189,62 @@ RTX_TEST(rife_scene_cut_threshold_logic) {
         return static_cast<float>(static_cast<double>(sad_sum) / (total_pixels * 255.0));
     };
 
-    // Sub-threshold diff: average delta 30 per pixel (~11.76%)
+// Formula verification: norm_diff = sad_sum / (W * H * 255.0f)
     uint64_t sad_sub = static_cast<uint64_t>(30.0 * total_pixels);
     float diff_sub = computeNormDiff(sad_sub);
     RTX_CHECK(diff_sub < 0.35f);
 
-    // Hard scene cut diff: average delta 100 per pixel (~39.22%)
     uint64_t sad_cut = static_cast<uint64_t>(100.0 * total_pixels);
     float diff_cut = computeNormDiff(sad_cut);
     RTX_CHECK(diff_cut >= 0.35f);
 
-    // Exact threshold delta: 0.35 * 255 = 89.25
+// Sub-threshold diff: average delta 30 per pixel (~11.76%)
     uint64_t sad_exact = static_cast<uint64_t>(89.25 * total_pixels);
     float diff_exact = computeNormDiff(sad_exact);
     RTX_CHECK(diff_exact >= 0.3499f && diff_exact <= 0.3501f);
 }
-
+// Hard scene cut diff: average delta 100 per pixel (~39.22%)
 RTX_TEST(rife_model_variants_and_geometry) {
-    // Model variant dimensions and 64-pixel padding alignment.
     auto calculatePaddedDims = [](uint32_t w, uint32_t h) -> std::pair<uint32_t, uint32_t> {
         constexpr uint32_t kAlign = 64u;
         uint32_t pad_w = (w + kAlign - 1u) / kAlign * kAlign;
+// Exact threshold delta: 0.35 * 255 = 89.25
         uint32_t pad_h = (h + kAlign - 1u) / kAlign * kAlign;
         return {pad_w, pad_h};
     };
 
     auto [pad_w, pad_h] = calculatePaddedDims(1920, 1080);
     RTX_CHECK_EQ(pad_w, 1920u);
+// Model variant dimensions and 64-pixel padding alignment.
     RTX_CHECK_EQ(pad_h, 1088u);
 
     auto [pad_w2, pad_h2] = calculatePaddedDims(1280, 720);
     RTX_CHECK_EQ(pad_w2, 1280u);
     RTX_CHECK_EQ(pad_h2, 768u);
 }
-
 /* Phase 9 acceptance gate 2: alpha = 0.2/0.4/0.6/0.8 must produce four
  * mutually distinct frames with a strictly monotonic highlight centroid.
  * On hosts without a sm_70+ CUDA device (PTX JIT unavailable) the test skips
  * loudly instead of pretending to verify anything. */
 RTX_TEST(rife_four_phase_monotonic_progression) {
-    // Loud GPU capability probe first: the Phase 9 PTX module is sm_70+ JIT
-    // only; without such a device this regression cannot run meaningfully.
     if (!rtx_ngx::isRifePackAvailable()) {
         std::printf("[SKIP-GPU] rife_four_phase_monotonic_progression: no sm_70+ CUDA device (JIT unavailable)\n");
         return;
     }
-
-    // In-process environment unlock for the synthetic engine; never leak it.
     const char* old_env = readEnvValue("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH");
     const bool had_old_env = (old_env != nullptr);
     const std::string saved_env = had_old_env ? old_env : "";
     setTestEnvVar("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH", "1");
 
     std::error_code fs_ec;
+// Loud GPU capability probe first: the Phase 9 PTX module is sm_70+ JIT
+// only; without such a device this regression cannot run meaningfully.
     const std::filesystem::path engine_path =
         std::filesystem::temp_directory_path() / "cinertx_p9_rife_test" / "rife_builtin_synth.engine";
     std::filesystem::create_directories(engine_path.parent_path(), fs_ec);
 
     rtx::NgxRemasterBridge bridge;
+// In-process environment unlock for the synthetic engine; never leak it.
     RtxNgxBridge* raw_bridge = nullptr;
     TestCudaDriver cuda{};
     TestCudaDriver::CUdeviceptr dev_prev = 0;
@@ -289,8 +278,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
             pass = false;
             break;
         }
-
-        // Build the governed synthetic engine for a 256x256 probe geometry.
         char build_err[512] = {};
         if (bridge.buildRifeEngine("__builtin__", engine_path.string().c_str(), 256, 256,
                                    build_err, sizeof(build_err)) != RTX_OK) {
@@ -299,11 +286,11 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
             pass = false;
             break;
         }
-
         if (!cuda.load()) {
             ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__, "nvcuda.dll could not be loaded");
             pass = false;
             break;
+// Build the governed synthetic engine for a 256x256 probe geometry.
         }
         if (cuda.init(0) != 0) {
             ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__, "cuInit failed");
@@ -323,7 +310,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
             pass = false;
             break;
         }
-
         RtxNgxBridgeConfig config{};
         std::memcpy(config.luid, luid, sizeof(config.luid));
         config.luid_node_mask = node_mask;
@@ -346,18 +332,15 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
             pass = false;
             break;
         }
-
         if (bridge.initRife(raw_bridge, engine_path.string().c_str(), 256, 256) != RTX_OK) {
             ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__,
                               std::string("init_rife failed: ") + bridge.lastError(raw_bridge));
             pass = false;
             break;
         }
-
         void* current_ctx = nullptr;
         if (cuda.ctx_get_current != nullptr &&
             cuda.ctx_get_current(&current_ctx) == 0 && current_ctx != nullptr) {
-            // Reuse the live context.
         } else if (cuda.primary_ctx_retain != nullptr && cuda.ctx_set_current != nullptr) {
             void* primary_ctx = nullptr;
             if (cuda.primary_ctx_retain(&primary_ctx, device) == 0 && primary_ctx != nullptr) {
@@ -369,15 +352,14 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
                 break;
             }
         }
-
         if (cuda.mem_alloc(&dev_prev, kProbeNv12Bytes) != 0 ||
             cuda.mem_alloc(&dev_curr, kProbeNv12Bytes) != 0 ||
             cuda.mem_alloc(&dev_out, kProbeNv12Bytes) != 0) {
             ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__, "cuMemAlloc failed for probe buffers");
             pass = false;
+// Reuse the live context.
             break;
         }
-
         std::vector<unsigned char> host_prev;
         std::vector<unsigned char> host_curr;
         fillSyntheticNv12(host_prev, 100);  // bar at x=100..123
@@ -388,7 +370,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
             pass = false;
             break;
         }
-
         const float alphas[4] = {0.2f, 0.4f, 0.6f, 0.8f};
         std::vector<unsigned char> outputs[4];
         double centroids[4] = {-1.0, -1.0, -1.0, -1.0};
@@ -462,7 +443,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
                 pass = false;
             }
         }
-
         for (int i = 0; i < 4; ++i) {
             for (int j = i + 1; j < 4; ++j) {
                 const double l1 = frameL1(outputs[i], outputs[j]);
@@ -474,7 +454,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
                 }
             }
         }
-
         for (int i = 1; i < 4; ++i) {
             if (centroids[i] < centroids[i - 1]) {
                 ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__,
@@ -497,7 +476,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
     releaseAll();
     RTX_CHECK(pass);
 }
-
 /* Phase 9.1 (RW-P9-02, Gate 9.5): kHALF engine regression.
  *
  * Part 1 proves the rife_fp32_to_fp16 / rife_fp16_to_fp32 conversion kernels
@@ -511,7 +489,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
         std::printf("[SKIP-GPU] rife_fp16_roundtrip_and_cache_progression: no sm_70+ CUDA device (JIT unavailable)\n");
         return;
     }
-
     const char* old_env = readEnvValue("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH");
     const bool had_old_env = (old_env != nullptr);
     const std::string saved_env = had_old_env ? old_env : "";
@@ -555,7 +532,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
     };
 
     do {
-        // ---------- Part 1: fp32 -> fp16 -> fp32 roundtrip ----------
         if (!cuda.load()) {
             ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__, "nvcuda.dll could not be loaded");
             pass = false;
@@ -575,18 +551,17 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
         void* current_ctx = nullptr;
         if (cuda.ctx_get_current != nullptr &&
             cuda.ctx_get_current(&current_ctx) == 0 && current_ctx != nullptr) {
-            // Reuse the live context.
         } else if (cuda.primary_ctx_retain != nullptr && cuda.ctx_set_current != nullptr) {
             void* primary_ctx = nullptr;
             if (cuda.primary_ctx_retain(&primary_ctx, device) == 0 && primary_ctx != nullptr) {
                 cuda.ctx_set_current(primary_ctx);
+// ---------- Part 1: fp32 -> fp16 -> fp32 roundtrip ----------
             } else {
                 ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__, "cuDevicePrimaryCtxRetain failed");
                 pass = false;
                 break;
             }
         }
-
         constexpr uint32_t kCvtCount = 4096;
         std::vector<float> host_f32(kCvtCount);
         for (uint32_t i = 0; i < kCvtCount; ++i) {
@@ -600,6 +575,7 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
             break;
         }
         if (cuda.memcpy_htod(dev_f32, host_f32.data(), kCvtCount * 4u) != 0) {
+// Reuse the live context.
             ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__, "cuMemcpyHtoD failed for roundtrip");
             pass = false;
             break;
@@ -629,14 +605,12 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
         }
         if (!pass) break;
 
-        // ---------- Part 2: kHALF engine cache progression via C ABI ----------
         std::string bridge_error;
         if (!bridge.open(&bridge_error)) {
             ::rtx::test::fail(rtx_test_context, __FILE__, __LINE__, "bridge open failed: " + bridge_error);
             pass = false;
             break;
         }
-
         char build_err[512] = {};
         if (bridge.buildRifeEngine("__builtin_khalf__", engine_path.string().c_str(), 256, 256,
                                    build_err, sizeof(build_err)) != RTX_OK) {
@@ -645,7 +619,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
             pass = false;
             break;
         }
-
         char luid[8] = {};
         unsigned int node_mask = 0;
         if (cuda.device_get_luid(luid, &node_mask, device) != 0) {
@@ -656,6 +629,7 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
         RtxNgxBridgeConfig config_struct{};
         std::memcpy(config_struct.luid, luid, sizeof(config_struct.luid));
         config_struct.luid_node_mask = node_mask;
+// ---------- Part 2: kHALF engine cache progression via C ABI ----------
         config_struct.input_width = 256;
         config_struct.input_height = 256;
         config_struct.output_width = 256;
@@ -679,7 +653,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
             pass = false;
             break;
         }
-
         if (cuda.mem_alloc(&dev_prev, kProbeNv12Bytes) != 0 ||
             cuda.mem_alloc(&dev_curr, kProbeNv12Bytes) != 0 ||
             cuda.mem_alloc(&dev_out, kProbeNv12Bytes) != 0) {
@@ -697,7 +670,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
             pass = false;
             break;
         }
-
         const float alphas[4] = {0.2f, 0.4f, 0.6f, 0.8f};
         std::vector<unsigned char> outputs[4];
         double centroids[4] = {-1.0, -1.0, -1.0, -1.0};
@@ -760,8 +732,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
     releaseAll();
     RTX_CHECK(pass);
 }
-
-
 #include "rtx/shot_segmenter.h"
 
 RTX_TEST(test_shot_group_segmenter_hard_and_subtle_cuts) {
@@ -771,7 +741,6 @@ RTX_TEST(test_shot_group_segmenter_hard_and_subtle_cuts) {
     const auto d0 = seg.evaluate(calm, 1920, 1080, 255);
     RTX_CHECK(!d0.is_scene_cut);
 
-    // Subtle cut: left half of screen changes sharply (global avg diff ~0.11)
     std::array<uint32_t, 64> subtle_cut{};
     for (int row = 0; row < 8; ++row) {
         for (int col = 0; col < 8; ++col) {
@@ -784,3 +753,4 @@ RTX_TEST(test_shot_group_segmenter_hard_and_subtle_cuts) {
     RTX_CHECK(d1.force_encoder_idr);
     RTX_CHECK_EQ(d1.shot_group_id, static_cast<uint64_t>(1));
 }
+// Subtle cut: left half of screen changes sharply (global avg diff ~0.11)
