@@ -8,23 +8,15 @@
 
 #include <cstdint>
 #include <string>
+#include <tuple>
 
 #include "shim/rtx_shim_abi.h"
 
 namespace rtx::cli {
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct ShimProbeResult {
-    bool loaded = false;
-    std::string path;
-    std::string error;
-    uint32_t abi_version = 0;
-    int32_t result = RTX_ERR_DLL_MISSING;
-    RtxDiagnostics diagnostics{};
-};
+// Phase 12 (Wave 12.2-B2): tuple alias replaces passive ShimProbeResult bag.
+// (loaded, path, error, abi_version, result, diagnostics)
+using ShimProbeResult = std::tuple<bool, std::string, std::string, uint32_t, int32_t, RtxDiagnostics>;
 
 ShimProbeResult probeShim();
 

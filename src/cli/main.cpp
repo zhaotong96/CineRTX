@@ -12,7 +12,6 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,7 +35,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <shellapi.h>
+#include "rtx/sys_dynload.h"
 
 extern "C" {
 // Wake NVIDIA discrete GPU high performance profile on Optimus laptops
@@ -59,23 +58,19 @@ enum class Mode {
     BuildRifeEngine,
 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct Options {
-    Mode mode = Mode::None;
-    TranscodeProfile profile{};
-    bool explicit_target_dims = false;
-    bool json = false;
-    bool quiet = false;
-    bool verbose = false;
-    std::string language;
-    std::filesystem::path onnx_path;
-    std::filesystem::path engine_path;
-    int opt_w = 1920;
-    int opt_h = 1080;
-};
+namespace opts {
+Mode mode = Mode::None;
+TranscodeProfile profile{};
+bool explicit_target_dims = false;
+bool json = false;
+bool quiet = false;
+bool verbose = false;
+std::string language;
+std::filesystem::path onnx_path;
+std::filesystem::path engine_path;
+int opt_w = 1920;
+int opt_h = 1080;
+}  // namespace opts
 
 void printHelp() {
     std::cout << "CineRTX " << RTX_VERSION_STRING << "\n"
@@ -150,7 +145,7 @@ bool requirePath(int argc, char** argv, int& index, std::filesystem::path& path)
     path = std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(s.data()), s.size()));
     return true;
 }
-bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
+bool parseOptions(int argc, char** argv, std::string& error) {
     Rational target_fps{60, 1};
     bool target_fps_set = false;
 
@@ -158,22 +153,22 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
         const std::string argument = argv[i];
         std::string value;
         if (argument == "--help" || argument == "-h") {
-            options.mode = Mode::Help;
+            opts::mode = Mode::Help;
         } else if (argument == "--version") {
-            options.mode = Mode::Version;
+            opts::mode = Mode::Version;
         } else if (argument == "--probe") {
-            options.mode = Mode::Probe;
+            opts::mode = Mode::Probe;
         } else if (argument == "--schema-json" || argument == "--dump-schema-json") {
-            options.mode = Mode::SchemaJson;
+            opts::mode = Mode::SchemaJson;
         } else if (argument == "--session-stdio") {
-            options.mode = Mode::SessionStdio;
+            opts::mode = Mode::SessionStdio;
         } else if (argument == "--lang") {
-            if (!requireValue(argc, argv, i, options.language)) {
+            if (!requireValue(argc, argv, i, opts::language)) {
                 return false;
             }
-            const Result<Language> parsed = parseLanguage(options.language);
+            const Result<Language> parsed = parseLanguage(opts::language);
             if (!parsed.has_value()) {
-                error = "unknown language: " + options.language;
+                error = "unknown language: " + opts::language;
                 return false;
             }
             setLanguage(parsed.value());
@@ -188,24 +183,24 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
                 return false;
             }
             if (argument == "--target-width") {
-                options.profile.target_width = parsed;
-                options.explicit_target_dims = true;
+                opts::profile.target_width = parsed;
+                opts::explicit_target_dims = true;
             } else if (argument == "--target-height") {
-                options.profile.target_height = parsed;
-                options.explicit_target_dims = true;
+                opts::profile.target_height = parsed;
+                opts::explicit_target_dims = true;
             } else if (argument == "--opt-w") {
-                options.opt_w = parsed;
+                opts::opt_w = parsed;
             } else {
-                options.opt_h = parsed;
+                opts::opt_h = parsed;
             }
-        } else if (const FieldBinding<TranscodeProfile>* binding =
+        } else if (const ProfileMemberPtr* binding =
                        findCliFieldBinding<TranscodeProfile>(argument)) {
             if (!requireValue(argc, argv, i, value)) {
                 return false;
             }
             bool assigned = true;
             std::visit([&](auto member) {
-                using T = std::decay_t<decltype(options.profile.*member)>;
+                using T = std::decay_t<decltype(opts::profile.*member)>;
                 if constexpr (std::is_same_v<T, int>) {
                     int parsed = 0;
                     if (!parseInteger(value, parsed)) {
@@ -213,20 +208,20 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
                         assigned = false;
                         return;
                     }
-                    options.profile.*member = parsed;
+                    opts::profile.*member = parsed;
                 } else if constexpr (std::is_same_v<T, bool>) {
-                    options.profile.*member = (value == "true" || value == "1");
+                    opts::profile.*member = (value == "true" || value == "1");
                 } else {
-                    options.profile.*member = value;
+                    opts::profile.*member = value;
                 }
-            }, binding->member);
+            }, *binding);
             if (!assigned) {
                 return false;
             }
             if (argument == "--input") {
-                options.mode = Mode::Container;
+                opts::mode = Mode::Container;
             } else if (argument == "--output") {
-                options.profile.auto_output = false;
+                opts::profile.auto_output = false;
             }
         } else if (argument == "--target-fps") {
             if (!requireValue(argc, argv, i, value)) {
@@ -240,66 +235,66 @@ bool parseOptions(int argc, char** argv, Options& options, std::string& error) {
             target_fps = parsed.value();
             target_fps_set = true;
         } else if (argument == "--no-vsr") {
-            options.profile.vsr_enabled = false;
+            opts::profile.vsr_enabled = false;
         } else if (argument == "--pillarbox") {
-            options.profile.geometry = "pillarbox";
+            opts::profile.geometry = "pillarbox";
         } else if (argument == "--no-audio") {
-            options.profile.copy_audio = false;
+            opts::profile.copy_audio = false;
         } else if (argument == "--hdr10plus") {
-            options.profile.hdr10plus = true;
+            opts::profile.hdr10plus = true;
         } else if (argument == "--build-rife-engine") {
-            options.mode = Mode::BuildRifeEngine;
+            opts::mode = Mode::BuildRifeEngine;
         } else if (argument == "--onnx") {
-            if (!requirePath(argc, argv, i, options.onnx_path)) {
+            if (!requirePath(argc, argv, i, opts::onnx_path)) {
                 return false;
             }
         } else if (argument == "--engine") {
-            if (!requirePath(argc, argv, i, options.engine_path)) {
+            if (!requirePath(argc, argv, i, opts::engine_path)) {
                 return false;
             }
         } else if (argument == "--json") {
-            options.json = true;
+            opts::json = true;
         } else if (argument == "--quiet") {
-            options.quiet = true;
+            opts::quiet = true;
         } else if (argument == "--verbose") {
-            options.verbose = true;
+            opts::verbose = true;
         } else {
             error = "unknown argument: " + argument;
             return false;
         }
     }
-    if (options.mode == Mode::None) {
+    if (opts::mode == Mode::None) {
         error = "no command specified (try --help)";
         return false;
     }
-    if (options.mode == Mode::Container) {
-        const bool want_rife = !options.profile.rife_engine.empty();
+    if (opts::mode == Mode::Container) {
+        const bool want_rife = !opts::profile.rife_engine.empty();
         if (target_fps_set && target_fps.num <= 0) {
-            options.profile.fps_mode = "original";
+            opts::profile.fps_mode = "original";
         } else if (target_fps_set && target_fps.toDouble() >= 100.0) {
-            options.profile.fps_mode = want_rife ? "120-rife" : "120-nvofa";
+            opts::profile.fps_mode = want_rife ? "120-rife" : "120-nvofa";
         } else {
-            options.profile.fps_mode = want_rife ? "60-rife" : "60-nvofa";
+            opts::profile.fps_mode = want_rife ? "60-rife" : "60-nvofa";
         }
-        const int saved_w = options.profile.target_width;
-        const int saved_h = options.profile.target_height;
-        auto valid = validateAndNormalizeProfile(options.profile, /*require_io_paths=*/true);
+        const int saved_w = opts::profile.target_width;
+        const int saved_h = opts::profile.target_height;
+        auto valid = validateAndNormalizeProfile(opts::profile, /*require_io_paths=*/true);
         if (!valid.has_value()) {
             error = valid.error().message;
             return false;
         }
-        if (options.explicit_target_dims) {
-            options.profile.target_width = saved_w;
-            options.profile.target_height = saved_h;
+        if (opts::explicit_target_dims) {
+            opts::profile.target_width = saved_w;
+            opts::profile.target_height = saved_h;
         }
         if (target_fps_set && target_fps.num > 0) {
         }
-    } else if (options.mode == Mode::BuildRifeEngine) {
-        if (options.onnx_path.empty()) {
+    } else if (opts::mode == Mode::BuildRifeEngine) {
+        if (opts::onnx_path.empty()) {
             error = "--build-rife-engine requires --onnx <path>";
             return false;
         }
-        if (options.engine_path.empty()) {
+        if (opts::engine_path.empty()) {
 // Preserve custom fractional rates such as 60000/1001 when specified on CLI.
             error = "--build-rife-engine requires --engine <path>";
             return false;
@@ -338,39 +333,47 @@ std::string formatCombinedProbeJson(const cli::ShimProbeResult& probe) {
     const std::string needle = "}\n";
     const auto pos = base.rfind(needle);
     if (pos != std::string::npos) {
-        std::ostringstream ngx;
-        ngx << ",\n  \"ngx_bridge\": {\n"
-            << "    \"available\": " << (opened ? "true" : "false") << ",\n"
-            << "    \"bridge\": \"" << cli::escapeJson(opened ? bridge.path() : "") << "\",\n"
-            << "    \"vsr\": " << (caps.vsr_available != 0 ? "true" : "false") << ",\n"
-            << "    \"truehdr\": " << (caps.truehdr_available != 0 ? "true" : "false") << ",\n"
-            << "    \"d3d12\": " << (caps.d3d12_device_created != 0 ? "true" : "false") << ",\n"
-            << "    \"cuda_interop\": " << (caps.cuda_interop_available != 0 ? "true" : "false") << ",\n"
-            << "    \"result\": " << static_cast<int>(result) << "\n"
-            << "  }\n"
-            << "}\n";
-        base.replace(pos, needle.length(), ngx.str());
+        const std::string ngx = std::format(
+            ",\n  \"ngx_bridge\": {{\n"
+            "    \"available\": {},\n"
+            "    \"bridge\": \"{}\",\n"
+            "    \"vsr\": {},\n"
+            "    \"truehdr\": {},\n"
+            "    \"d3d12\": {},\n"
+            "    \"cuda_interop\": {},\n"
+            "    \"result\": {}\n"
+            "  }}\n}}\n",
+            opened ? "true" : "false",
+            cli::escapeJson(opened ? bridge.path() : ""),
+            caps.vsr_available != 0 ? "true" : "false",
+            caps.truehdr_available != 0 ? "true" : "false",
+            caps.d3d12_device_created != 0 ? "true" : "false",
+            caps.cuda_interop_available != 0 ? "true" : "false",
+            static_cast<int>(result));
+        base.replace(pos, needle.length(), ngx);
     }
     return base;
 }
-int runProbe(const Options& options) {
+int runProbe() {
     const cli::ShimProbeResult probe = cli::probeShim();
-    if (options.json) {
+    if (opts::json) {
         std::cout << formatCombinedProbeJson(probe);
     } else {
         std::cout << cli::formatProbeHuman(probe);
         printNgxBridgeProbe();
     }
-    if (!probe.loaded) {
+    const auto& [loaded, path, error, abi_ver, result, diag] = probe;
+    (void)path; (void)error; (void)abi_ver; (void)diag;
+    if (!loaded) {
         return 4;
     }
-    if (probe.result != RTX_OK) {
+    if (result != RTX_OK) {
         return 5;
     }
     return 0;
 }
-void printHwReport(const HwTranscodeReport& report, const Options& options) {
-    if (options.json) {
+void printHwReport(const HwTranscodeReport& report) {
+    if (opts::json) {
         std::cout << report.toJson();
         return;
     }
@@ -398,28 +401,29 @@ void printHwReport(const HwTranscodeReport& report, const Options& options) {
     std::cout << "elapsed: " << std::fixed << std::setprecision(1) << report.elapsed_ms
               << " ms\n";
 }
-int runHardwareMode(const Options& options) {
-    HwTranscodeOptions hardware = profileToHwOptions(options.profile);
+int runHardwareMode() {
+    HwTranscodeOptions hardware = profileToHwOptions(opts::profile);
 // Phase 9 (RC-2): the fruc line must be visible whenever the FRUC backend
 // is active, even with zero interpolated frames, and must carry the
 // interpolation failure count so silent degradation cannot hide.
-    hardware.verbose = options.verbose;
-    if (!options.quiet && !options.json) {
+    hardware.verbose = opts::verbose;
+    if (!opts::quiet && !opts::json) {
         hardware.progress = [](const HwTranscodeProgress& p) {
-            if (p.total_frames > 0) {
-                const double pct = static_cast<double>(p.frames_encoded) * 100.0 / p.total_frames;
-                const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
+            const auto [frames_dec, frames_enc, total_frames, elapsed_ms] = p;
+            (void)frames_dec;
+            const double fps = elapsed_ms > 0 ? (frames_enc * 1000.0 / elapsed_ms) : 0.0;
+            if (total_frames > 0) {
+                const double pct = static_cast<double>(frames_enc) * 100.0 / total_frames;
                 std::cout << std::format("\r[Transcode] {:5.1f}% ({}/{} frames, {:5.1f} FPS)",
-                                         pct, p.frames_encoded, p.total_frames, fps) << std::flush;
+                                         pct, frames_enc, total_frames, fps) << std::flush;
             } else {
-                const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
                 std::cout << std::format("\r[Transcode] {} frames encoded ({:5.1f} FPS)",
-                                         p.frames_encoded, fps) << std::flush;
+                                         frames_enc, fps) << std::flush;
             }
         };
     }
     Result<HwTranscodeReport> result = runNvidiaRemasterTranscode(hardware);
-    if (!options.quiet && !options.json) {
+    if (!opts::quiet && !opts::json) {
         std::cout << "\n";
     }
     if (!result.has_value()) {
@@ -429,7 +433,7 @@ int runHardwareMode(const Options& options) {
         }
         return 1;
     }
-    printHwReport(result.value(), options);
+    printHwReport(result.value());
     return 0;
 }
 int runSessionStdio() {
@@ -508,20 +512,22 @@ int runSessionStdio() {
 
         auto last_emit = std::chrono::steady_clock::now() - std::chrono::seconds(1);
         hw.progress = [&](const HwTranscodeProgress& p) {
+            const auto [frames_dec, frames_enc, total_frames, elapsed_ms] = p;
+            (void)frames_dec;
             const auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration<double>(now - last_emit).count() < 0.20 &&
-                (p.total_frames == 0 || p.frames_encoded < p.total_frames)) {
+                (total_frames == 0 || frames_enc < total_frames)) {
                 return;
             }
             last_emit = now;
-            const double pct = p.total_frames > 0
-                                   ? std::min(100.0, static_cast<double>(p.frames_encoded) * 100.0 / p.total_frames)
+            const double pct = total_frames > 0
+                                   ? std::min(100.0, static_cast<double>(frames_enc) * 100.0 / total_frames)
                                    : 0.0;
-            const double fps = p.elapsed_ms > 0 ? (p.frames_encoded * 1000.0 / p.elapsed_ms) : 0.0;
+            const double fps = elapsed_ms > 0 ? (frames_enc * 1000.0 / elapsed_ms) : 0.0;
             std::lock_guard<std::mutex> lock(out_mutex);
             std::cout << std::format(
                 "{{\"type\":\"progress\",\"pct\":{:.1f},\"frames\":{},\"total\":{},\"fps\":{:.1f}}}\n",
-                pct, p.frames_encoded, p.total_frames, fps) << std::flush;
+                pct, frames_enc, total_frames, fps) << std::flush;
         };
 
         Result<HwTranscodeReport> result = runNvidiaRemasterTranscode(hw);
@@ -548,7 +554,7 @@ int runSessionStdio() {
     setLogCallback(nullptr);
     return last_exit_code;
 }
-int runBuildRifeEngine(const Options& options) {
+int runBuildRifeEngine() {
     rtx::NgxRemasterBridge bridge;
     std::string error;
     if (!bridge.open(&error)) {
@@ -559,10 +565,10 @@ int runBuildRifeEngine(const Options& options) {
         logError("loaded NGX bridge DLL does not support RIFE API");
         return 1;
     }
-    const std::string onnx_str = options.onnx_path.string();
-    const std::string engine_str = options.engine_path.string();
-    const uint32_t opt_w = options.opt_w > 0 ? static_cast<uint32_t>(options.opt_w) : 1920u;
-    const uint32_t opt_h = options.opt_h > 0 ? static_cast<uint32_t>(options.opt_h) : 1080u;
+    const std::string onnx_str = opts::onnx_path.string();
+    const std::string engine_str = opts::engine_path.string();
+    const uint32_t opt_w = opts::opt_w > 0 ? static_cast<uint32_t>(opts::opt_w) : 1920u;
+    const uint32_t opt_h = opts::opt_h > 0 ? static_cast<uint32_t>(opts::opt_h) : 1080u;
 
     std::cout << "Building RIFE TensorRT engine...\n"
               << "  ONNX: " << onnx_str << "\n"
@@ -585,26 +591,19 @@ namespace {
 
 std::vector<std::string> utf8CommandLine(int* argc) {
     std::vector<std::string> arguments;
-    int wide_count = 0;
-    LPWSTR* wide = CommandLineToArgvW(GetCommandLineW(), &wide_count);
-    if (wide == nullptr || wide_count <= 0) {
-        *argc = 0;
-        return arguments;
-    }
-    arguments.reserve(static_cast<size_t>(wide_count));
-    for (int i = 0; i < wide_count; ++i) {
-        const int size =
-            WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, nullptr, 0, nullptr, nullptr);
+    const std::vector<std::wstring> wide = rtx::sys::parseCommandLineW(GetCommandLineW());
+    arguments.reserve(wide.size());
+    for (const auto& w : wide) {
+        const int size = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
         if (size <= 1) {
             arguments.emplace_back();
             continue;
         }
         std::vector<char> buffer(static_cast<size_t>(size));
-        WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, buffer.data(), size, nullptr, nullptr);
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, buffer.data(), size, nullptr, nullptr);
         arguments.emplace_back(buffer.data());
     }
-    LocalFree(wide);
-    *argc = wide_count;
+    *argc = static_cast<int>(arguments.size());
     return arguments;
 }
 }  // namespace
@@ -625,24 +624,23 @@ int rtxCliMain(int argc, char** argv) {
         argv = utf8_argv.data();
     }
 #endif
-    Options options;
     std::string error;
-    if (!parseOptions(argc, argv, options, error)) {
+    if (!parseOptions(argc, argv, error)) {
         std::cerr << "error: " << error << "\n";
         printHelp();
         return 2;
     }
-    if (options.quiet) {
+    if (opts::quiet) {
         setLogLevel(LogLevel::Error);
-    } else if (options.verbose) {
+    } else if (opts::verbose) {
         setLogLevel(LogLevel::Debug);
     } else {
         setLogLevel(LogLevel::Info);
     }
-    if (options.json) {
+    if (opts::json) {
         setConsoleLogEnabled(false);
     }
-    switch (options.mode) {
+    switch (opts::mode) {
         case Mode::Help:
             printHelp();
             return 0;
@@ -655,11 +653,11 @@ int rtxCliMain(int argc, char** argv) {
         case Mode::SessionStdio:
             return runSessionStdio();
         case Mode::Probe:
-            return runProbe(options);
+            return runProbe();
         case Mode::Container:
-            return runHardwareMode(options);
+            return runHardwareMode();
         case Mode::BuildRifeEngine:
-            return runBuildRifeEngine(options);
+            return runBuildRifeEngine();
         case Mode::None:
             break;
     }

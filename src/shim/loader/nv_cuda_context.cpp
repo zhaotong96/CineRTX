@@ -12,53 +12,34 @@ namespace {
 std::string cudaError(const DriverTable& driver, const char* operation, CUresult result) {
     const char* name = nullptr;
     const char* text = nullptr;
-    if (driver.cuGetErrorName != nullptr) {
-        driver.cuGetErrorName(result, &name);
-    }
-    if (driver.cuGetErrorString != nullptr) {
-        driver.cuGetErrorString(result, &text);
-    }
+    if (driver.cuGetErrorName != nullptr) driver.cuGetErrorName(result, &name);
+    if (driver.cuGetErrorString != nullptr) driver.cuGetErrorString(result, &text);
     std::string message = operation;
     message += " failed";
-    if (name != nullptr) {
-        message += ": ";
-        message += name;
-    }
-    if (text != nullptr) {
-        message += " (";
-        message += text;
-        message += ')';
-    }
+    if (name != nullptr) { message += ": "; message += name; }
+    if (text != nullptr) { message += " ("; message += text; message += ')'; }
     return message;
 }
+
 }  // namespace
 
-Context::~Context() { close(); }
-
-bool Context::open(std::string* error, int device_index) {
-    if (valid()) {
-        return true;
-    }
-    close();
+bool cudaCtxOpen(Context& ctx, std::string* error, int device_index) {
+    if (cudaCtxValid(ctx)) return true;
+    cudaCtxClose(ctx);
+    auto& [library_, driver_, context_, device_, guard_] = ctx;
 
     std::string message;
     if (!openNvidiaLibrary(library_, "nvcuda.dll", "libcuda.so.1", true, &message)) {
-        if (error != nullptr) {
-            *error = "nvcuda is unavailable: " + message;
-        }
+        if (error != nullptr) *error = "nvcuda is unavailable: " + message;
         return false;
     }
     if (!driver_.resolve(library_, &message)) {
-        if (error != nullptr) {
-            *error = message;
-        }
+        if (error != nullptr) *error = message;
         return false;
     }
     CUresult result = driver_.cuInit(0);
     if (result != CUDA_SUCCESS) {
-        if (error != nullptr) {
-            *error = cudaError(driver_, "cuInit", result);
-        }
+        if (error != nullptr) *error = cudaError(driver_, "cuInit", result);
         return false;
     }
     int count = 0;
@@ -71,82 +52,83 @@ bool Context::open(std::string* error, int device_index) {
         return false;
     }
     const int requested_device = device_index < 0 ? 0 : device_index;
-// Phase 8 (Task 8-A1): bind the requested GPU explicitly instead of
-// falling back to the process-global default device 0.
     result = driver_.cuDeviceGet(&device_, requested_device);
     if (result != CUDA_SUCCESS) {
-        if (error != nullptr) {
-            *error = cudaError(driver_, "cuDeviceGet", result);
-        }
+        if (error != nullptr) *error = cudaError(driver_, "cuDeviceGet", result);
         return false;
     }
     if (driver_.cuDevicePrimaryCtxSetFlags != nullptr) {
-// The default scheduler spins on the CPU while a stream is busy, which
-// burns a core next to the D3D12 VSR/TrueHDR queue.  Set the blocking
-// scheduler on the primary context before it is retained; an already
-// active context keeps its flags, so a rejection is not fatal here.
-        const CUresult flags =
-            driver_.cuDevicePrimaryCtxSetFlags(device_, kCtxSchedBlockingSync);
+        const CUresult flags = driver_.cuDevicePrimaryCtxSetFlags(device_, kCtxSchedBlockingSync);
         RTX_TRACE("cuda: cuDevicePrimaryCtxSetFlags(0x%x) -> %s", kCtxSchedBlockingSync,
                   flags == CUDA_SUCCESS ? "ok" : "rejected (context already active)");
     }
     result = driver_.cuDevicePrimaryCtxRetain(&context_, device_);
     if (result != CUDA_SUCCESS) {
-        if (error != nullptr) {
-            *error = cudaError(driver_, "cuDevicePrimaryCtxRetain", result);
-        }
+        if (error != nullptr) *error = cudaError(driver_, "cuDevicePrimaryCtxRetain", result);
         context_ = nullptr;
         return false;
     }
+    const auto release_fn = driver_.cuDevicePrimaryCtxRelease;
+    const CUdevice retained_dev = device_;
+    guard_ = std::shared_ptr<void>(context_, [release_fn, retained_dev](void*) noexcept {
+        if (release_fn != nullptr) release_fn(retained_dev);
+    });
     if (driver_.cuCtxSetCurrent != nullptr) {
         result = driver_.cuCtxSetCurrent(context_);
         if (result != CUDA_SUCCESS) {
-            if (error != nullptr) {
-                *error = cudaError(driver_, "cuCtxSetCurrent", result);
-            }
-            close();
+            if (error != nullptr) *error = cudaError(driver_, "cuCtxSetCurrent", result);
+            cudaCtxClose(ctx);
             return false;
         }
     }
-    RTX_TRACE("cuda: primary context flags=0x%x blocking_sync=%d", primaryFlags(),
-              blockingSync() ? 1 : 0);
-    if (error != nullptr) {
-        error->clear();
-    }
+    RTX_TRACE("cuda: primary context flags=0x%x blocking_sync=%d", cudaCtxPrimaryFlags(ctx),
+              cudaCtxBlockingSync(ctx) ? 1 : 0);
+    if (error != nullptr) error->clear();
     return true;
 }
-void Context::close() {
-    if (context_ != nullptr && driver_.cuDevicePrimaryCtxRelease != nullptr) {
-        driver_.cuDevicePrimaryCtxRelease(device_);
-    }
+
+void cudaCtxClose(Context& ctx) {
+    auto& [library_, driver_, context_, device_, guard_] = ctx;
+    (void)driver_;
+    guard_.reset();
     context_ = nullptr;
     device_ = 0;
-    library_.close();
+    dynClose(library_);
 }
-int Context::computeMajor() const {
+
+int cudaCtxComputeMajor(const Context& ctx) {
+    const auto& [lib, driver_, h, device_, guard] = ctx;
+    (void)lib; (void)h; (void)guard;
     int value = 0;
     if (driver_.cuDeviceGetAttribute != nullptr) {
-        driver_.cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-                                     device_);
+        driver_.cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device_);
     }
     return value;
 }
-int Context::computeMinor() const {
+
+int cudaCtxComputeMinor(const Context& ctx) {
+    const auto& [lib, driver_, h, device_, guard] = ctx;
+    (void)lib; (void)h; (void)guard;
     int value = 0;
     if (driver_.cuDeviceGetAttribute != nullptr) {
-        driver_.cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-                                     device_);
+        driver_.cuDeviceGetAttribute(&value, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device_);
     }
     return value;
 }
-std::string Context::deviceName() const {
+
+std::string cudaCtxDeviceName(const Context& ctx) {
+    const auto& [lib, driver_, h, device_, guard] = ctx;
+    (void)lib; (void)h; (void)guard;
     char name[128] = {};
     if (driver_.cuDeviceGetName != nullptr) {
         driver_.cuDeviceGetName(name, sizeof(name), device_);
     }
     return name;
 }
-unsigned int Context::primaryFlags() const noexcept {
+
+unsigned int cudaCtxPrimaryFlags(const Context& ctx) noexcept {
+    const auto& [lib, driver_, h, device_, guard] = ctx;
+    (void)lib; (void)h; (void)guard;
     unsigned int flags = 0;
     int active = 0;
     if (driver_.cuDevicePrimaryCtxGetState != nullptr) {
@@ -154,26 +136,23 @@ unsigned int Context::primaryFlags() const noexcept {
     }
     return flags;
 }
-bool Context::blockingSync() const noexcept {
-    return (primaryFlags() & kCtxSchedBlockingSync) != 0;
+
+bool cudaCtxBlockingSync(const Context& ctx) noexcept {
+    return (cudaCtxPrimaryFlags(ctx) & kCtxSchedBlockingSync) != 0;
 }
+
 RtxResult mapResult(CUresult result) {
     switch (result) {
-        case CUDA_SUCCESS:
-            return RTX_OK;
-        case CUDA_ERROR_OUT_OF_MEMORY:
-            return RTX_ERR_OUT_OF_MEMORY;
+        case CUDA_SUCCESS: return RTX_OK;
+        case CUDA_ERROR_OUT_OF_MEMORY: return RTX_ERR_OUT_OF_MEMORY;
         case CUDA_ERROR_NO_DEVICE:
         case CUDA_ERROR_INVALID_DEVICE:
         case CUDA_ERROR_INVALID_CONTEXT:
-        case CUDA_ERROR_INVALID_VALUE:
-            return RTX_ERR_INVALID_ARGUMENT;
-        case CUDA_ERROR_NOT_SUPPORTED:
-            return RTX_ERR_UNSUPPORTED;
-        case CUDA_ERROR_DEINITIALIZED:
-            return RTX_ERR_DEVICE_LOST;
-        default:
-            return RTX_ERR_INTERNAL;
+        case CUDA_ERROR_INVALID_VALUE: return RTX_ERR_INVALID_ARGUMENT;
+        case CUDA_ERROR_NOT_SUPPORTED: return RTX_ERR_UNSUPPORTED;
+        case CUDA_ERROR_DEINITIALIZED: return RTX_ERR_DEVICE_LOST;
+        default: return RTX_ERR_INTERNAL;
     }
 }
+
 }  // namespace rtx_shim::cuda

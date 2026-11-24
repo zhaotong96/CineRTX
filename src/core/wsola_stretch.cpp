@@ -106,21 +106,23 @@ const std::array<float, kWsolaWindow>& sharedHannTable() noexcept {
 // 惰性紧缩：仅在逻辑读头已过半或写空间不足时以 std::shift_left 搬移有效帧。
 void compactRingIfNeeded(WsolaStreamState& state, std::size_t ch_count,
                          std::size_t max_ring_frames, bool force_for_write) noexcept {
-    if (state.ring_head == 0) {
+    auto& [analysis_ring, overlap_tail, ring_head, ring_fill, tail_frames, src_phase, last_speed] = state;
+    (void)overlap_tail; (void)tail_frames; (void)src_phase; (void)last_speed;
+    if (ring_head == 0) {
         return;
     }
-    const bool past_half = state.ring_head >= (max_ring_frames / 2);
-    const bool write_full = force_for_write && (state.ring_fill >= max_ring_frames);
+    const bool past_half = ring_head >= (max_ring_frames / 2);
+    const bool write_full = force_for_write && (ring_fill >= max_ring_frames);
     if (!past_half && !write_full) {
         return;
     }
-    const std::size_t drop_samples = state.ring_head * ch_count;
-    const std::size_t fill_samples = state.ring_fill * ch_count;
-    std::shift_left(state.analysis_ring.begin(),
-                    state.analysis_ring.begin() + static_cast<std::ptrdiff_t>(fill_samples),
+    const std::size_t drop_samples = ring_head * ch_count;
+    const std::size_t fill_samples = ring_fill * ch_count;
+    std::shift_left(analysis_ring.begin(),
+                    analysis_ring.begin() + static_cast<std::ptrdiff_t>(fill_samples),
                     static_cast<std::ptrdiff_t>(drop_samples));
-    state.ring_fill -= state.ring_head;
-    state.ring_head = 0;
+    ring_fill -= ring_head;
+    ring_head = 0;
 }
 
 }  // namespace
@@ -133,15 +135,16 @@ std::size_t wsolaProcessStream(WsolaStreamState& state,
     if (channels == 0 || channels > kWsolaMaxChannels || output.empty()) {
         return 0;
     }
+    auto& [analysis_ring, overlap_tail, ring_head, ring_fill, tail_frames, src_phase, last_speed] = state;
     const std::size_t ch_count = static_cast<std::size_t>(channels);
-    const std::size_t max_ring_frames = state.analysis_ring.size() / ch_count;
-    const std::size_t max_tail_frames = state.overlap_tail.size() / ch_count;
+    const std::size_t max_ring_frames = analysis_ring.size() / ch_count;
+    const std::size_t max_tail_frames = overlap_tail.size() / ch_count;
     if (max_ring_frames < kWsolaWindow + 1 || max_tail_frames < kWsolaHalf) {
         return 0;
     }
 
     const float clamped_speed = std::clamp(speed_ratio, 0.25f, 2.0f);
-    state.last_speed = clamped_speed;
+    last_speed = clamped_speed;
 
     const std::size_t in_frames = input.size() / ch_count;
     const std::size_t out_cap_frames = output.size() / ch_count;
@@ -150,8 +153,8 @@ std::size_t wsolaProcessStream(WsolaStreamState& state,
     }
 
     // 1.0x 直通路径：零延迟、平滑软限幅保护。
-    const std::size_t avail_init = state.ring_fill - state.ring_head;
-    if (std::abs(clamped_speed - 1.0f) < 1e-5f && avail_init == 0 && state.tail_frames == 0) {
+    const std::size_t avail_init = ring_fill - ring_head;
+    if (std::abs(clamped_speed - 1.0f) < 1e-5f && avail_init == 0 && tail_frames == 0) {
         const std::size_t copy_frames = std::min(in_frames, out_cap_frames);
         const std::size_t copy_samples = copy_frames * ch_count;
         for (std::size_t i = 0; i < copy_samples; ++i) {
@@ -166,32 +169,32 @@ std::size_t wsolaProcessStream(WsolaStreamState& state,
     std::size_t in_consumed = 0;
     std::size_t out_frames = 0;
 
-    while (in_consumed < in_frames || (state.ring_fill - state.ring_head) >= kWsolaWindow + 1) {
+    while (in_consumed < in_frames || (ring_fill - ring_head) >= kWsolaWindow + 1) {
         if (in_consumed < in_frames) {
             compactRingIfNeeded(state, ch_count, max_ring_frames, /*force_for_write=*/true);
-            if (state.ring_fill < max_ring_frames) {
+            if (ring_fill < max_ring_frames) {
                 const std::size_t can_copy = std::min(in_frames - in_consumed,
-                                                      max_ring_frames - state.ring_fill);
+                                                      max_ring_frames - ring_fill);
                 std::copy_n(input.data() + in_consumed * ch_count,
                             can_copy * ch_count,
-                            state.analysis_ring.data() + state.ring_fill * ch_count);
-                state.ring_fill += can_copy;
+                            analysis_ring.data() + ring_fill * ch_count);
+                ring_fill += can_copy;
                 in_consumed += can_copy;
             }
         }
 
-        const std::size_t active_frames = state.ring_fill - state.ring_head;
+        const std::size_t active_frames = ring_fill - ring_head;
         if (active_frames < kWsolaWindow + 1 || out_frames + kWsolaHalf > out_cap_frames) {
             break;
         }
 
-        const float* active_ptr = state.analysis_ring.data() + state.ring_head * ch_count;
+        const float* active_ptr = analysis_ring.data() + ring_head * ch_count;
         const std::size_t max_start = active_frames - kWsolaWindow - 1;
-        const std::size_t nominal = std::min(static_cast<std::size_t>(std::max(0.0, state.src_phase)),
+        const std::size_t nominal = std::min(static_cast<std::size_t>(std::max(0.0, src_phase)),
                                              max_start);
 
-        const auto [chosen, frac] = (state.tail_frames == kWsolaHalf)
-            ? findBestOverlapStream(active_ptr, ch_count, state.overlap_tail.data(), nominal, max_start)
+        const auto [chosen, frac] = (tail_frames == kWsolaHalf)
+            ? findBestOverlapStream(active_ptr, ch_count, overlap_tail.data(), nominal, max_start)
             : std::pair<std::size_t, float>{nominal, 0.0f};
         const float inv_frac = 1.0f - frac;
 
@@ -199,14 +202,14 @@ std::size_t wsolaProcessStream(WsolaStreamState& state,
         using ConstAudioView = std::mdspan<const float, std::dextents<std::size_t, 2>>;
         using AudioView = std::mdspan<float, std::dextents<std::size_t, 2>>;
         ConstAudioView ring_view(active_ptr, active_frames, ch_count);
-        AudioView tail_view(state.overlap_tail.data(), kWsolaHalf, ch_count);
+        AudioView tail_view(overlap_tail.data(), kWsolaHalf, ch_count);
         AudioView out_view(output.data(), out_cap_frames, ch_count);
 
         for (std::size_t f = 0; f < kWsolaHalf; ++f) {
             const float w_in = hann[f];
             const float w_out = hann[f + kWsolaHalf];
             for (std::size_t c = 0; c < ch_count; ++c) {
-                const float prev = (state.tail_frames == kWsolaHalf) ? (tail_view[f, c] * w_out) : 0.0f;
+                const float prev = (tail_frames == kWsolaHalf) ? (tail_view[f, c] * w_out) : 0.0f;
                 const float curr_s = ring_view[chosen + f, c] * inv_frac +
                                      ring_view[chosen + f + 1, c] * frac;
                 const float next_s = ring_view[chosen + kWsolaHalf + f, c] * inv_frac +
@@ -222,34 +225,34 @@ std::size_t wsolaProcessStream(WsolaStreamState& state,
             for (std::size_t c = 0; c < ch_count; ++c) {
                 const std::size_t out_idx = (out_frames + f) * ch_count + c;
                 const std::size_t tail_idx = f * ch_count + c;
-                const float prev = (state.tail_frames == kWsolaHalf)
-                    ? (state.overlap_tail[tail_idx] * w_out) : 0.0f;
+                const float prev = (tail_frames == kWsolaHalf)
+                    ? (overlap_tail[tail_idx] * w_out) : 0.0f;
                 const float curr_s = active_ptr[(chosen + f) * ch_count + c] * inv_frac +
                                      active_ptr[(chosen + f + 1) * ch_count + c] * frac;
                 const float next_s = active_ptr[(chosen + kWsolaHalf + f) * ch_count + c] * inv_frac +
                                      active_ptr[(chosen + kWsolaHalf + f + 1) * ch_count + c] * frac;
                 output[out_idx] = softLimitSample(prev + curr_s * w_in);
-                state.overlap_tail[tail_idx] = next_s;
+                overlap_tail[tail_idx] = next_s;
             }
         }
 #endif
-        state.tail_frames = kWsolaHalf;
+        tail_frames = kWsolaHalf;
         out_frames += kWsolaHalf;
-        state.src_phase += analysis_hop;
+        src_phase += analysis_hop;
 
         // 仅推进逻辑读头 ring_head，避免每次 hop 全量左移搬运。
-        if (state.src_phase > static_cast<double>(kWsolaSearch)) {
+        if (src_phase > static_cast<double>(kWsolaSearch)) {
             const std::size_t drop = std::min(
-                static_cast<std::size_t>(state.src_phase - static_cast<double>(kWsolaSearch)),
-                state.ring_fill - state.ring_head);
-            state.ring_head += drop;
-            state.src_phase -= static_cast<double>(drop);
+                static_cast<std::size_t>(src_phase - static_cast<double>(kWsolaSearch)),
+                ring_fill - ring_head);
+            ring_head += drop;
+            src_phase -= static_cast<double>(drop);
             compactRingIfNeeded(state, ch_count, max_ring_frames, /*force_for_write=*/false);
         }
 
-        const std::size_t remaining = state.ring_fill - state.ring_head;
+        const std::size_t remaining = ring_fill - ring_head;
         if (in_consumed >= in_frames &&
-            state.src_phase > static_cast<double>(remaining > kWsolaWindow + 1 ? remaining - kWsolaWindow - 1 : 0)) {
+            src_phase > static_cast<double>(remaining > kWsolaWindow + 1 ? remaining - kWsolaWindow - 1 : 0)) {
             break;
         }
     }

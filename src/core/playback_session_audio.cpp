@@ -31,10 +31,12 @@ using PacketPtr = std::unique_ptr<AVPacket, FnDeleter<&av_packet_free>>;
 
 Result<void> openAudioDecode(const AudioTrackInfo& track, uint32_t out_rate, uint32_t out_channels,
                              AudioCodecPtr& ctx, SwrPtr& swr, FramePtr& frame, PacketPtr& packet) {
-    if (!track.opaque_codecpar) {
+    const auto& [t_idx, t_sr, t_ch, t_par] = track;
+    (void)t_idx; (void)t_sr; (void)t_ch;
+    if (!t_par) {
         return err(ErrorCode::InvalidArgument, "audio track has no codec parameters");
     }
-    const auto* parameters = static_cast<const AVCodecParameters*>(track.opaque_codecpar.get());
+    const auto* parameters = static_cast<const AVCodecParameters*>(t_par.get());
     const AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
     if (codec == nullptr) {
         return err(ErrorCode::Unsupported, "no software audio decoder",
@@ -142,8 +144,8 @@ void MediaPlaybackSession::Impl::audioLoop(std::stop_token stop) {
         }
         double requested = 1.0;
         {
-            std::lock_guard<std::mutex> lock(ctl.mutex);
-            requested = ctl.speed;
+            std::lock_guard<std::mutex> lock(ctl_mutex);
+            requested = ctl_speed;
         }
         if (requested != applied) {
             applied = requested;

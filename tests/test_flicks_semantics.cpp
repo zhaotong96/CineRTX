@@ -131,16 +131,16 @@ RTX_TEST(flicks_semantics_bframe_reordered_pts) {
     for (size_t i = 0; i < projected.size(); ++i) {
         RTX_CHECK_EQ(projected[i], static_cast<int64_t>(i) * frame * 705600000LL / 90000);
     }
-    FlicksMonotonicGuard guard;
+    FlicksMonotonicGuard guard{0, false, 0u};
 // No monotonic repair happened: the raw projected PTS still regress.
     std::vector<int64_t> guarded;
     for (const AccessUnit& au : gop) {
-        guarded.push_back(guard.apply(absoluteTimestampToFlicks(au.pts, tb)));
+        guarded.push_back(applyFlicksMonotonic(guard, absoluteTimestampToFlicks(au.pts, tb)));
     }
     for (size_t i = 1; i < guarded.size(); ++i) {
         RTX_CHECK(guarded[i] > guarded[i - 1]);
     }
-    RTX_CHECK_EQ(guard.repairs(), 4ULL);
+    RTX_CHECK_EQ(flicksMonotonicRepairs(guard), 4ULL);
 // The monotonic guard is the *audio muxer* tool.  Fed the reordered video
 // PTS it fabricates a strictly increasing axis that no longer matches any
 // real presentation time — keeping the two apart is the point of the split.
@@ -201,57 +201,57 @@ RTX_TEST(flicks_semantics_audio_sample_axes) {
 // Each frame is also reachable directly, without walking the prefix.
                      static_cast<int64_t>(kFlicksPerSecond));
 
-        IncrementalFlicksAccumulator accumulator{sample_period};
-        accumulator.reset(0);
+        IncrementalFlicksAccumulator accumulator = makeFlicksAccumulator(sample_period);
+        resetFlicksAccumulator(accumulator, 0);
         int64_t last = 0;
         for (uint32_t i = 0; i < rate; ++i) {
-            last = accumulator.advanceOneStep();
+            last = advanceFlicksStep(accumulator);
 // Every common audio rate divides 705,600,000 exactly, so one second of
 // samples must land on exactly one second of Flicks with zero remainder.
         }
         RTX_CHECK_EQ(last, static_cast<int64_t>(kFlicksPerSecond));
-        RTX_CHECK_EQ(accumulator.remainder(), 0LL);
+        RTX_CHECK_EQ(flicksAccumulatorRemainder(accumulator), 0LL);
 
-        accumulator.reset(7LL * static_cast<int64_t>(kFlicksPerSecond));
+        resetFlicksAccumulator(accumulator, 7LL * static_cast<int64_t>(kFlicksPerSecond));
         for (uint32_t i = 0; i < rate; ++i) {
-            last = accumulator.advanceOneStep();
+            last = advanceFlicksStep(accumulator);
         }
         RTX_CHECK_EQ(last, 8LL * static_cast<int64_t>(kFlicksPerSecond));
     }
 }
 RTX_TEST(flicks_semantics_incremental_remainder_carry) {
-    IncrementalFlicksAccumulator accumulator{Rational{1, 15360}};
-    accumulator.reset(0);
-    RTX_CHECK_EQ(accumulator.advanceOneStep(), 45937LL);
-    RTX_CHECK_EQ(accumulator.remainder(), 7680LL);
+    IncrementalFlicksAccumulator accumulator = makeFlicksAccumulator(Rational{1, 15360});
+    resetFlicksAccumulator(accumulator, 0);
+    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 45937LL);
+    RTX_CHECK_EQ(flicksAccumulatorRemainder(accumulator), 7680LL);
 // A non-zero anchor must survive the whole run untouched.
-    RTX_CHECK_EQ(accumulator.advanceOneStep(), 91875LL);
-    RTX_CHECK_EQ(accumulator.remainder(), 0LL);
-    RTX_CHECK_EQ(accumulator.advanceOneStep(), 137812LL);
+    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 91875LL);
+    RTX_CHECK_EQ(flicksAccumulatorRemainder(accumulator), 0LL);
+    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 137812LL);
 
-    accumulator.reset(0);
+    resetFlicksAccumulator(accumulator, 0);
     int64_t last = 0;
     for (int i = 0; i < 15360; ++i) {
-        last = accumulator.advanceOneStep();
+        last = advanceFlicksStep(accumulator);
     }
 // 1/15360 s = 45937.5 Flicks.  Truncating each step independently would lose
 // half a tick per step; the Bresenham carry must alternate 45937 / 45938 so
 // the long-run position stays exact.
     RTX_CHECK_EQ(last, static_cast<int64_t>(kFlicksPerSecond));
-    RTX_CHECK_EQ(accumulator.remainder(), 0LL);
+    RTX_CHECK_EQ(flicksAccumulatorRemainder(accumulator), 0LL);
 
-    IncrementalFlicksAccumulator film{Rational{1001, 24000}};
-    film.reset(0);
+    IncrementalFlicksAccumulator film = makeFlicksAccumulator(Rational{1001, 24000});
+    resetFlicksAccumulator(film, 0);
     const int64_t frames = 3600LL * 24000 / 1001;
     for (int64_t i = 0; i < frames; ++i) {
-        last = film.advanceOneStep();
+        last = advanceFlicksStep(film);
     }
     const int64_t expected = frames * 1001LL * static_cast<int64_t>(kFlicksPerSecond) / 24000;
     RTX_CHECK(last >= expected - 1 && last <= expected + 1);
 
-    IncrementalFlicksAccumulator broken{Rational{0, 1}};
-    broken.reset(42);
-    RTX_CHECK_EQ(broken.advanceOneStep(), 42LL);
+    IncrementalFlicksAccumulator broken = makeFlicksAccumulator(Rational{0, 1});
+    resetFlicksAccumulator(broken, 42);
+    RTX_CHECK_EQ(advanceFlicksStep(broken), 42LL);
 }
 // 23.976 frame period: 1001/24000 s.  One hour must stay within one tick.
 RTX_TEST(flicks_semantics_smpte_all_standards) {

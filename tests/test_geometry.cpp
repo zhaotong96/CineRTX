@@ -26,18 +26,19 @@ void checkPortraitPreset(rtx::test::Context& rtx_test_context, int src_w, int sr
         return;
     }
 
-    const GeometryResult g =
+    const auto [cw, ch, sw, sh, ox, oy, pl, pr, is_portrait] =
         calculateSmartGeometry(src_w, src_h, GeometryTargetMode::AutoDirect,
                                p.target_width, p.target_height);
-    RTX_CHECK(g.is_portrait);
-    RTX_CHECK_EQ(g.canvas_width, expected_w);
-    RTX_CHECK_EQ(g.canvas_height, expected_h);
-    RTX_CHECK_EQ(g.canvas_width & 1, 0);
-    RTX_CHECK_EQ(g.canvas_height & 1, 0);
-    RTX_CHECK(g.canvas_width >= src_w);
-    RTX_CHECK(g.canvas_height >= src_h);
+    (void)sw; (void)sh; (void)ox; (void)oy; (void)pl; (void)pr;
+    RTX_CHECK(is_portrait);
+    RTX_CHECK_EQ(cw, expected_w);
+    RTX_CHECK_EQ(ch, expected_h);
+    RTX_CHECK_EQ(cw & 1, 0);
+    RTX_CHECK_EQ(ch & 1, 0);
+    RTX_CHECK(cw >= src_w);
+    RTX_CHECK(ch >= src_h);
     // Preserve 9:16 portrait aspect ratio
-    RTX_CHECK_EQ(g.canvas_width * 16, g.canvas_height * 9);
+    RTX_CHECK_EQ(cw * 16, ch * 9);
 }
 
 }  // namespace
@@ -87,20 +88,22 @@ RTX_TEST(geometry_preset_switching_clears_stale_dimensions) {
 
 RTX_TEST(geometry_portrait_floor_and_pillarbox) {
     // 4K portrait source with FHD preset must not shrink below source dimensions
-    const GeometryResult floor_g =
+    const auto [fcw, fch, fsw, fsh, fox, foy, fpl, fpr, fip] =
         calculateSmartGeometry(2160, 3840, GeometryTargetMode::AutoDirect, 1920, 1080);
-    RTX_CHECK_EQ(floor_g.canvas_width, 2160);
-    RTX_CHECK_EQ(floor_g.canvas_height, 3840);
+    (void)fsw; (void)fsh; (void)fox; (void)foy; (void)fpl; (void)fpr; (void)fip;
+    RTX_CHECK_EQ(fcw, 2160);
+    RTX_CHECK_EQ(fch, 3840);
 
     // Pillarbox on 1080x1920 -> 3840x2160 canvas computes centered 9:16 subrect
-    const GeometryResult pb =
+    const auto [pcw, pch, psw, psh, pox, poy, ppl, ppr, pip] =
         calculateSmartGeometry(1080, 1920, GeometryTargetMode::Pillarbox, 3840, 2160);
-    RTX_CHECK_EQ(pb.canvas_width, 3840);
-    RTX_CHECK_EQ(pb.canvas_height, 2160);
-    RTX_CHECK_EQ(pb.scaled_height, 2160);
-    RTX_CHECK_EQ(pb.scaled_width & 1, 0);
-    RTX_CHECK(pb.scaled_width == 1214 || pb.scaled_width == 1216);
-    RTX_CHECK(pb.offset_x > 0);
-    RTX_CHECK_EQ(pb.offset_x & 1, 0);
-    RTX_CHECK_EQ(pb.pillarbox_left + pb.scaled_width + pb.pillarbox_right, pb.canvas_width);
+    (void)poy; (void)pip;
+    RTX_CHECK_EQ(pcw, 3840);
+    RTX_CHECK_EQ(pch, 2160);
+    RTX_CHECK_EQ(psh, 2160);
+    RTX_CHECK_EQ(psw & 1, 0);
+    RTX_CHECK(psw == 1214 || psw == 1216);
+    RTX_CHECK(pox > 0);
+    RTX_CHECK_EQ(pox & 1, 0);
+    RTX_CHECK_EQ(ppl + psw + ppr, pcw);
 }

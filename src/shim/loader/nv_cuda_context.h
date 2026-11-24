@@ -8,51 +8,58 @@
 #ifndef RTX_SHIM_NV_CUDA_CONTEXT_H
 #define RTX_SHIM_NV_CUDA_CONTEXT_H
 
+#include <memory>
 #include <string>
+#include <tuple>
 
 #include "nv_func_tables.h"
 #include "rtx_shim_abi.h"
 
 namespace rtx_shim::cuda {
 
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-class Context {
-public:
-    Context() = default;
-    ~Context();
+// Phase 12 (Wave 12.2-D): standard tuple + RAII release guard replaces cuda::Context wrapper.
+// Layout: (library, driver_table, cu_context, cu_device, primary_ctx_release_guard).
+using Context = std::tuple<DynLibrary, DriverTable, CUcontext, CUdevice, std::shared_ptr<void>>;
 
-    Context(const Context&) = delete;
-    Context& operator=(const Context&) = delete;
+bool cudaCtxOpen(Context& ctx, std::string* error = nullptr, int device_index = 0);
+void cudaCtxClose(Context& ctx);
 
-// Phase 8 (Task 8-A1): `device_index` selects the GPU whose primary
-// context is retained (0 = default device).
-    bool open(std::string* error = nullptr, int device_index = 0);
-    void close();
+inline bool cudaCtxValid(const Context& ctx) noexcept {
+    const auto& [lib, drv, h, dev, guard] = ctx;
+    (void)lib; (void)dev; (void)guard;
+    return h != nullptr && drv.readyForProbe();
+}
+inline CUcontext cudaCtxHandle(const Context& ctx) noexcept {
+    const auto& [lib, drv, h, dev, guard] = ctx;
+    (void)lib; (void)drv; (void)dev; (void)guard;
+    return h;
+}
+inline CUdevice cudaCtxDevice(const Context& ctx) noexcept {
+    const auto& [lib, drv, h, dev, guard] = ctx;
+    (void)lib; (void)drv; (void)h; (void)guard;
+    return dev;
+}
+inline const DriverTable& cudaCtxDriver(const Context& ctx) noexcept {
+    const auto& [lib, drv, h, dev, guard] = ctx;
+    (void)lib; (void)h; (void)dev; (void)guard;
+    return drv;
+}
+inline DriverTable& cudaCtxDriver(Context& ctx) noexcept {
+    auto& [lib, drv, h, dev, guard] = ctx;
+    (void)lib; (void)h; (void)dev; (void)guard;
+    return drv;
+}
+inline const DynLibrary& cudaCtxLibrary(const Context& ctx) noexcept {
+    const auto& [lib, drv, h, dev, guard] = ctx;
+    (void)drv; (void)h; (void)dev; (void)guard;
+    return lib;
+}
 
-    bool valid() const noexcept { return context_ != nullptr && driver_.readyForProbe(); }
-    CUcontext handle() const noexcept { return context_; }
-    CUdevice device() const noexcept { return device_; }
-    const DriverTable& driver() const noexcept { return driver_; }
-    DriverTable& driver() noexcept { return driver_; }
-    const DynLibrary& library() const noexcept { return library_; }
-
-    int computeMajor() const;
-    int computeMinor() const;
-    std::string deviceName() const;
-// Scheduler flags of the retained primary context (0 when the driver does
-// not expose cuDevicePrimaryCtxGetState).
-    unsigned int primaryFlags() const noexcept;
-    bool blockingSync() const noexcept;
-
-private:
-    DynLibrary library_;
-    DriverTable driver_;
-    CUcontext context_ = nullptr;
-    CUdevice device_ = 0;
-};
+int cudaCtxComputeMajor(const Context& ctx);
+int cudaCtxComputeMinor(const Context& ctx);
+std::string cudaCtxDeviceName(const Context& ctx);
+unsigned int cudaCtxPrimaryFlags(const Context& ctx) noexcept;
+bool cudaCtxBlockingSync(const Context& ctx) noexcept;
 
 // Maps a CUDA driver result onto the shim ABI result space.
 RtxResult mapResult(CUresult result);

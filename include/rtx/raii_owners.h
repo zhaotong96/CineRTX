@@ -64,6 +64,11 @@ using UniqueModule = std::unique_ptr<HINSTANCE__, FnDeleter<&FreeLibrary>>;
 using UniqueHwnd = std::unique_ptr<HWND__, FnDeleter<&DestroyWindow>>;
 using UniqueBrush = std::unique_ptr<HBRUSH__, FnDeleter<&DeleteObject>>;
 using UniqueFont = std::unique_ptr<HFONT__, FnDeleter<&DeleteObject>>;
+using UniqueBitmap = std::unique_ptr<HBITMAP__, FnDeleter<&DeleteObject>>;
+
+[[nodiscard]] inline UniqueBrush makeSolidBrush(COLORREF color) noexcept {
+    return UniqueBrush{CreateSolidBrush(color)};
+}
 
 inline void releaseComUnknown(void* p) noexcept {
     if (p) {
@@ -107,56 +112,30 @@ inline CudaPinnedHostBuffer wrapSystemHeapHost(void* ptr, size_t bytes) noexcept
     }
     return {std::unique_ptr<void, HostFreeCallback>(ptr, [](void* p) { std::free(p); }), bytes};
 }
-// @rtx-type-justification
-// Category: Hardware-Layout
-// Why-Std-Fails: uint64_t 是 GPU 设备显存地址，不满足 NullablePointer（不可与 nullptr 比较），不能直接作为 std::unique_ptr 句柄。
-// Invariant: ptr 是 64 位 CUdeviceptr 原始地址（与 CPU 地址空间物理隔离，绝不经 reinterpret_cast 混入主机指针）；释放前若提供 bind_ctx 则先绑定 CUDA 上下文。
-class CudaDeviceBuffer {
-public:
-    using FreeFn = int (*)(unsigned long long);
+// Phase 12 (Wave 12.2-C): standard unique_ptr + byte-count pair replaces CudaDeviceBuffer class.
+#if defined(__cpp_lib_move_only_function) && __cpp_lib_move_only_function >= 202110L
+using CudaDeviceDeleter = std::move_only_function<void(void*)>;
+#else
+using CudaDeviceDeleter = std::function<void(void*)>;
+#endif
+using CudaDevicePtr = std::unique_ptr<void, CudaDeviceDeleter>;
+using CudaDeviceBuffer = std::pair<CudaDevicePtr, std::size_t>;
 
-    CudaDeviceBuffer() noexcept = default;
-    CudaDeviceBuffer(uint64_t ptr, size_t bytes, FreeFn free_fn,
-                     BindCtxCallback bind_ctx = {}) noexcept
-        : ptr_(ptr), bytes_(bytes), free_fn_(free_fn), bind_ctx_(std::move(bind_ctx)) {}
-    ~CudaDeviceBuffer() noexcept { reset(); }
-
-    CudaDeviceBuffer(const CudaDeviceBuffer&) = delete;
-    CudaDeviceBuffer& operator=(const CudaDeviceBuffer&) = delete;
-    CudaDeviceBuffer(CudaDeviceBuffer&& o) noexcept
-        : ptr_(std::exchange(o.ptr_, 0)),
-          bytes_(std::exchange(o.bytes_, 0)),
-          free_fn_(std::exchange(o.free_fn_, nullptr)),
-          bind_ctx_(std::move(o.bind_ctx_)) {}
-    CudaDeviceBuffer& operator=(CudaDeviceBuffer&& o) noexcept {
-        if (this != &o) {
-            reset();
-            ptr_ = std::exchange(o.ptr_, 0);
-            bytes_ = std::exchange(o.bytes_, 0);
-            free_fn_ = std::exchange(o.free_fn_, nullptr);
-            bind_ctx_ = std::move(o.bind_ctx_);
-        }
-        return *this;
+[[nodiscard]] inline CudaDeviceBuffer wrapCudaDeviceBuffer(
+    uint64_t ptr, size_t bytes, int (*free_fn)(unsigned long long),
+    BindCtxCallback bind_ctx = {}) noexcept {
+    if (ptr == 0 || free_fn == nullptr) {
+        return {CudaDevicePtr{nullptr, [](void*) noexcept {}}, 0u};
     }
-    uint64_t ptr() const noexcept { return ptr_; }
-    size_t bytes() const noexcept { return bytes_; }
-    explicit operator bool() const noexcept { return ptr_ != 0; }
-
-    void reset() noexcept {
-        const uint64_t p = std::exchange(ptr_, 0);
-        bytes_ = 0;
-        FreeFn fn = std::exchange(free_fn_, nullptr);
-        if (p != 0 && fn != nullptr) {
-            if (bind_ctx_) bind_ctx_();
-            fn(p);
-        }
-        bind_ctx_ = {};
-    }
-private:
-    uint64_t ptr_ = 0;
-    size_t bytes_ = 0;
-    FreeFn free_fn_ = nullptr;
-    BindCtxCallback bind_ctx_;
-};
+    return {CudaDevicePtr(
+                reinterpret_cast<void*>(static_cast<uintptr_t>(ptr)),
+                [free_fn, bind_ctx = std::move(bind_ctx)](void* p) mutable noexcept {
+                    if (p != nullptr) {
+                        if (bind_ctx) bind_ctx();
+                        (void)free_fn(static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(p)));
+                    }
+                }),
+            bytes};
+}
 
 }  // namespace rtx

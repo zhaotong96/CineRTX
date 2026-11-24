@@ -4,37 +4,14 @@
 #include "rtx/json_scanner.h"
 
 #include <charconv>
-#include <cstdio>
+#include "rtx/string_utils.h"
 #include <cstdlib>
 #include <format>
 
 namespace rtx::json {
 
 std::string escapeJson(std::string_view input) {
-    std::string out;
-    out.reserve(input.size() + 8);
-    for (const char raw : input) {
-        const auto c = static_cast<unsigned char>(raw);
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out.push_back(raw);
-                }
-                break;
-        }
-    }
-    return out;
+    return rtx::str::escapeJson(input);
 }
 std::string jsonQuoted(std::string_view input) {
     return "\"" + escapeJson(input) + "\"";
@@ -219,13 +196,13 @@ Result<std::string_view> scanValue(std::string_view s, std::size_t& pos) {
     }
     return s.substr(start, pos - start);
 }
-Result<std::vector<JsonMember>> scanObject(std::string_view s, std::size_t& pos) {
+Result<std::vector<std::pair<std::string, std::string_view>>> scanObject(std::string_view s, std::size_t& pos) {
     skipWs(s, pos);
     if (pos >= s.size() || s[pos] != '{') {
         return err(ErrorCode::InvalidArgument, "JSON object expected ('{')");
     }
     ++pos;
-    std::vector<JsonMember> members;
+    std::vector<std::pair<std::string, std::string_view>> members;
     skipWs(s, pos);
     if (pos < s.size() && s[pos] == '}') {
         ++pos;
@@ -251,11 +228,11 @@ Result<std::vector<JsonMember>> scanObject(std::string_view s, std::size_t& pos)
         if (!value) return std::unexpected(value.error());
 
         for (const auto& m : members) {
-            if (m.key == *key) {
+            if (m.first == *key) {
                 return err(ErrorCode::InvalidArgument, std::format("duplicate JSON key \"{}\"", *key));
             }
         }
-        members.push_back(JsonMember{std::move(*key), *value});
+        members.push_back(std::pair<std::string, std::string_view>{std::move(*key), *value});
 
         skipWs(s, pos);
         if (pos < s.size() && s[pos] == ',') {
@@ -298,44 +275,44 @@ Result<std::vector<std::string_view>> scanArray(std::string_view s, std::size_t&
         return err(ErrorCode::InvalidArgument, "expected ',' or ']' in JSON array");
     }
 }
-const JsonMember* findMember(const std::vector<JsonMember>& members, std::string_view key) noexcept {
+const std::pair<std::string, std::string_view>* findMember(const std::vector<std::pair<std::string, std::string_view>>& members, std::string_view key) noexcept {
     for (const auto& m : members) {
-        if (m.key == key) return &m;
+        if (m.first == key) return &m;
     }
     return nullptr;
 }
-Result<std::string> memberString(const std::vector<JsonMember>& ms, std::string_view key, std::string_view default_val) {
-    const JsonMember* m = findMember(ms, key);
+Result<std::string> memberString(const std::vector<std::pair<std::string, std::string_view>>& ms, std::string_view key, std::string_view default_val) {
+    const std::pair<std::string, std::string_view>* m = findMember(ms, key);
     if (m == nullptr) return std::string(default_val);
-    if (m->value == "null") return std::string(default_val);
-    return decodeString(m->value);
+    if (m->second == "null") return std::string(default_val);
+    return decodeString(m->second);
 }
-Result<int64_t> memberInt64(const std::vector<JsonMember>& ms, std::string_view key, int64_t default_val) {
-    const JsonMember* m = findMember(ms, key);
+Result<int64_t> memberInt64(const std::vector<std::pair<std::string, std::string_view>>& ms, std::string_view key, int64_t default_val) {
+    const std::pair<std::string, std::string_view>* m = findMember(ms, key);
     if (m == nullptr) return default_val;
-    if (m->value == "null") return default_val;
+    if (m->second == "null") return default_val;
     int64_t val = 0;
-    const auto [ptr, ec] = std::from_chars(m->value.data(), m->value.data() + m->value.size(), val);
-    if (ec != std::errc{} || ptr != m->value.data() + m->value.size()) {
+    const auto [ptr, ec] = std::from_chars(m->second.data(), m->second.data() + m->second.size(), val);
+    if (ec != std::errc{} || ptr != m->second.data() + m->second.size()) {
         return err(ErrorCode::InvalidArgument, std::format("malformed integer in JSON key \"{}\"", key));
     }
     return val;
 }
-Result<int> memberInt(const std::vector<JsonMember>& ms, std::string_view key, int default_val) {
+Result<int> memberInt(const std::vector<std::pair<std::string, std::string_view>>& ms, std::string_view key, int default_val) {
     const auto r = memberInt64(ms, key, default_val);
     if (!r) return std::unexpected(r.error());
     return static_cast<int>(*r);
 }
-Result<double> memberDouble(const std::vector<JsonMember>& ms, std::string_view key, double default_val) {
-    const JsonMember* m = findMember(ms, key);
+Result<double> memberDouble(const std::vector<std::pair<std::string, std::string_view>>& ms, std::string_view key, double default_val) {
+    const std::pair<std::string, std::string_view>* m = findMember(ms, key);
     if (m == nullptr) return default_val;
-    if (m->value == "null") return default_val;
+    if (m->second == "null") return default_val;
     double val = 0.0;
-    const auto [ptr, ec] = std::from_chars(m->value.data(), m->value.data() + m->value.size(), val);
-    if (ec != std::errc{} || ptr != m->value.data() + m->value.size()) {
+    const auto [ptr, ec] = std::from_chars(m->second.data(), m->second.data() + m->second.size(), val);
+    if (ec != std::errc{} || ptr != m->second.data() + m->second.size()) {
         // Fallback for systems where double from_chars is absent
         char* end = nullptr;
-        std::string buf(m->value);
+        std::string buf(m->second);
         val = std::strtod(buf.c_str(), &end);
         if (end == buf.c_str() || end != buf.c_str() + buf.size()) {
             return err(ErrorCode::InvalidArgument, std::format("malformed float in JSON key \"{}\"", key));
@@ -343,33 +320,33 @@ Result<double> memberDouble(const std::vector<JsonMember>& ms, std::string_view 
     }
     return val;
 }
-Result<bool> memberBool(const std::vector<JsonMember>& ms, std::string_view key, bool default_val) {
-    const JsonMember* m = findMember(ms, key);
+Result<bool> memberBool(const std::vector<std::pair<std::string, std::string_view>>& ms, std::string_view key, bool default_val) {
+    const std::pair<std::string, std::string_view>* m = findMember(ms, key);
     if (m == nullptr) return default_val;
-    if (m->value == "true") return true;
-    if (m->value == "false") return false;
+    if (m->second == "true") return true;
+    if (m->second == "false") return false;
     return err(ErrorCode::InvalidArgument, std::format("expected boolean for JSON key \"{}\"", key));
 }
-Result<std::vector<std::string_view>> memberArray(const std::vector<JsonMember>& ms, std::string_view key) {
-    const JsonMember* m = findMember(ms, key);
+Result<std::vector<std::string_view>> memberArray(const std::vector<std::pair<std::string, std::string_view>>& ms, std::string_view key) {
+    const std::pair<std::string, std::string_view>* m = findMember(ms, key);
     if (m == nullptr) return std::vector<std::string_view>{};
     std::size_t pos = 0;
-    auto items = scanArray(m->value, pos);
+    auto items = scanArray(m->second, pos);
     if (!items) return std::unexpected(items.error());
-    skipWs(m->value, pos);
-    if (pos != m->value.size()) {
+    skipWs(m->second, pos);
+    if (pos != m->second.size()) {
         return err(ErrorCode::InvalidArgument, std::format("trailing content in JSON array \"{}\"", key));
     }
     return *items;
 }
-Result<std::vector<JsonMember>> memberObject(const std::vector<JsonMember>& ms, std::string_view key) {
-    const JsonMember* m = findMember(ms, key);
-    if (m == nullptr) return std::vector<JsonMember>{};
+Result<std::vector<std::pair<std::string, std::string_view>>> memberObject(const std::vector<std::pair<std::string, std::string_view>>& ms, std::string_view key) {
+    const std::pair<std::string, std::string_view>* m = findMember(ms, key);
+    if (m == nullptr) return std::vector<std::pair<std::string, std::string_view>>{};
     std::size_t pos = 0;
-    auto obj = scanObject(m->value, pos);
+    auto obj = scanObject(m->second, pos);
     if (!obj) return std::unexpected(obj.error());
-    skipWs(m->value, pos);
-    if (pos != m->value.size()) {
+    skipWs(m->second, pos);
+    if (pos != m->second.size()) {
         return err(ErrorCode::InvalidArgument, std::format("trailing content in JSON object \"{}\"", key));
     }
     return *obj;

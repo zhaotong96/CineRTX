@@ -21,26 +21,19 @@
 #include <span>
 #include <stop_token>
 #include <string>
+#include <tuple>
 
 namespace rtx {
 
 // Snapshot handed to the optional progress callback after every decoded/encoded frame.
 // Invoked from the transcoding thread; consumers must not block.
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct HwTranscodeProgress {
-    int64_t frames_decoded = 0;
-    int64_t frames_encoded = 0;
-    int64_t total_frames = 0;  // 0 when the container has no duration
-    double elapsed_ms = 0.0;
-};
+// Phase 12 (Wave 12.2-C): tuple alias (frames_decoded, frames_encoded, total_frames, elapsed_ms).
+using HwTranscodeProgress = std::tuple<int64_t, int64_t, int64_t, double>;
 
 // @rtx-type-justification
 // Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
+// Why-Std-Fails: 硬件转码全链路遥测与性能账单聚合（35+ 具名指标，涵盖零拷贝字节统计、重制耗时与音画计数），供 CLI/GUI/JSON 报告消费。
+// Invariant: 零拷贝主循环成立时 decoder_host_pixel_copies 与 encoder_host_pixel_copies 严格为 0。
 struct HwTranscodeOptions {
     std::filesystem::path input_path;
     std::filesystem::path output_path;

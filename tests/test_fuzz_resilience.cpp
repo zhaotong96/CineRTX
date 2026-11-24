@@ -100,7 +100,7 @@ RTX_TEST(fuzz_truncated_header_and_zero_dimensions) {
 }
 RTX_TEST(vfr_timestamp_guard_24h_jitter_100_regressions) {
     std::mt19937 rng(0x24F1Cu);
-    StreamTimestampGuard guard;
+    StreamTimestampGuard guard = makeTimestampGuard();
     int64_t previous_dts = std::numeric_limits<int64_t>::min();
 // 24-hour virtual stream at 90 kHz with alternating 24/60 fps pacing and
 // 100 injected DTS regressions.  After the guard, DTS is strictly
@@ -126,7 +126,7 @@ RTX_TEST(vfr_timestamp_guard_24h_jitter_100_regressions) {
         if (rng() % 5000 == 0) {
             pts = std::numeric_limits<int64_t>::min();  // missing PTS
         }
-        guard.sanitize(pts, dts, step);
+        sanitizeTimestamp(guard, pts, dts, step);
         if (previous_dts != std::numeric_limits<int64_t>::min()) {
             RTX_CHECK(dts > previous_dts);
         }
@@ -138,7 +138,9 @@ RTX_TEST(vfr_timestamp_guard_24h_jitter_100_regressions) {
 // Zero-drift contract: a repaired sample lands back on the ideal
 // wall-clock timeline, so the accumulated A/V drift stays 0 Flicks.
     RTX_CHECK_EQ(regressions_injected, 100);
-    RTX_CHECK(guard.repairs == 100);
+    const auto& [g_last, g_step, g_repairs] = guard;
+    (void)g_last; (void)g_step;
+    RTX_CHECK(g_repairs == 100);
 }
 RTX_TEST(tdr_recovery_state_contract) {
 // Every regression was repaired exactly once: the guard never rewrote a

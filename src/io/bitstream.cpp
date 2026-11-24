@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
+// Phase 12 (Wave 12.2-B2): eliminated BitReader, HevcSpsInfo, HevcVuiColor,
+// and HevcSeiHdr10 in favor of free functions and std::tuple structured bindings.
 
 #include "bitstream.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <tuple>
 #include <vector>
 
 namespace rtx {
@@ -14,524 +18,344 @@ namespace {
 
 constexpr size_t kNoPosition = static_cast<size_t>(-1);
 
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-class BitReader {
-public:
-    BitReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
+using BitState = std::tuple<std::span<const uint8_t>, size_t, bool>;
 
-    bool ok() const noexcept { return ok_; }
-    size_t bitsLeft() const noexcept { return size_ * 8 - position_; }
+size_t bitsLeft(const BitState& s) noexcept {
+    const auto& [data, pos, ok] = s;
+    (void)ok;
+    return data.size() * 8 - pos;
+}
 
-    uint32_t u(int count) {
-        if (count < 0 || count > 32 || bitsLeft() < static_cast<size_t>(count)) {
-            ok_ = false;
+uint32_t readU(BitState& s, int count) noexcept {
+    auto& [data, pos, ok] = s;
+    if (count < 0 || count > 32 || data.size() * 8 - pos < static_cast<size_t>(count)) {
+        ok = false;
+        return 0;
+    }
+    uint32_t value = 0;
+    for (int i = 0; i < count; ++i) {
+        value = (value << 1) | ((data[pos / 8] >> (7 - static_cast<int>(pos % 8))) & 1u);
+        ++pos;
+    }
+    return value;
+}
+
+uint32_t readUe(BitState& s) noexcept {
+    int zeros = 0;
+    while (true) {
+        if (bitsLeft(s) == 0) {
+            auto& [d, p, ok] = s; (void)d; (void)p; ok = false;
             return 0;
         }
-        uint32_t value = 0;
-        for (int i = 0; i < count; ++i) {
-            const size_t byte = position_ / 8;
-            const int bit = 7 - static_cast<int>(position_ % 8);
-            value = (value << 1) | ((data_[byte] >> bit) & 1u);
-            ++position_;
-        }
-        return value;
-    }
-    uint32_t ue() {
-        int leading_zero_bits = 0;
-        while (true) {
-            if (bitsLeft() == 0) {
-                ok_ = false;
-                return 0;
-            }
-            if (u(1) != 0) {
-                break;
-            }
-            ++leading_zero_bits;
-            if (leading_zero_bits > 31) {
-                ok_ = false;
-                return 0;
-            }
-        }
-        if (leading_zero_bits == 0) {
+        if (readU(s, 1) != 0) break;
+        if (++zeros > 31) {
+            auto& [d, p, ok] = s; (void)d; (void)p; ok = false;
             return 0;
         }
-        return ((1u << leading_zero_bits) - 1u) + u(leading_zero_bits);
     }
-    int32_t se() {
-        const uint32_t code = ue();
-        if (!ok_) {
-            return 0;
-        }
-        return (code & 1u) != 0 ? static_cast<int32_t>((code + 1u) >> 1)
-                                : -static_cast<int32_t>(code >> 1);
+    return zeros == 0 ? 0u : ((1u << zeros) - 1u) + readU(s, zeros);
+}
+
+int32_t readSe(BitState& s) noexcept {
+    const uint32_t code = readUe(s);
+    const auto& [d, p, ok] = s; (void)d; (void)p;
+    if (!ok) return 0;
+    return (code & 1u) != 0 ? static_cast<int32_t>((code + 1u) >> 1)
+                            : -static_cast<int32_t>(code >> 1);
+}
+
+void skipBits(BitState& s, size_t count) noexcept {
+    while (count > 0) {
+        const size_t chunk = count > 32 ? 32 : count;
+        (void)readU(s, static_cast<int>(chunk));
+        count -= chunk;
     }
-    void skipBits(size_t count) {
-        while (count > 0) {
-            const size_t chunk = count > 32 ? 32 : count;
-            (void)u(static_cast<int>(chunk));
-            count -= chunk;
-        }
-    }
-private:
-    const uint8_t* data_ = nullptr;
-    size_t size_ = 0;
-    size_t position_ = 0;
-    bool ok_ = true;
-};
+}
+
+bool readerOk(const BitState& s) noexcept {
+    const auto& [d, p, ok] = s; (void)d; (void)p;
+    return ok;
+}
 
 std::vector<std::vector<uint8_t>> nalUnits(const uint8_t* data, size_t size) {
     std::vector<std::vector<uint8_t>> units;
-    if (data == nullptr || size == 0) {
-        return units;
-    }
-    if (looksLikeAnnexB(data, size)) {
-        return splitAnnexB(data, size);
-    }
+    if (!data || size == 0) return units;
+    if (looksLikeAnnexB(data, size)) return splitAnnexB(data, size);
     if (data[0] == 1 && size >= 23) {
-        size_t position = 23;
-        const int arrays = data[22];
-        for (int array = 0; array < arrays && position + 3 <= size; ++array) {
-            ++position;
-// HEVCDecoderConfigurationRecord: arrays of length-prefixed NALs.
-            const int count = (data[position] << 8) | data[position + 1];
-            position += 2;
-            for (int i = 0; i < count && position + 2 <= size; ++i) {
-                const size_t length = (static_cast<size_t>(data[position]) << 8) |
-                                      data[position + 1];
-                position += 2;
-                if (length == 0 || length > size - position) {
-                    return units;
-                }
-                units.emplace_back(data + position, data + position + length);
-                position += length;
+        size_t pos = 23;
+        for (int arr = 0; arr < data[22] && pos + 3 <= size; ++arr) {
+            ++pos;
+            const int count = (data[pos] << 8) | data[pos + 1];
+            pos += 2;
+            for (int i = 0; i < count && pos + 2 <= size; ++i) {
+                const size_t len = (static_cast<size_t>(data[pos]) << 8) | data[pos + 1];
+                pos += 2;
+                if (len == 0 || len > size - pos) return units;
+                units.emplace_back(data + pos, data + pos + len);
+                pos += len;
             }
         }
         return units;
     }
-    size_t position = 0;
-    while (position + 4 <= size) {
-        const size_t length = (static_cast<size_t>(data[position]) << 24) |
-                              (static_cast<size_t>(data[position + 1]) << 16) |
-                              (static_cast<size_t>(data[position + 2]) << 8) |
-                              static_cast<size_t>(data[position + 3]);
-        position += 4;
-        if (length == 0 || length > size - position) {
-            break;
-        }
-        units.emplace_back(data + position, data + position + length);
-        position += length;
+    size_t pos = 0;
+    while (pos + 4 <= size) {
+        const size_t len = (static_cast<size_t>(data[pos]) << 24) |
+                           (static_cast<size_t>(data[pos + 1]) << 16) |
+                           (static_cast<size_t>(data[pos + 2]) << 8) |
+                           static_cast<size_t>(data[pos + 3]);
+        pos += 4;
+        if (len == 0 || len > size - pos) break;
+        units.emplace_back(data + pos, data + pos + len);
+        pos += len;
     }
     return units;
 }
-std::vector<uint8_t> rbspFromNal(const std::vector<uint8_t>& nal) {
+
+std::vector<uint8_t> rbspFromNal(std::span<const uint8_t> nal) {
     std::vector<uint8_t> rbsp;
     rbsp.reserve(nal.size());
     int zeros = 0;
     for (uint8_t byte : nal) {
-        if (zeros >= 2 && byte == 0x03) {
-            zeros = 0;
-            continue;
-        }
+        if (zeros >= 2 && byte == 0x03) { zeros = 0; continue; }
         rbsp.push_back(byte);
-        zeros = byte == 0x00 ? zeros + 1 : 0;
+        zeros = (byte == 0x00) ? zeros + 1 : 0;
     }
     return rbsp;
 }
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct HevcSpsInfo {
-    int profile_space = 0;
-    int tier = 0;
-    int profile_idc = 0;
-    uint32_t compatibility = 0;
-    uint64_t constraints = 0;
-    int level_idc = 0;
-    int chroma_format_idc = 1;
-    int bit_depth_luma_minus8 = 2;
-    int bit_depth_chroma_minus8 = 2;
-    int max_sub_layers_minus1 = 0;
-};
 
-bool parseHevcSps(const std::vector<uint8_t>& nal, HevcSpsInfo& info) {
-    if (nal.size() < 3 || ((nal[0] >> 1) & 0x3F) != 33) {
-        return false;
-    }
-    const std::vector<uint8_t> rbsp = rbspFromNal(
-        std::vector<uint8_t>(nal.begin() + 2, nal.end()));
-    BitReader reader(rbsp.data(), rbsp.size());
+// (profile_space, tier, profile_idc, compatibility, constraints, level_idc,
+//  chroma_format_idc, bit_depth_luma_minus8, bit_depth_chroma_minus8, max_sub_layers_minus1)
+bool parseHevcSps(const std::vector<uint8_t>& nal,
+                  std::tuple<int, int, int, uint32_t, uint64_t, int, int, int, int, int>& info) {
+    if (nal.size() < 3 || ((nal[0] >> 1) & 0x3F) != 33) return false;
+    const auto rbsp = rbspFromNal(std::span<const uint8_t>(nal).subspan(2));
+    BitState r{rbsp, 0, true};
+    auto& [profile_space, tier, profile_idc, compatibility, constraints, level_idc,
+           chroma_format_idc, luma_m8, chroma_m8, max_sub] = info;
 
-    (void)reader.u(4);  // sps_video_parameter_set_id
-    info.max_sub_layers_minus1 = static_cast<int>(reader.u(3));
-    (void)reader.u(1);  // sps_temporal_id_nesting_flag
+    (void)readU(r, 4);
+    max_sub = static_cast<int>(readU(r, 3));
+    (void)readU(r, 1);
 
-    info.profile_space = static_cast<int>(reader.u(2));
-    info.tier = static_cast<int>(reader.u(1));
-    info.profile_idc = static_cast<int>(reader.u(5));
-    info.compatibility = reader.u(32);
-    info.constraints = (static_cast<uint64_t>(reader.u(16)) << 32);
-    info.constraints |= reader.u(32);
-    info.level_idc = static_cast<int>(reader.u(8));
+    profile_space = static_cast<int>(readU(r, 2));
+    tier = static_cast<int>(readU(r, 1));
+    profile_idc = static_cast<int>(readU(r, 5));
+    compatibility = readU(r, 32);
+    constraints = (static_cast<uint64_t>(readU(r, 16)) << 32) | readU(r, 32);
+    level_idc = static_cast<int>(readU(r, 8));
 
-    for (int i = 0; i < info.max_sub_layers_minus1; ++i) {
-        const bool profile_present = reader.u(1) != 0;
-        const bool level_present = reader.u(1) != 0;
-        if (profile_present) {
-            (void)reader.u(32);
-            (void)reader.u(32);
-            (void)reader.u(24);
-        }
-        if (level_present) {
-            (void)reader.u(8);
-        }
+    for (int i = 0; i < max_sub; ++i) {
+        const bool pp = readU(r, 1) != 0;
+        const bool lp = readU(r, 1) != 0;
+        if (pp) { (void)readU(r, 32); (void)readU(r, 32); (void)readU(r, 24); }
+        if (lp) (void)readU(r, 8);
     }
-    if (info.max_sub_layers_minus1 > 0) {
-        for (int i = info.max_sub_layers_minus1; i < 8; ++i) {
-            (void)reader.u(2);
-        }
+    if (max_sub > 0) {
+        for (int i = max_sub; i < 8; ++i) (void)readU(r, 2);
     }
-    (void)reader.ue();  // sps_seq_parameter_set_id
-    info.chroma_format_idc = static_cast<int>(reader.ue());
-    if (info.chroma_format_idc == 3) {
-        (void)reader.u(1);  // separate_colour_plane_flag
+    (void)readUe(r);
+    chroma_format_idc = static_cast<int>(readUe(r));
+    if (chroma_format_idc == 3) (void)readU(r, 1);
+    (void)readUe(r);
+    (void)readUe(r);
+    if (readU(r, 1) != 0) {
+        for (int i = 0; i < 4; ++i) (void)readUe(r);
     }
-    (void)reader.ue();  // pic_width_in_luma_samples
-    (void)reader.ue();  // pic_height_in_luma_samples
-    if (reader.u(1) != 0) {  // conformance_window_flag
-        for (int i = 0; i < 4; ++i) {
-            (void)reader.ue();
-        }
-    }
-    info.bit_depth_luma_minus8 = static_cast<int>(reader.ue());
-    info.bit_depth_chroma_minus8 = static_cast<int>(reader.ue());
-    return reader.ok() && info.bit_depth_luma_minus8 >= 0 &&
-           info.bit_depth_luma_minus8 <= 6;
+    luma_m8 = static_cast<int>(readUe(r));
+    chroma_m8 = static_cast<int>(readUe(r));
+    return readerOk(r) && luma_m8 >= 0 && luma_m8 <= 6;
 }
-bool skipProfileFields(BitReader& reader) {
-    (void)reader.u(2);  // profile_space
-    (void)reader.u(1);  // tier_flag
-    const int profile_idc = static_cast<int>(reader.u(5));
-    bool compatibility[32] = {};
-    for (int i = 0; i < 32; ++i) {
-        compatibility[i] = reader.u(1) != 0;
-    }
-    const auto has_profile = [&](int idc) {
-        return profile_idc == idc || (idc >= 0 && idc < 32 && compatibility[idc]);
-    };
-    (void)reader.u(4);  // progressive/interlaced/non-packed/frame-only flags
-    if (has_profile(4) || has_profile(5) || has_profile(6) || has_profile(7) ||
-        has_profile(8) || has_profile(9) || has_profile(10)) {
-        reader.skipBits(9);
-        if (has_profile(5) || has_profile(9) || has_profile(10)) {
-            (void)reader.u(1);
-            reader.skipBits(33);
-        } else {
-            reader.skipBits(34);
-        }
-    } else if (has_profile(2)) {
-        reader.skipBits(7);
-        (void)reader.u(1);
-        reader.skipBits(35);
+
+bool skipProfileFields(BitState& r) noexcept {
+    (void)readU(r, 2);
+    (void)readU(r, 1);
+    const int profile_idc = static_cast<int>(readU(r, 5));
+    bool compat[32] = {};
+    for (int i = 0; i < 32; ++i) compat[i] = readU(r, 1) != 0;
+    const auto has = [&](int idc) { return profile_idc == idc || (idc >= 0 && idc < 32 && compat[idc]); };
+    (void)readU(r, 4);
+    if (has(4) || has(5) || has(6) || has(7) || has(8) || has(9) || has(10)) {
+        skipBits(r, 9);
+        if (has(5) || has(9) || has(10)) { (void)readU(r, 1); skipBits(r, 33); }
+        else skipBits(r, 34);
+    } else if (has(2)) {
+        skipBits(r, 7); (void)readU(r, 1); skipBits(r, 35);
     } else {
-        reader.skipBits(43);
+        skipBits(r, 43);
     }
-    (void)reader.u(1);  // inbld_flag / reserved
-    return reader.ok();
+    (void)readU(r, 1);
+    return readerOk(r);
 }
-bool skipProfileTierLevel(BitReader& reader, int max_sub_layers_minus1) {
-    if (!skipProfileFields(reader)) {
-        return false;
+
+bool skipProfileTierLevel(BitState& r, int max_sub) noexcept {
+    if (!skipProfileFields(r)) return false;
+    (void)readU(r, 8);
+    bool pp[8] = {}, lp[8] = {};
+    for (int i = 0; i < max_sub; ++i) { pp[i] = readU(r, 1) != 0; lp[i] = readU(r, 1) != 0; }
+    if (max_sub > 0) {
+        for (int i = max_sub; i < 8; ++i) (void)readU(r, 2);
     }
-    (void)reader.u(8);  // level_idc
-    bool profile_present[8] = {};
-    bool level_present[8] = {};
-    for (int i = 0; i < max_sub_layers_minus1; ++i) {
-        profile_present[i] = reader.u(1) != 0;
-        level_present[i] = reader.u(1) != 0;
+    for (int i = 0; i < max_sub; ++i) {
+        if (pp[i] && !skipProfileFields(r)) return false;
+        if (lp[i]) (void)readU(r, 8);
     }
-    if (max_sub_layers_minus1 > 0) {
-        for (int i = max_sub_layers_minus1; i < 8; ++i) {
-            (void)reader.u(2);
-        }
-    }
-    for (int i = 0; i < max_sub_layers_minus1; ++i) {
-        if (profile_present[i] && !skipProfileFields(reader)) {
-            return false;
-        }
-        if (level_present[i]) {
-            (void)reader.u(8);
-        }
-    }
-    return reader.ok();
+    return readerOk(r);
 }
-bool skipScalingListData(BitReader& reader) {
+
+bool skipScalingListData(BitState& r) noexcept {
     for (int size_id = 0; size_id < 4; ++size_id) {
         for (int matrix_id = 0; matrix_id < 6; matrix_id += (size_id == 3 ? 3 : 1)) {
-            if (reader.u(1) == 0) {
-                (void)reader.ue();
-                continue;
-            }
-            const int coefficient_count = std::min(64, 1 << (4 + (size_id << 1)));
-            if (size_id > 1) {
-                (void)reader.se();
-            }
-            for (int i = 0; i < coefficient_count; ++i) {
-                (void)reader.se();
-            }
+            if (readU(r, 1) == 0) { (void)readUe(r); continue; }
+            const int coeffs = std::min(64, 1 << (4 + (size_id << 1)));
+            if (size_id > 1) (void)readSe(r);
+            for (int i = 0; i < coeffs; ++i) (void)readSe(r);
         }
     }
-    return reader.ok();
+    return readerOk(r);
 }
-bool skipShortTermRps(BitReader& reader, size_t index, std::vector<int>& num_delta_pocs) {
-    bool predicted = false;
-    if (index > 0) {
-        predicted = reader.u(1) != 0;
-    }
-    if (predicted) {
-        (void)reader.u(1);  // delta_rps_sign
-        (void)reader.ue();  // abs_delta_rps_minus1
+
+bool skipShortTermRps(BitState& r, size_t index, std::vector<int>& num_delta_pocs) noexcept {
+    if (index > 0 && readU(r, 1) != 0) {
+        (void)readU(r, 1);
+        (void)readUe(r);
         int count = 0;
-        const int previous = num_delta_pocs[index - 1];
-        for (int i = 0; i <= previous; ++i) {
-            const bool used = reader.u(1) != 0;
-            bool use_delta = false;
-            if (!used) {
-                use_delta = reader.u(1) != 0;
-            }
-            if (used || use_delta) {
-                ++count;
-            }
+        for (int i = 0; i <= num_delta_pocs[index - 1]; ++i) {
+            const bool used = readU(r, 1) != 0;
+            const bool use_delta = !used && (readU(r, 1) != 0);
+            if (used || use_delta) ++count;
         }
-        if (count > 32) {
-            return false;
-        }
+        if (count > 32) return false;
         num_delta_pocs[index] = count;
     } else {
-        const uint32_t negative = reader.ue();
-        const uint32_t positive = reader.ue();
-        if (negative > 32 || positive > 32) {
-            return false;
-        }
-        num_delta_pocs[index] = static_cast<int>(negative + positive);
-        for (uint32_t i = 0; i < negative; ++i) {
-            (void)reader.ue();
-            (void)reader.u(1);
-        }
-        for (uint32_t i = 0; i < positive; ++i) {
-            (void)reader.ue();
-            (void)reader.u(1);
-        }
+        const uint32_t neg = readUe(r), pos = readUe(r);
+        if (neg > 32 || pos > 32) return false;
+        num_delta_pocs[index] = static_cast<int>(neg + pos);
+        for (uint32_t i = 0; i < neg + pos; ++i) { (void)readUe(r); (void)readU(r, 1); }
     }
-    return reader.ok();
+    return readerOk(r);
 }
-bool parseHevcVuiColorFromSps(const std::vector<uint8_t>& nal, HevcVuiColor& color) {
-    if (nal.size() < 3 || ((nal[0] >> 1) & 0x3F) != 33) {
-        return false;
+
+bool parseHevcVuiColorFromSps(const std::vector<uint8_t>& nal,
+                              std::tuple<bool, bool, int, int, int, bool>& color) {
+    if (nal.size() < 3 || ((nal[0] >> 1) & 0x3F) != 33) return false;
+    const auto rbsp = rbspFromNal(std::span<const uint8_t>(nal).subspan(2));
+    BitState r{rbsp, 0, true};
+    (void)readU(r, 4);
+    const int max_sub = static_cast<int>(readU(r, 3));
+    if (max_sub > 6) return false;
+    (void)readU(r, 1);
+    if (!skipProfileTierLevel(r, max_sub)) return false;
+    (void)readUe(r);
+    const uint32_t chroma_fmt = readUe(r);
+    if (chroma_fmt > 3) return false;
+    if (chroma_fmt == 3) (void)readU(r, 1);
+    (void)readUe(r); (void)readUe(r);
+    if (readU(r, 1) != 0) { for (int i = 0; i < 4; ++i) (void)readUe(r); }
+    (void)readUe(r); (void)readUe(r);
+    const uint32_t poc_lsb_m4 = readUe(r);
+    if (!readerOk(r) || poc_lsb_m4 > 12u) return false;
+    const int log2_max_poc_lsb = static_cast<int>(poc_lsb_m4) + 4;
+    for (int i = (readU(r, 1) != 0 ? 0 : max_sub); i <= max_sub; ++i) {
+        (void)readUe(r); (void)readUe(r); (void)readUe(r);
     }
-    const std::vector<uint8_t> rbsp =
-        rbspFromNal(std::vector<uint8_t>(nal.begin() + 2, nal.end()));
-    BitReader reader(rbsp.data(), rbsp.size());
-    (void)reader.u(4);  // sps_video_parameter_set_id
-    const int max_sub_layers_minus1 = static_cast<int>(reader.u(3));
-    if (max_sub_layers_minus1 > 6) {
-        return false;
+    for (int i = 0; i < 6; ++i) (void)readUe(r);
+    if (readU(r, 1) != 0 && readU(r, 1) != 0 && !skipScalingListData(r)) return false;
+    (void)readU(r, 1); (void)readU(r, 1);
+    if (readU(r, 1) != 0) {
+        (void)readU(r, 4); (void)readU(r, 4); (void)readUe(r); (void)readUe(r); (void)readU(r, 1);
     }
-    (void)reader.u(1);  // sps_temporal_id_nesting_flag
-    if (!skipProfileTierLevel(reader, max_sub_layers_minus1)) {
-        return false;
+    const uint32_t num_rps = readUe(r);
+    if (num_rps > 64) return false;
+    std::vector<int> num_delta_pocs(num_rps, 0);
+    for (uint32_t i = 0; i < num_rps; ++i) {
+        if (!skipShortTermRps(r, i, num_delta_pocs)) return false;
     }
-    (void)reader.ue();  // sps_seq_parameter_set_id
-    const uint32_t chroma_format_idc = reader.ue();
-    if (chroma_format_idc > 3) {
-        return false;
+    if (readU(r, 1) != 0) {
+        const uint32_t lt = readUe(r);
+        if (lt > 32) return false;
+        for (uint32_t i = 0; i < lt; ++i) { skipBits(r, static_cast<size_t>(log2_max_poc_lsb)); (void)readU(r, 1); }
     }
-    if (chroma_format_idc == 3) {
-        (void)reader.u(1);  // separate_colour_plane_flag
+    (void)readU(r, 1); (void)readU(r, 1);
+    if (readU(r, 1) == 0) return false;
+    if (readU(r, 1) != 0 && readU(r, 8) == 255) { (void)readU(r, 16); (void)readU(r, 16); }
+    if (readU(r, 1) != 0) (void)readU(r, 1);
+    if (readU(r, 1) == 0) return false;
+
+    auto& [has_colour_desc, has_vst, primaries, transfer, matrix, full_range] = color;
+    has_vst = true;
+    (void)readU(r, 3);
+    full_range = readU(r, 1) != 0;
+    if (readU(r, 1) != 0) {
+        has_colour_desc = true;
+        primaries = static_cast<int>(readU(r, 8));
+        transfer = static_cast<int>(readU(r, 8));
+        matrix = static_cast<int>(readU(r, 8));
     }
-    (void)reader.ue();  // pic_width_in_luma_samples
-    (void)reader.ue();  // pic_height_in_luma_samples
-    if (reader.u(1) != 0) {
-        for (int i = 0; i < 4; ++i) {
-            (void)reader.ue();
-        }
-    }
-    (void)reader.ue();  // bit_depth_luma_minus8
-    (void)reader.ue();  // bit_depth_chroma_minus8
-    const uint32_t poc_lsb_minus4 = reader.ue();
-    if (!reader.ok() || poc_lsb_minus4 > 12u) {
-        return false;
-    }
-    const int log2_max_poc_lsb = static_cast<int>(poc_lsb_minus4) + 4;
-    const int ordering_start = reader.u(1) != 0 ? 0 : max_sub_layers_minus1;
-    for (int i = ordering_start; i <= max_sub_layers_minus1; ++i) {
-        (void)reader.ue();
-        (void)reader.ue();
-        (void)reader.ue();
-    }
-    for (int i = 0; i < 6; ++i) {
-        (void)reader.ue();
-    }
-    if (reader.u(1) != 0) {
-        if (reader.u(1) != 0 && !skipScalingListData(reader)) {
-            return false;
-        }
-    }
-    (void)reader.u(1);  // amp_enabled_flag
-    (void)reader.u(1);  // sample_adaptive_offset_enabled_flag
-    if (reader.u(1) != 0) {
-        (void)reader.u(4);
-        (void)reader.u(4);
-        (void)reader.ue();
-        (void)reader.ue();
-        (void)reader.u(1);
-    }
-    const uint32_t num_short_term_rps = reader.ue();
-    if (num_short_term_rps > 64) {
-        return false;
-    }
-    std::vector<int> num_delta_pocs(num_short_term_rps, 0);
-    for (uint32_t i = 0; i < num_short_term_rps; ++i) {
-        if (!skipShortTermRps(reader, i, num_delta_pocs)) {
-            return false;
-        }
-    }
-    if (reader.u(1) != 0) {
-        const uint32_t long_term_count = reader.ue();
-        if (long_term_count > 32) {
-            return false;
-        }
-        for (uint32_t i = 0; i < long_term_count; ++i) {
-            reader.skipBits(static_cast<size_t>(log2_max_poc_lsb));
-            (void)reader.u(1);
-        }
-    }
-    (void)reader.u(1);  // sps_temporal_mvp_enabled_flag
-    (void)reader.u(1);  // strong_intra_smoothing_enabled_flag
-    if (reader.u(1) == 0) {
-        return false;
-    }
-    if (reader.u(1) != 0) {
-        const uint32_t aspect_idc = reader.u(8);
-        if (aspect_idc == 255) {
-            (void)reader.u(16);
-            (void)reader.u(16);
-        }
-    }
-    if (reader.u(1) != 0) {
-        (void)reader.u(1);
-    }
-    if (reader.u(1) == 0) {
-        return false;
-    }
-    color.has_video_signal_type = true;
-    (void)reader.u(3);  // video_format
-    color.full_range = reader.u(1) != 0;
-    if (reader.u(1) != 0) {
-        color.has_colour_description = true;
-        color.primaries = static_cast<int>(reader.u(8));
-        color.transfer = static_cast<int>(reader.u(8));
-        color.matrix = static_cast<int>(reader.u(8));
-    }
-    return reader.ok();
+    return readerOk(r);
 }
-bool parseSeiPayloads(const std::vector<uint8_t>& nal, HevcSeiHdr10& hdr) {
-    if (nal.size() < 3) {
-        return false;
-    }
+
+bool parseSeiPayloads(const std::vector<uint8_t>& nal,
+                      std::tuple<bool, bool, std::array<uint16_t, 8>, uint32_t, uint32_t, uint16_t, uint16_t>& hdr) {
+    if (nal.size() < 3) return false;
     const int nal_type = (nal[0] >> 1) & 0x3F;
-    if (nal_type != 39 && nal_type != 40) {
-        return false;
-    }
-    const std::vector<uint8_t> rbsp =
-        rbspFromNal(std::vector<uint8_t>(nal.begin() + 2, nal.end()));
-    size_t position = 0;
-    while (position < rbsp.size()) {
-        uint32_t payload_type = 0;
-        while (position < rbsp.size() && rbsp[position] == 0xFF) {
-            payload_type += 255;
-            ++position;
-        }
-        if (position >= rbsp.size()) {
-            break;
-        }
-        payload_type += rbsp[position++];
-        uint32_t payload_size = 0;
-        while (position < rbsp.size() && rbsp[position] == 0xFF) {
-            payload_size += 255;
-            ++position;
-        }
-        if (position >= rbsp.size()) {
-            break;
-        }
-        payload_size += rbsp[position++];
-        if (payload_size > rbsp.size() - position) {
-            break;
-        }
-        const uint8_t* payload = rbsp.data() + position;
-        const auto read_u16 = [payload](size_t offset) {
-            return static_cast<uint16_t>((payload[offset] << 8) | payload[offset + 1]);
-        };
-        const auto read_u32 = [payload](size_t offset) {
-            return (static_cast<uint32_t>(payload[offset]) << 24) |
-                   (static_cast<uint32_t>(payload[offset + 1]) << 16) |
-                   (static_cast<uint32_t>(payload[offset + 2]) << 8) |
-                   static_cast<uint32_t>(payload[offset + 3]);
+    if (nal_type != 39 && nal_type != 40) return false;
+    const auto rbsp = rbspFromNal(std::span<const uint8_t>(nal).subspan(2));
+    auto& [has_md, has_cll, prim, max_luma, min_luma, max_cll, max_fall] = hdr;
+    size_t pos = 0;
+    while (pos < rbsp.size()) {
+        uint32_t payload_type = 0, payload_size = 0;
+        while (pos < rbsp.size() && rbsp[pos] == 0xFF) { payload_type += 255; ++pos; }
+        if (pos >= rbsp.size()) break;
+        payload_type += rbsp[pos++];
+        while (pos < rbsp.size() && rbsp[pos] == 0xFF) { payload_size += 255; ++pos; }
+        if (pos >= rbsp.size()) break;
+        payload_size += rbsp[pos++];
+        if (payload_size > rbsp.size() - pos) break;
+        const uint8_t* p = rbsp.data() + pos;
+        const auto u16 = [p](size_t o) { return static_cast<uint16_t>((p[o] << 8) | p[o + 1]); };
+        const auto u32 = [p](size_t o) {
+            return (static_cast<uint32_t>(p[o]) << 24) | (static_cast<uint32_t>(p[o + 1]) << 16) |
+                   (static_cast<uint32_t>(p[o + 2]) << 8) | static_cast<uint32_t>(p[o + 3]);
         };
         if (payload_type == 137 && payload_size >= 24) {
-            hdr.green_x = read_u16(0);
-            hdr.green_y = read_u16(2);
-            hdr.blue_x = read_u16(4);
-            hdr.blue_y = read_u16(6);
-            hdr.red_x = read_u16(8);
-            hdr.red_y = read_u16(10);
-            hdr.white_x = read_u16(12);
-            hdr.white_y = read_u16(14);
-            hdr.max_luminance = read_u32(16);
-            hdr.min_luminance = read_u32(20);
-            hdr.has_mastering_display = true;
+            prim = {u16(8), u16(10), u16(0), u16(2), u16(4), u16(6), u16(12), u16(14)};
+            max_luma = u32(16);
+            min_luma = u32(20);
+            has_md = true;
         } else if (payload_type == 144 && payload_size >= 4) {
-            hdr.max_cll = read_u16(0);
-            hdr.max_fall = read_u16(2);
-            hdr.has_content_light = true;
+            max_cll = u16(0);
+            max_fall = u16(2);
+            has_cll = true;
         }
-        position += payload_size;
+        pos += payload_size;
     }
-    return hdr.has_mastering_display || hdr.has_content_light;
+    return has_md || has_cll;
 }
-void appendU16(std::vector<uint8_t>& out, size_t value) {
-    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>(value & 0xFF));
+
+void appendU16(std::vector<uint8_t>& out, size_t v) {
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
 }
-void appendBe32(std::vector<uint8_t>& out, uint32_t value) {
-    out.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
-    out.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>(value & 0xFF));
+void appendBe32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
 }
+
 }  // namespace
 
 std::vector<std::vector<uint8_t>> splitAnnexB(std::span<const uint8_t> data) {
     std::vector<std::vector<uint8_t>> units;
     const size_t size = data.size();
-    if (size < 3) {
-        return units;
-    }
+    if (size < 3) return units;
     size_t nal_start = kNoPosition;
-    size_t i = 0;
-    while (i + 2 < size) {
+    for (size_t i = 0; i + 2 < size;) {
         if (data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01) {
             if (nal_start != kNoPosition) {
                 size_t end = i;
-                while (end > nal_start && data[end - 1] == 0x00) {
-                    --end;
-                }
-                if (end > nal_start) {
-                    units.emplace_back(data.begin() + nal_start, data.begin() + end);
-                }
+                while (end > nal_start && data[end - 1] == 0x00) --end;
+                if (end > nal_start) units.emplace_back(data.begin() + nal_start, data.begin() + end);
             }
             i += 3;
             nal_start = i;
@@ -541,30 +365,26 @@ std::vector<std::vector<uint8_t>> splitAnnexB(std::span<const uint8_t> data) {
     }
     if (nal_start != kNoPosition && nal_start < size) {
         size_t end = size;
-        while (end > nal_start && data[end - 1] == 0x00) {
-            --end;
-        }
-        if (end > nal_start) {
-            units.emplace_back(data.begin() + nal_start, data.begin() + end);
-        }
+        while (end > nal_start && data[end - 1] == 0x00) --end;
+        if (end > nal_start) units.emplace_back(data.begin() + nal_start, data.begin() + end);
     }
     return units;
 }
+
 std::vector<std::vector<uint8_t>> splitAnnexB(const uint8_t* data, size_t size) {
-    if (data == nullptr || size == 0) return {};
-    return splitAnnexB(std::span<const uint8_t>(data, size));
+    return (data && size) ? splitAnnexB(std::span<const uint8_t>(data, size)) : std::vector<std::vector<uint8_t>>{};
 }
+
 bool looksLikeAnnexB(std::span<const uint8_t> data) {
-    if (data.size() < 3) {
-        return false;
-    }
+    if (data.size() < 3) return false;
     return (data[0] == 0 && data[1] == 0 && data[2] == 1) ||
            (data.size() >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1);
 }
+
 bool looksLikeAnnexB(const uint8_t* data, size_t size) {
-    if (data == nullptr || size == 0) return false;
-    return looksLikeAnnexB(std::span<const uint8_t>(data, size));
+    return (data && size) && looksLikeAnnexB(std::span<const uint8_t>(data, size));
 }
+
 std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {
     if (looksLikeAnnexB(data, size)) {
         std::vector<uint8_t> out;
@@ -575,126 +395,80 @@ std::vector<uint8_t> annexBToLengthPrefixed(const uint8_t* data, size_t size) {
         return out;
     }
     if (size >= 4) {
-        const uint32_t first = (static_cast<uint32_t>(data[0]) << 24) |
-                               (static_cast<uint32_t>(data[1]) << 16) |
-                               (static_cast<uint32_t>(data[2]) << 8) |
-                               static_cast<uint32_t>(data[3]);
-        if (first > 0 && first <= size - 4) {
-            return std::vector<uint8_t>(data, data + size);
-        }
+        const uint32_t first = (static_cast<uint32_t>(data[0]) << 24) | (static_cast<uint32_t>(data[1]) << 16) |
+                               (static_cast<uint32_t>(data[2]) << 8) | static_cast<uint32_t>(data[3]);
+        if (first > 0 && first <= size - 4) return std::vector<uint8_t>(data, data + size);
     }
     std::vector<uint8_t> out;
     appendBe32(out, static_cast<uint32_t>(size));
     out.insert(out.end(), data, data + size);
     return out;
 }
+
 std::vector<uint8_t> lengthPrefixedToAnnexB(const uint8_t* data, size_t size) {
-    if (looksLikeAnnexB(data, size)) {
-        return std::vector<uint8_t>(data, data + size);
-    }
-    static const uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
+    if (looksLikeAnnexB(data, size)) return std::vector<uint8_t>(data, data + size);
+    static constexpr uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
     std::vector<uint8_t> out;
-// Already length-prefixed (or a single raw NAL).  Normalise single NALs.
-    size_t position = 0;
-    while (position + 4 <= size) {
-        const size_t length = (static_cast<size_t>(data[position]) << 24) |
-                              (static_cast<size_t>(data[position + 1]) << 16) |
-                              (static_cast<size_t>(data[position + 2]) << 8) |
-                              static_cast<size_t>(data[position + 3]);
-        position += 4;
-        if (length == 0 || length > size - position) {
-            break;
-        }
+    size_t pos = 0;
+    while (pos + 4 <= size) {
+        const size_t len = (static_cast<size_t>(data[pos]) << 24) | (static_cast<size_t>(data[pos + 1]) << 16) |
+                           (static_cast<size_t>(data[pos + 2]) << 8) | static_cast<size_t>(data[pos + 3]);
+        pos += 4;
+        if (len == 0 || len > size - pos) break;
         out.insert(out.end(), kStartCode, kStartCode + 4);
-        out.insert(out.end(), data + position, data + position + length);
-        position += length;
+        out.insert(out.end(), data + pos, data + pos + len);
+        pos += len;
     }
-    if (out.empty()) {
-        out.assign(data, data + size);
-    }
+    if (out.empty()) out.assign(data, data + size);
     return out;
 }
+
 std::vector<uint8_t> extractParameterSets(const uint8_t* annexb, size_t size) {
     std::vector<uint8_t> out;
-    static const uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
+    static constexpr uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
     for (const auto& unit : splitAnnexB(annexb, size)) {
-        if (unit.size() < 2) {
-            continue;
-        }
-        const int type = (unit[0] >> 1) & 0x3F;
-        const bool hevc = type == 32 || type == 33 || type == 34;
-        const int h264_type = unit[0] & 0x1F;
-        const bool avc = h264_type == 7 || h264_type == 8;
-        if (!hevc && !avc) {
-            continue;
-        }
+        if (unit.size() < 2) continue;
+        const int hevc_t = (unit[0] >> 1) & 0x3F;
+        const int avc_t = unit[0] & 0x1F;
+        if ((hevc_t != 32 && hevc_t != 33 && hevc_t != 34) && (avc_t != 7 && avc_t != 8)) continue;
         out.insert(out.end(), kStartCode, kStartCode + 4);
         out.insert(out.end(), unit.begin(), unit.end());
     }
     return out;
 }
+
 std::vector<uint8_t> makeHevcConfigRecord(const uint8_t* annexb, size_t size) {
-    std::vector<uint8_t> vps;
-    std::vector<uint8_t> sps;
-    std::vector<uint8_t> pps;
+    std::vector<uint8_t> vps, sps, pps;
     for (const auto& unit : splitAnnexB(annexb, size)) {
-        if (unit.size() < 3) {
-            continue;
-        }
-        switch ((unit[0] >> 1) & 0x3F) {
-            case 32:
-                if (vps.empty()) vps = unit;
-                break;
-            case 33:
-                if (sps.empty()) sps = unit;
-                break;
-            case 34:
-                if (pps.empty()) pps = unit;
-                break;
-            default:
-                break;
-        }
+        if (unit.size() < 3) continue;
+        const int t = (unit[0] >> 1) & 0x3F;
+        if (t == 32 && vps.empty()) vps = unit;
+        else if (t == 33 && sps.empty()) sps = unit;
+        else if (t == 34 && pps.empty()) pps = unit;
     }
-    if (sps.empty()) {
-        return {};
-    }
-    HevcSpsInfo info;
-    if (!parseHevcSps(sps, info)) {
-        return {};
-    }
+    if (sps.empty()) return {};
+    std::tuple<int, int, int, uint32_t, uint64_t, int, int, int, int, int> info{0, 0, 0, 0, 0, 0, 1, 2, 2, 0};
+    if (!parseHevcSps(sps, info)) return {};
+    const auto& [profile_space, tier, profile_idc, compatibility, constraints, level_idc,
+                 chroma_fmt, luma_m8, chroma_m8, max_sub] = info;
+
     std::vector<uint8_t> out;
     out.reserve(64 + vps.size() + sps.size() + pps.size());
-    out.push_back(1);  // configurationVersion
-    out.push_back(static_cast<uint8_t>((info.profile_space << 6) |
-                                       (info.tier << 5) | info.profile_idc));
-    appendBe32(out, info.compatibility);
-    out.push_back(static_cast<uint8_t>((info.constraints >> 40) & 0xFF));
-    out.push_back(static_cast<uint8_t>((info.constraints >> 32) & 0xFF));
-    out.push_back(static_cast<uint8_t>((info.constraints >> 24) & 0xFF));
-    out.push_back(static_cast<uint8_t>((info.constraints >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((info.constraints >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>(info.constraints & 0xFF));
-    out.push_back(static_cast<uint8_t>(info.level_idc));
-    out.push_back(0xF0);  // min_spatial_segmentation_idc high nibble
-    out.push_back(0x00);
-    out.push_back(0xFC);  // parallelismType
-    out.push_back(static_cast<uint8_t>(0xFC | (info.chroma_format_idc & 0x03)));
-    out.push_back(static_cast<uint8_t>(0xF8 | (info.bit_depth_luma_minus8 & 0x07)));
-    out.push_back(static_cast<uint8_t>(0xF8 | (info.bit_depth_chroma_minus8 & 0x07)));
-    appendU16(out, 0);  // avgFrameRate
-    const int temporal_layers = std::min(info.max_sub_layers_minus1 + 1, 7);
-    out.push_back(static_cast<uint8_t>((0 << 6) | (temporal_layers << 3) | (1 << 2) | 3));
-
-    uint8_t arrays = 0;
-    if (!vps.empty()) ++arrays;
-    ++arrays;  // SPS
-    if (!pps.empty()) ++arrays;
-    out.push_back(arrays);
+    out.push_back(1);
+    out.push_back(static_cast<uint8_t>((profile_space << 6) | (tier << 5) | profile_idc));
+    appendBe32(out, compatibility);
+    for (int shift = 40; shift >= 0; shift -= 8) out.push_back(static_cast<uint8_t>((constraints >> shift) & 0xFF));
+    out.push_back(static_cast<uint8_t>(level_idc));
+    out.push_back(0xF0); out.push_back(0x00); out.push_back(0xFC);
+    out.push_back(static_cast<uint8_t>(0xFC | (chroma_fmt & 0x03)));
+    out.push_back(static_cast<uint8_t>(0xF8 | (luma_m8 & 0x07)));
+    out.push_back(static_cast<uint8_t>(0xF8 | (chroma_m8 & 0x07)));
+    appendU16(out, 0);
+    out.push_back(static_cast<uint8_t>((std::min(max_sub + 1, 7) << 3) | (1 << 2) | 3));
+    out.push_back(static_cast<uint8_t>(1 + (!vps.empty() ? 1 : 0) + (!pps.empty() ? 1 : 0)));
 
     auto appendArray = [&out](const std::vector<uint8_t>& unit, uint8_t type) {
-        if (unit.empty() || unit.size() > 65535u) {
-            return;
-        }
+        if (unit.empty() || unit.size() > 65535u) return;
         out.push_back(static_cast<uint8_t>(0x80 | type));
         appendU16(out, 1);
         appendU16(out, unit.size());
@@ -705,82 +479,55 @@ std::vector<uint8_t> makeHevcConfigRecord(const uint8_t* annexb, size_t size) {
     appendArray(pps, 34);
     return out;
 }
+
 std::vector<uint8_t> makeAvcConfigRecord(const uint8_t* annexb, size_t size) {
-    std::vector<std::vector<uint8_t>> sps_units;
-    std::vector<std::vector<uint8_t>> pps_units;
+    std::vector<std::vector<uint8_t>> sps_units, pps_units;
     for (const auto& unit : splitAnnexB(annexb, size)) {
-        if (unit.size() < 4) {
-            continue;
-        }
-        if ((unit[0] & 0x1F) == 7) {
-            sps_units.push_back(unit);
-        } else if ((unit[0] & 0x1F) == 8) {
-            pps_units.push_back(unit);
-        }
+        if (unit.size() < 4) continue;
+        if ((unit[0] & 0x1F) == 7) sps_units.push_back(unit);
+        else if ((unit[0] & 0x1F) == 8) pps_units.push_back(unit);
     }
-    if (sps_units.empty()) {
-        return {};
-    }
+    if (sps_units.empty()) return {};
     const auto& sps = sps_units.front();
-    std::vector<uint8_t> out;
-    out.push_back(1);
-    out.push_back(sps[1]);
-    out.push_back(sps[2]);
-    out.push_back(sps[3]);
-    out.push_back(0xFF);  // reserved(6) + lengthSizeMinusOne(2) = 3
-    out.push_back(static_cast<uint8_t>(0xE0 | (sps_units.size() & 0x1F)));
-    for (const auto& unit : sps_units) {
-        appendU16(out, unit.size());
-        out.insert(out.end(), unit.begin(), unit.end());
-    }
+    std::vector<uint8_t> out{1, sps[1], sps[2], sps[3], 0xFF, static_cast<uint8_t>(0xE0 | (sps_units.size() & 0x1F))};
+    for (const auto& unit : sps_units) { appendU16(out, unit.size()); out.insert(out.end(), unit.begin(), unit.end()); }
     out.push_back(static_cast<uint8_t>(pps_units.size() & 0xFF));
-    for (const auto& unit : pps_units) {
-        appendU16(out, unit.size());
-        out.insert(out.end(), unit.begin(), unit.end());
-    }
+    for (const auto& unit : pps_units) { appendU16(out, unit.size()); out.insert(out.end(), unit.begin(), unit.end()); }
     return out;
 }
+
 std::vector<uint8_t> makeAv1ConfigRecord(const uint8_t* obu_data, size_t size, bool ten_bit) {
-    if (obu_data == nullptr || size == 0) {
-        return {};
-    }
-    if (size >= 4 && obu_data[0] == 0x81) {
-        return std::vector<uint8_t>(obu_data, obu_data + size);
-    }
-    std::vector<uint8_t> out;
-    out.reserve(4 + size);
-    out.push_back(0x81);
-    out.push_back(0x0C);
-    out.push_back(ten_bit ? 0x4C : 0x0C);
-    out.push_back(0x00);
+    if (!obu_data || size == 0) return {};
+    if (size >= 4 && obu_data[0] == 0x81) return std::vector<uint8_t>(obu_data, obu_data + size);
+    std::vector<uint8_t> out{0x81, 0x0C, static_cast<uint8_t>(ten_bit ? 0x4C : 0x0C), 0x00};
     out.insert(out.end(), obu_data, obu_data + size);
     return out;
 }
+
 int hevcConfigBitDepth(const uint8_t* record, size_t size) {
-    if (record == nullptr || size < 18 || record[0] != 1) {
-        return 0;
-    }
-    return 8 + (record[17] & 0x07);
+    return (record && size >= 18 && record[0] == 1) ? (8 + (record[17] & 0x07)) : 0;
 }
+
 int avcConfigBitDepth(const uint8_t* record, size_t size) {
-    if (record == nullptr || size < 4 || record[0] != 1) {
-        return 0;
-    }
-    const int profile = record[1];
-    return (profile == 110 || profile == 122 || profile == 244 || profile == 44) ? 10 : 8;
+    if (!record || size < 4 || record[0] != 1) return 0;
+    const int p = record[1];
+    return (p == 110 || p == 122 || p == 244 || p == 44) ? 10 : 8;
 }
-bool parseHevcVuiColor(const uint8_t* data, size_t size, HevcVuiColor& color) {
+
+bool parseHevcVuiColor(const uint8_t* data, size_t size,
+                       std::tuple<bool, bool, int, int, int, bool>& color) {
     for (const auto& unit : nalUnits(data, size)) {
-        if (parseHevcVuiColorFromSps(unit, color)) {
-            return true;
-        }
+        if (parseHevcVuiColorFromSps(unit, color)) return true;
     }
     return false;
 }
-bool parseHevcSeiHdr10(const uint8_t* data, size_t size, HevcSeiHdr10& hdr) {
-    for (const auto& unit : nalUnits(data, size)) {
-        parseSeiPayloads(unit, hdr);
-    }
-    return hdr.has_mastering_display || hdr.has_content_light;
+
+bool parseHevcSeiHdr10(const uint8_t* data, size_t size,
+                       std::tuple<bool, bool, std::array<uint16_t, 8>, uint32_t, uint32_t, uint16_t, uint16_t>& hdr) {
+    for (const auto& unit : nalUnits(data, size)) parseSeiPayloads(unit, hdr);
+    const auto& [has_md, has_cll, prim, max_l, min_l, max_c, max_f] = hdr;
+    (void)prim; (void)max_l; (void)min_l; (void)max_c; (void)max_f;
+    return has_md || has_cll;
 }
+
 }  // namespace rtx

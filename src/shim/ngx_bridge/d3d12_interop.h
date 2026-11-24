@@ -2,25 +2,18 @@
  * Copyright (c) 2026 RTX Transcode Engine contributors
  *
  * Headless D3D12 <-> CUDA external-memory interop.
- *
- * The bridge never creates a window, a swap chain, or an implicit adapter 0.
- * It matches the DXGI adapter to the CUDA device by the 8-byte LUID that
- * cuDeviceGetLuid reports, allocates committed shared textures, exports Win32
- * handles, and imports them into CUDA as dedicated external memory bound to a
- * CUsurfObject.  Surface objects make the driver resolve the D3D12 tiled layout,
- * so the CUDA side never sees a swizzled pointer.
- *
- * d3d12.dll and dxgi.dll are loaded with LoadLibraryExW: the bridge carries no
- * static Direct3D import either.
+ * Phase 12 (Wave 12.2-B1): eliminated PingPongSlot (dead), InteropTexture, and
+ * SharedBufferSlot; internal storage uses std::tuple unpacked via structured
+ * bindings.
  */
 
 #ifndef RTX_NGX_BRIDGE_D3D12_INTEROP_H
 #define RTX_NGX_BRIDGE_D3D12_INTEROP_H
 
-#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "ngx_bridge_abi.h"
@@ -29,66 +22,8 @@ namespace rtx_ngx {
 
 // @rtx-type-justification
 // Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-struct InteropTexture {
-    void* resource = nullptr;        // ID3D12Resource*
-    void* shared_handle = nullptr;   // Win32 HANDLE
-    uint64_t surface = 0;            // CUsurfObject
-    void* external_memory = nullptr; // CUexternalMemory
-    void* mip_array = nullptr;       // CUmipmappedArray
-    void* array = nullptr;           // CUarray
-    uint32_t width = 0;
-    uint32_t height = 0;
-    int32_t format = 0;              // RtxPixelFormat
-    uint64_t allocation_size = 0;
-};
-
-// Owns the headless D3D12 device, the direct command queue and the two shared
-// ping-pong textures that NGX consumes and produces.
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-struct PingPongSlot {
-    void* cmd_allocator = nullptr;
-    void* shared_input = nullptr;
-    void* shared_output = nullptr;
-    void* cuda_in_array = nullptr;
-    uint64_t cuda_in_surf = 0;
-    void* cuda_out_array = nullptr;
-    uint64_t cuda_out_surf = 0;
-    uint64_t p010_devptr = 0;
-    uint64_t d3d12_fence_val = 0;
-    void* encode_done_ev = nullptr;
-    void* pack_done_ev = nullptr;
-    uint32_t frames_served = 0;
-};
-
-// Phase 11.2 (C-02): 3-slot D3D12 shared preview ring.
-//
-// Each slot is a D3D12_RESOURCE_DIMENSION_BUFFER created with
-// D3D12_HEAP_FLAG_SHARED in D3D12_RESOURCE_STATE_COMMON, exported through
-// CreateSharedHandle, imported into CUDA via cuImportExternalMemory and mapped
-// with cuExternalMemoryGetMappedBuffer.  A buffer is linear memory on both
-// sides: the pack kernels write plain 32-bit words at the mapped CUdeviceptr
-// and the viewport reads it back as a Buffer<uint> SRV -- no swizzled tiled
-// layout, no CUsurfObject, no host pixel traffic anywhere.
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-struct SharedBufferSlot {
-    void* resource = nullptr;        // ID3D12Resource*
-    void* shared_handle = nullptr;   // Win32 HANDLE
-    void* external_memory = nullptr; // CUexternalMemory
-    uint64_t device_ptr = 0;         // CUdeviceptr of the mapped linear memory
-};
-
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
+// Why-Std-Fails: 管理 headless D3D12 Device/Queue/Fence、CUDA external memory/semaphore 与多槽位共享预览环的严格逆序析构状态机，析构前必须先绑定 CUDA context 并同步释放 D3D12/Win32 句柄，std::tuple/unique_ptr 无法表达此跨引擎生命周期契约。
+// Invariant: 成员声明序即依赖序；所有 CUDA 导入/释放操作均在绑定后的 primary context 上执行，禁止跨线程并发释放。
 class D3D12Interop {
 public:
     D3D12Interop() = default;
@@ -100,92 +35,50 @@ public:
     bool create(const RtxNgxBridgeConfig& config, std::string* error);
 
     bool valid() const noexcept { return device_ != nullptr; }
-    InteropTexture& input() noexcept { return input_; }
-    InteropTexture& output() noexcept { return output_; }
-// Internal 4K SDR intermediate texture (R8G8B8A8_UNORM) between VSR and
-// TrueHDR (expert directive B-2.1).  Pure D3D12: no shared handle, no CUDA
-// import.  Valid only when the configuration upscales.
-    InteropTexture& mid() noexcept { return mid_4k_; }
+    void* input_resource() const noexcept;
+    void* output_resource() const noexcept;
+    void* mid_resource() const noexcept;
+    uint64_t input_surface() const noexcept;
+    uint64_t output_surface() const noexcept;
     const std::string& diagnostics() const noexcept { return diagnostics_; }
 
     bool flush_queue(std::string* error);
-
-// Re-binds the CUDA context that owns the imported arrays.  D3D12 device
-// creation and the driver's module loader can leave another context
-// current, which makes cuMemcpy2D fail with CUDA_ERROR_INVALID_CONTEXT.
     bool bind_context(std::string* error);
 
-// GPU hardware fence interop (expert hardening item 2, RTX verdict 3.2)
-//
-// The shared 64-bit ID3D12Fence is exported as a Win32 handle and
-// imported into CUDA as an external semaphore, so the CUDA pre-process
-// stream, the D3D12 direct queue and the CUDA post-process pack stream
-// hand work over purely on the GPU: no CPU thread ever blocks on a
-// cross-engine boundary.  Returns false when the driver does not provide
-// the external-semaphore API; callers then fall back to a CPU wait.
     bool import_fence_semaphore(std::string* error);
     bool semaphore_ready() const noexcept { return external_semaphore_ != nullptr; }
     void* fence_shared_handle() const noexcept { return fence_shared_handle_; }
 
-// Enqueues a signal of `value` on the shared fence from a CUDA stream.
     bool fence_signal_cuda(void* cuda_stream, uint64_t value, std::string* error);
-// Enqueues a wait on `value` of the shared fence from a CUDA stream.
     bool fence_wait_cuda(void* cuda_stream, uint64_t value, std::string* error);
-// D3D12 queue side of the same timeline fence.
     bool queue_wait_fence(uint64_t value, std::string* error);
     bool queue_signal_fence(uint64_t value, std::string* error);
-// Last completed value of the shared fence (CPU-readable).  The W5/W6
-// queue-depth cap compares it against the submitted value.
     uint64_t queue_completed_value() const;
-// Number of command-list submissions whose completion the queue has not
-// observed yet.  Anti-TDR mechanism 2 caps this at two.
     size_t queue_depth() const;
-// Blocks until the queue has retired enough work to stay below
-// `max_depth`.  The wait is a Win32 event on the ID3D12Fence and never
-// touches pixel data, so the zero-copy bus audit is unaffected.
     bool wait_for_queue_depth(size_t max_depth, std::chrono::milliseconds timeout,
                               std::string* error);
-// Waits until the shared fence reaches `value`.  Used to guarantee that a
-// command allocator is safe to Reset before the next frame is recorded; a
-// value of 0 means no outstanding submission and returns immediately.
     bool wait_for_fence_value(uint64_t value, std::chrono::milliseconds timeout,
                               std::string* error);
     bool deviceLost() const noexcept { return device_lost_; }
-// Queries GetDeviceRemovedReason and latches the result.  Returns true
-// when the adapter has been removed/reset.
     bool pollDeviceLost(std::string* error);
     bool adapterRemovalDeclared() const noexcept { return adapter_removal_declared_; }
 
-// Anti-TDR mechanism 3: a CUDA stream at the driver's highest priority for
-// the P010 pack stage, so the tail of the pipeline drains ahead of any
-// other CUDA work.  Priority inversion would otherwise let a lower-priority
-// decode copy keep the pack kernel queued past the frame budget.
     bool create_pack_stream(std::string* error);
     void* pack_stream() const noexcept { return pack_stream_; }
     bool packStreamHighPriority() const noexcept { return pack_stream_high_priority_; }
 
-// Remaster support (P0-1.4): pitched device buffers for the bridge-owned
-// P010 output and CUDA events for per-stage GPU timing.  All of them bind
-// the retained primary context first, mirroring every other entry point.
     bool alloc_pitched(uint64_t* device_ptr, size_t* pitch, size_t width_bytes, size_t rows,
                        std::string* error);
-// Phase 11.2 (C-02): allocates `slot_count` shared D3D12 buffers of
-// width * bytes_per_pixel per row by `height` rows each and maps every one
-// into the retained CUDA context.  All slots stay COMMON, so the viewport's
-// implicit SRV promotion works without any barrier choreography.  The ring
-// stays alive until release_shared_buffer_ring() or the destructor.
     bool create_shared_buffer_ring(uint32_t slot_count, uint32_t width, uint32_t height,
                                    uint32_t bytes_per_pixel, std::string* error);
     void release_shared_buffer_ring() noexcept;
-    const std::vector<SharedBufferSlot>& previewRing() const noexcept { return preview_ring_; }
+    size_t previewRingSize() const noexcept { return preview_ring_.size(); }
+    void* previewRingResource(size_t slot) const noexcept;
+    uint64_t previewRingDevicePtr(size_t slot) const noexcept;
     uint32_t previewRingRowBytes() const noexcept { return preview_ring_row_bytes_; }
     bool clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t width, uint32_t height,
                           std::string* error);
     bool free_device(uint64_t device_ptr, std::string* error);
-// Phase 7 (Task 7-A2/7-A3): stream-ordered uint32-slot reset, a plain D2H
-// copy for the realtime preview download, and the FP16 3D LUT texture
-// upload (texture + backing array are returned together and destroyed
-// together).  All bind the retained primary context first.
     bool memset_d32_async(uint64_t device_ptr, unsigned int value, size_t count, void* stream,
                           std::string* error);
     bool memcpy_dtoh(void* destination, uint64_t source, size_t bytes, std::string* error);
@@ -202,74 +95,54 @@ public:
     void* device() const noexcept { return device_; }
     void* queue() const noexcept { return queue_; }
     void* context() const noexcept { return cuda_context_; }
-// Current value of the shared timeline fence (advanced by every queue
-// signal).  Callers pick the next CUDA-side signal value from it.
     uint64_t timeline_value() const noexcept { return fence_value_; }
-// Advances the shared timeline and returns the new value.  Both the queue
-// signals and the CUDA external-semaphore signals MUST draw their values
-// from here: a CUDA signal that collides with a later queue signal would
-// satisfy the queue's own CPU wait early and race the readback.
     uint64_t advance_timeline() noexcept { return ++fence_value_; }
-// Raises the timeline to a value chosen outside advance_timeline (the NGX
-// evaluator must signal exactly input_fence_value + 1 to the core, which
-// may be ahead of this object's own counter).  Values never move backwards.
     void adopt_timeline(uint64_t value) noexcept {
-        if (value > fence_value_) {
-            fence_value_ = value;
-        }
+        if (value > fence_value_) fence_value_ = value;
     }
+
 private:
+    /* Interop texture tuple:
+     * (resource, shared_handle, surface, external_memory, mip_array, array,
+     *  width, height, format, allocation_size) */
+    using TextureTuple = std::tuple<void*, void*, uint64_t, void*, void*, void*,
+                                    uint32_t, uint32_t, int32_t, uint64_t>;
+    /* Shared preview buffer slot tuple:
+     * (resource, shared_handle, external_memory, device_ptr) */
+    using BufferSlotTuple = std::tuple<void*, void*, void*, uint64_t>;
+
     void release();
     bool create_device(const uint8_t luid[8], std::string* error);
     bool create_texture(uint32_t width, uint32_t height, int32_t format,
-                        InteropTexture* texture, std::string* error);
+                        TextureTuple* texture, std::string* error);
     bool create_mid_texture(uint32_t width, uint32_t height, std::string* error);
-    bool import_into_cuda(InteropTexture* texture, std::string* error);
+    bool import_into_cuda(TextureTuple* texture, std::string* error);
 
     void* cuda_context_ = nullptr;
     void* device_ = nullptr;
     void* queue_ = nullptr;
     void* fence_ = nullptr;
     void* fence_shared_handle_ = nullptr;
-// Win32 handle of the shared fence and its CUDA external-semaphore twin.
     void* external_semaphore_ = nullptr;
     uint64_t fence_value_ = 0;
     uint64_t queue_submitted_value_ = 0;
     std::vector<uint64_t> queue_pending_values_;
-// Signal values of queue submissions whose completion is not yet observed.
-// Pruned on every new submission, so the vector length stays at the live
-// queue depth.
     void* pack_stream_ = nullptr;
     int pack_stream_priority_ = 0;
     bool pack_stream_high_priority_ = false;
     bool device_lost_ = false;
     bool adapter_removal_declared_ = false;
-    InteropTexture input_{};
-    InteropTexture output_{};
-    InteropTexture mid_4k_{};
-    std::vector<SharedBufferSlot> preview_ring_;
+    TextureTuple input_{nullptr, nullptr, 0, nullptr, nullptr, nullptr, 0, 0, 0, 0};
+    TextureTuple output_{nullptr, nullptr, 0, nullptr, nullptr, nullptr, 0, 0, 0, 0};
+    TextureTuple mid_4k_{nullptr, nullptr, 0, nullptr, nullptr, nullptr, 0, 0, 0, 0};
+    std::vector<BufferSlotTuple> preview_ring_;
     uint32_t preview_ring_row_bytes_ = 0;
     std::string diagnostics_;
 };
 
 std::wstring plugin_directory();
-// Proprietary SDK plugin isolation (expert directive B-1, RTX verdict 5.1)
-//
-// The proprietary RTX Video SDK binaries are deployed either in the bridge's
-// own directory (build/external/plugins/nvidia_rtx, <app_root>/plugins/nvidia_rtx)
-// or under <app_root>/plugins/nvidia_rtx when the bridge sits at the app root;
-// overridable with RTX_NGX_PLUGIN_DIR so the open-source package ships no
-// proprietary bytes.  Plugin DLLs are loaded by full path with
-// LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 so their
-// dependencies resolve only next to them and in System32, which blocks
-// current-directory DLL planting.
 void* load_plugin_library(const wchar_t* name);
-
 bool interopPrerequisitesAvailable();
-// Reports whether the interop prerequisites (d3d12.dll, dxgi.dll, nvcuda.dll)
-// are loadable.  A capability query must not create a device, so this is the
-// honest answer for rtx_ngx_bridge_query_caps: the interop layer (W4) is
-// independent of the proprietary RTX Video SDK (W5).
 
 }  // namespace rtx_ngx
 

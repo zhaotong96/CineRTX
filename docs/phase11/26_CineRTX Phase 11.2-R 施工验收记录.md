@@ -1,8 +1,8 @@
 # **CineRTX Phase 11.2-R 施工验收记录（25 号施工单 CINERTX-P11-SP-025）**
 
 - **验收对象**：`docs/phase11/25_CineRTX Phase 11.2-R SuperPower 施工单_标准库先验替换与全栈脱毒瘦身.md`（任务 R-1 ～ R-5 + Gate R-1 ～ R-7）
-- **验收环境**：测试机 `weak@192.168.123.3`，工作区严格限于 `C:\Users\weak\test\CineRTX`（`~\test\`），证据目录 `~\test\evidence\`；GPU NVIDIA GeForce RTX 5060 Laptop GPU；驱动 621.01（低于 Gate R-8 要求的 621.24 WHQL，见 §deviations）；编译器 MSVC 14.51（VS 18 Community v18.11.1, cl 19.51.36260）+ Ninja，`RelWithDebInfo /std:c++latest /MT /W4 /permissive- /EHsc /utf-8 /arch:AVX2`，Linker `/MAP /OPT:REF /OPT:ICF`
-- **构建目录**：`C:\Users\weak\test\CineRTX\.vs\build\cmake\windows-msvc-ninja`（`build.bat` 零假设引导；全程未在 `~\test` 之外落盘任何文件）
+- **验收环境**：测试机 `[REDACTED_HOST]`，工作区严格限于 `[REDACTED_PATH]\test\CineRTX`（`~\test\`），证据目录 `~\test\evidence\`；GPU NVIDIA GeForce RTX 5060 Laptop GPU；驱动 621.01（低于 Gate R-8 要求的 621.24 WHQL，见 §deviations）；编译器 MSVC 14.51（VS 18 Community v18.11.1, cl 19.51.36260）+ Ninja，`RelWithDebInfo /std:c++latest /MT /W4 /permissive- /EHsc /utf-8 /arch:AVX2`，Linker `/MAP /OPT:REF /OPT:ICF`
+- **构建目录**：`[REDACTED_PATH]\test\CineRTX\.vs\build\cmake\windows-msvc-ninja`（`build.bat` 零假设引导；全程未在 `~\test` 之外落盘任何文件）
 - **证据文件（服务器 `~\test\evidence\`）**：`build.log`、`test_run.log`、`audit_spdx.log`、`audit_imports.log`、`audit_types.log`、`gate_scans.log`、`map_symbols.log`
 
 ---
@@ -74,7 +74,7 @@
 
 ## 二、 八大硬性准出验收门禁实测
 
-> 实测执行位置：服务器 `weak@192.168.123.3`（MSVC 14.51）与本地工作区；命令与输出归档于 `~\test\evidence\`。以下「行号锚点」均指本地工作区树（与服务器 `~\test\CineRTX` 逐文件一致，由 tar 同步哈希对应）。
+> 实测执行位置：服务器 `[REDACTED_HOST]`（MSVC 14.51）与本地工作区；命令与输出归档于 `~\test\evidence\`。以下「行号锚点」均指本地工作区树（与服务器 `~\test\CineRTX` 逐文件一致，由 tar 同步哈希对应）。
 
 ### Gate R-1（代码体量红线）— **PASS（密度治理执行后三条款全数达成）**
 

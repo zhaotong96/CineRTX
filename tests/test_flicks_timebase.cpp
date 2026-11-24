@@ -52,11 +52,11 @@ RTX_TEST(flicks_drift_24h) {
     const Rational time_base{1001, 30000};  // MKV-style 29.97 time base
     const uint64_t frames = kHours * kSecondsPerHour * 30000u / 1001u;
 
-    FlicksDriftCompensator drift;
+    FlicksDriftCompensator drift = 0;
     int64_t last = 0;
     for (uint64_t index = 0; index < frames; ++index) {
         const int64_t pts = static_cast<int64_t>(index);
-        last = drift.rescaleToFlicks(pts, static_cast<uint32_t>(time_base.num),
+        last = rescaleToFlicksAccum(drift, pts, static_cast<uint32_t>(time_base.num),
                                      static_cast<uint32_t>(time_base.den));
     }
     const uint64_t expected = (frames - 1) * 1001ull * kFlicksPerSecond / 30000ull;
@@ -69,12 +69,12 @@ RTX_TEST(flicks_drift_24h) {
 }
 // 1 flick = 1.417 ns; a one-flick residual is the analytic floor.
 RTX_TEST(flicks_negative_and_zero) {
-    FlicksDriftCompensator drift;
-    RTX_CHECK_EQ(drift.rescaleToFlicks(0, 1, 1000), static_cast<int64_t>(0));
-    RTX_CHECK_EQ(drift.rescaleToFlicks(1000, 1, 1000), static_cast<int64_t>(kFlicksPerSecond));
-    RTX_CHECK_EQ(drift.rescaleToFlicks(-1000, 1, 1000),
+    FlicksDriftCompensator drift = 0;
+    RTX_CHECK_EQ(rescaleToFlicksAccum(drift, 0, 1, 1000), static_cast<int64_t>(0));
+    RTX_CHECK_EQ(rescaleToFlicksAccum(drift, 1000, 1, 1000), static_cast<int64_t>(kFlicksPerSecond));
+    RTX_CHECK_EQ(rescaleToFlicksAccum(drift, -1000, 1, 1000),
                  -static_cast<int64_t>(kFlicksPerSecond));
-    RTX_CHECK_EQ(drift.rescaleToFlicks(1000, 1, 0), static_cast<int64_t>(0));
+    RTX_CHECK_EQ(rescaleToFlicksAccum(drift, 1000, 1, 0), static_cast<int64_t>(0));
 
     RTX_CHECK_EQ(rescaleToFlicks(1000, Rational{1, 1000}),
                  static_cast<int64_t>(kFlicksPerSecond));
@@ -86,24 +86,24 @@ RTX_TEST(flicks_negative_and_zero) {
     RTX_CHECK_EQ(rescaleToFlicks(100, Rational{1, 0}), static_cast<int64_t>(0));
 }
 RTX_TEST(flicks_monotonic_guard) {
-    FlicksMonotonicGuard guard;
+    FlicksMonotonicGuard guard{0, false, 0u};
 // An invalid time base yields 0 instead of trapping.
-    RTX_CHECK_EQ(guard.apply(100), static_cast<int64_t>(100));
-    RTX_CHECK_EQ(guard.apply(200), static_cast<int64_t>(200));
-    RTX_CHECK_EQ(guard.apply(150), static_cast<int64_t>(201));
-    RTX_CHECK_EQ(guard.repairs(), static_cast<uint64_t>(1));
-    RTX_CHECK_EQ(guard.apply(201), static_cast<int64_t>(202));
-    RTX_CHECK_EQ(guard.repairs(), static_cast<uint64_t>(2));
-    RTX_CHECK(guard.primed());
+    RTX_CHECK_EQ(applyFlicksMonotonic(guard, 100), static_cast<int64_t>(100));
+    RTX_CHECK_EQ(applyFlicksMonotonic(guard, 200), static_cast<int64_t>(200));
+    RTX_CHECK_EQ(applyFlicksMonotonic(guard, 150), static_cast<int64_t>(201));
+    RTX_CHECK_EQ(flicksMonotonicRepairs(guard), static_cast<uint64_t>(1));
+    RTX_CHECK_EQ(applyFlicksMonotonic(guard, 201), static_cast<int64_t>(202));
+    RTX_CHECK_EQ(flicksMonotonicRepairs(guard), static_cast<uint64_t>(2));
+    RTX_CHECK(flicksMonotonicPrimed(guard));
 // A regression is repaired to last + 1, one flick (1.4 ns) later.
-    RTX_CHECK_EQ(guard.last(), static_cast<int64_t>(202));
+    RTX_CHECK_EQ(flicksMonotonicLast(guard), static_cast<int64_t>(202));
 
 // An exact duplicate is also a regression: the timeline must be strictly
 // increasing, not merely non-decreasing.
-    guard.reset();
-    RTX_CHECK(!guard.primed());
-    RTX_CHECK_EQ(guard.apply(-5), static_cast<int64_t>(-5));
-    RTX_CHECK_EQ(guard.repairs(), static_cast<uint64_t>(0));
+    resetFlicksMonotonic(guard);
+    RTX_CHECK(!flicksMonotonicPrimed(guard));
+    RTX_CHECK_EQ(applyFlicksMonotonic(guard, -5), static_cast<int64_t>(-5));
+    RTX_CHECK_EQ(flicksMonotonicRepairs(guard), static_cast<uint64_t>(0));
 }
 RTX_TEST(flicks_fruc_sliding_window_math) {
     constexpr int64_t kFlicks = 705600000LL;

@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "rtx/hw_transcode.h"
@@ -38,50 +39,42 @@ enum class JobStatus : uint8_t {
     }
     return "unknown";
 }
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct EncoderJob {
-    uint64_t job_id = 0;
-    std::string name{};
-    std::vector<std::filesystem::path> inputs{};
-    std::filesystem::path explicit_output{};
-    std::filesystem::path output_directory{};
-    TranscodeProfile profile{};
+// Phase 12 (Wave 12.2-D): standard tuple alias replaces EncoderJob wrapper.
+// Layout: (job_id, name, inputs, explicit_output, output_directory, profile,
+//          status, current_file_index, current_file_pct, total_job_pct,
+//          current_fps, elapsed_ms, error_message, file_reports).
+using EncoderJob = std::tuple<
+    uint64_t, std::string, std::vector<std::filesystem::path>,
+    std::filesystem::path, std::filesystem::path, TranscodeProfile,
+    JobStatus, size_t, double, double, double, double,
+    std::string, std::vector<HwTranscodeReport>>;
 
-    JobStatus status = JobStatus::Pending;
-    size_t current_file_index = 0;
-    double current_file_pct = 0.0;
-    double total_job_pct = 0.0;
-    double current_fps = 0.0;
-    double elapsed_ms = 0.0;
-    std::string error_message{};
-    std::vector<HwTranscodeReport> file_reports{};
+[[nodiscard]] inline uint64_t encoderJobId(const EncoderJob& j) noexcept {
+    const auto& [id, nm, in, eo, od, pr, st, fi, fp, tp, fps, el, em, fr] = j;
+    (void)nm;(void)in;(void)eo;(void)od;(void)pr;(void)st;(void)fi;(void)fp;(void)tp;(void)fps;(void)el;(void)em;(void)fr;
+    return id;
+}
+[[nodiscard]] inline JobStatus encoderJobStatus(const EncoderJob& j) noexcept {
+    const auto& [id, nm, in, eo, od, pr, st, fi, fp, tp, fps, el, em, fr] = j;
+    (void)id;(void)nm;(void)in;(void)eo;(void)od;(void)pr;(void)fi;(void)fp;(void)tp;(void)fps;(void)el;(void)em;(void)fr;
+    return st;
+}
+[[nodiscard]] std::string formatEncoderJobSummary(const EncoderJob& job);
+[[nodiscard]] std::string encoderJobToJson(const EncoderJob& job);
 
-    [[nodiscard]] std::string formatSummary() const;
-    [[nodiscard]] std::string toJson() const;
+enum class JobQueueEventKind : uint8_t {
+    JobAdded,
+    JobUpdated,
+    JobRemoved,
+    JobReordered,
+    JobStarted,
+    JobProgress,
+    JobFinished,
+    QueueIdle,
 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct JobQueueEvent {
-    enum class Kind : uint8_t {
-        JobAdded,
-        JobUpdated,
-        JobRemoved,
-        JobReordered,
-        JobStarted,
-        JobProgress,
-        JobFinished,
-        QueueIdle,
-    };
-    Kind kind = Kind::JobUpdated;
-    uint64_t job_id = 0;
-    EncoderJob snapshot{};
-};
+// Phase 12 (Wave 12.2-C): standard tuple alias replaces passive JobQueueEvent wrapper.
+using JobQueueEvent = std::tuple<JobQueueEventKind, uint64_t, EncoderJob>;
 
 // @rtx-type-justification
 // Category: NonTrivial-StateMachine
@@ -141,7 +134,7 @@ public:
     }
 private:
     void workerLoop();
-    void emit(JobQueueEvent::Kind kind, const EncoderJob& job);
+    void emit(JobQueueEventKind kind, const EncoderJob& job);
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

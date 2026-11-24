@@ -68,23 +68,23 @@ RTX_TEST(types_alignment_and_sizes) {
     RTX_CHECK_EQ(planeByteSize(PixelFormat::NV12, 10, 10, 2, 256), static_cast<size_t>(0));
 }
 RTX_TEST(types_frame_buffer_alignment) {
-    FrameBuffer buffer;
-    RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(0));
-    RTX_CHECK(!buffer.allocate(0).has_value());
-    RTX_CHECK(buffer.allocate(100, 128).has_value());
-    RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(100));
-    RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(buffer.data()) % 128, static_cast<uintptr_t>(0));
-    RTX_CHECK(buffer.bytes.size() >= 100 + 127);
-    buffer.data()[0] = 0xAB;
-    buffer.data()[99] = 0xCD;
-    RTX_CHECK_EQ(buffer.data()[0], static_cast<uint8_t>(0xAB));
-    RTX_CHECK_EQ(buffer.data()[99], static_cast<uint8_t>(0xCD));
+    FrameBuffer buffer{{}, 256u, 0u, 0u};
+    RTX_CHECK_EQ(frameBufferSize(buffer), static_cast<size_t>(0));
+    RTX_CHECK(!allocateFrameBuffer(buffer, 0).has_value());
+    RTX_CHECK(allocateFrameBuffer(buffer, 100, 128).has_value());
+    RTX_CHECK_EQ(frameBufferSize(buffer), static_cast<size_t>(100));
+    RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(frameBufferData(buffer)) % 128, static_cast<uintptr_t>(0));
+    const auto& [raw_bytes, align_v, sz_v, off_v] = buffer;
+    (void)align_v; (void)sz_v; (void)off_v;
+    RTX_CHECK(raw_bytes.size() >= 100 + 127);
+    frameBufferData(buffer)[0] = 0xAB;
+    frameBufferData(buffer)[99] = 0xCD;
+    RTX_CHECK_EQ(frameBufferData(buffer)[0], static_cast<uint8_t>(0xAB));
+    RTX_CHECK_EQ(frameBufferData(buffer)[99], static_cast<uint8_t>(0xCD));
 
-    RTX_CHECK(buffer.allocate(17, 64).has_value());
-    RTX_CHECK_EQ(buffer.size(), static_cast<size_t>(17));
-// A second allocation must reset the logical size, even when the vector
-// reuses heap storage.
-    RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(buffer.data()) % 64, static_cast<uintptr_t>(0));
+    RTX_CHECK(allocateFrameBuffer(buffer, 17, 64).has_value());
+    RTX_CHECK_EQ(frameBufferSize(buffer), static_cast<size_t>(17));
+    RTX_CHECK_EQ(reinterpret_cast<uintptr_t>(frameBufferData(buffer)) % 64, static_cast<uintptr_t>(0));
 }
 RTX_TEST(types_metadata_copy_and_clone) {
     Frame source;
@@ -198,33 +198,40 @@ RTX_TEST(status_error_copy_and_move) {
     RTX_CHECK_EQ(move_assigned.detail, std::string("assigned detail"));
 }
 RTX_TEST(smart_geometry_portrait_and_pillarbox) {
-    auto res_a = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::AutoDirect);
-    RTX_CHECK(res_a.is_portrait);
-    RTX_CHECK_EQ(res_a.canvas_width, 2160);
-    RTX_CHECK_EQ(res_a.canvas_height, 3840);
-    RTX_CHECK_EQ(res_a.scaled_width, 2160);
-    RTX_CHECK_EQ(res_a.scaled_height, 3840);
+    const auto [a_cw, a_ch, a_sw, a_sh, a_ox, a_oy, a_pl, a_pr, a_ip] =
+        calculateSmartGeometry(720, 1280, GeometryTargetMode::AutoDirect);
+    (void)a_ox; (void)a_oy; (void)a_pl; (void)a_pr;
+    RTX_CHECK(a_ip);
+    RTX_CHECK_EQ(a_cw, 2160);
+    RTX_CHECK_EQ(a_ch, 3840);
+    RTX_CHECK_EQ(a_sw, 2160);
+    RTX_CHECK_EQ(a_sh, 3840);
 
-    auto res_b = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::Pillarbox);
-    RTX_CHECK(res_b.is_portrait);
-    RTX_CHECK_EQ(res_b.canvas_width, 3840);
-// SmartGeometryCalculator portrait & pillarbox contract (merged from tests/unit)
-    RTX_CHECK_EQ(res_b.canvas_height, 2160);
-    RTX_CHECK_EQ(res_b.scaled_height, 2160);
-    RTX_CHECK_EQ(res_b.scaled_width, 1214);
-    RTX_CHECK(res_b.pillarbox_left > 1300);
-    RTX_CHECK(res_b.pillarbox_right > 1300);
-    RTX_CHECK_EQ(res_b.pillarbox_left + res_b.scaled_width + res_b.pillarbox_right, 3840);
+    const auto [b_cw, b_ch, b_sw, b_sh, b_ox, b_oy, b_pl, b_pr, b_ip] =
+        calculateSmartGeometry(720, 1280, GeometryTargetMode::Pillarbox);
+    (void)b_ox; (void)b_oy;
+    RTX_CHECK(b_ip);
+    RTX_CHECK_EQ(b_cw, 3840);
+    RTX_CHECK_EQ(b_ch, 2160);
+    RTX_CHECK_EQ(b_sh, 2160);
+    RTX_CHECK_EQ(b_sw, 1214);
+    RTX_CHECK(b_pl > 1300);
+    RTX_CHECK(b_pr > 1300);
+    RTX_CHECK_EQ(b_pl + b_sw + b_pr, 3840);
 
-    auto res_land = SmartGeometryCalculator::calculate(1920, 1080, GeometryTargetMode::AutoDirect);
-    RTX_CHECK(!res_land.is_portrait);
-    RTX_CHECK_EQ(res_land.canvas_width, 3840);
-    RTX_CHECK_EQ(res_land.canvas_height, 2160);
+    const auto [l_cw, l_ch, l_sw, l_sh, l_ox, l_oy, l_pl, l_pr, l_ip] =
+        calculateSmartGeometry(1920, 1080, GeometryTargetMode::AutoDirect);
+    (void)l_sw; (void)l_sh; (void)l_ox; (void)l_oy; (void)l_pl; (void)l_pr;
+    RTX_CHECK(!l_ip);
+    RTX_CHECK_EQ(l_cw, 3840);
+    RTX_CHECK_EQ(l_ch, 2160);
 
-    auto res_def = SmartGeometryCalculator::calculate(720, 1280, GeometryTargetMode::AutoDirect, 3840, 2160);
-    RTX_CHECK(res_def.is_portrait);
-    RTX_CHECK_EQ(res_def.canvas_width, 2160);
-    RTX_CHECK_EQ(res_def.canvas_height, 3840);
+    const auto [d_cw, d_ch, d_sw, d_sh, d_ox, d_oy, d_pl, d_pr, d_ip] =
+        calculateSmartGeometry(720, 1280, GeometryTargetMode::AutoDirect, 3840, 2160);
+    (void)d_sw; (void)d_sh; (void)d_ox; (void)d_oy; (void)d_pl; (void)d_pr;
+    RTX_CHECK(d_ip);
+    RTX_CHECK_EQ(d_cw, 2160);
+    RTX_CHECK_EQ(d_ch, 3840);
 }
 #if defined(_WIN32)
 struct MockUnknown : IUnknown {

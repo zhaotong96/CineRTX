@@ -18,6 +18,8 @@
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 extern "C" {
 #include <libavutil/mathematics.h>
@@ -27,33 +29,26 @@ extern "C" {
 namespace rtx {
 namespace detail {
 
-// @rtx-type-justification
-// Category: Hardware-Layout
-// Why-Std-Fails: 硬件/内核参数布局结构：字段序即 PTX 内核参数 ABI 或缓存行对齐布局，std 聚合无法表达布局承诺。
-// Invariant: 内存布局与对齐由硬件消费方逐字读取；禁止增删改字段顺序。
-struct Uint128 {
-    uint64_t high = 0;
-    uint64_t low = 0;
+// first = high 64 bits, second = low 64 bits
+using U128 = std::pair<uint64_t, uint64_t>;
+// first = quotient (U128), second = remainder (uint64_t)
+using Div128Result = std::pair<U128, uint64_t>;
 
-    constexpr auto operator<=>(const Uint128& other) const noexcept = default;
-};
-
-constexpr inline Uint128 mul64(uint64_t a, uint64_t b) noexcept {
-// Portable constexpr 64x64 -> 128 unsigned multiplication
-#if defined(_MSC_VER) && defined(_M_X64)
+[[nodiscard]] constexpr U128 multiply128(uint64_t a, uint64_t b) noexcept {
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)
     if (!std::is_constant_evaluated()) {
-        unsigned __int64 high = 0;
-        unsigned __int64 low = _umul128(a, b, &high);
-        return Uint128{high, low};
+        unsigned __int64 hi = 0;
+        const uint64_t lo = _umul128(a, b, &hi);
+        return {static_cast<uint64_t>(hi), lo};
     }
+#elif defined(__SIZEOF_INT128__)
+    __extension__ using u128_t = unsigned __int128;
+    const u128_t prod = static_cast<u128_t>(a) * static_cast<u128_t>(b);
+    return {static_cast<uint64_t>(prod >> 64), static_cast<uint64_t>(prod)};
 #endif
-#if defined(__SIZEOF_INT128__)
-    const unsigned __int128 p = static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
-    return Uint128{static_cast<uint64_t>(p >> 64), static_cast<uint64_t>(p)};
-#else
-    const uint64_t a_lo = a & 0xFFFFFFFFULL;
+    const uint64_t a_lo = a & 0xFFFF'FFFFull;
     const uint64_t a_hi = a >> 32;
-    const uint64_t b_lo = b & 0xFFFFFFFFULL;
+    const uint64_t b_lo = b & 0xFFFF'FFFFull;
     const uint64_t b_hi = b >> 32;
 
     const uint64_t p0 = a_lo * b_lo;
@@ -62,14 +57,13 @@ constexpr inline Uint128 mul64(uint64_t a, uint64_t b) noexcept {
     const uint64_t p3 = a_hi * b_hi;
 
     const uint64_t mid1 = p1 + (p0 >> 32);
-    const uint64_t mid2 = p2 + (mid1 & 0xFFFFFFFFULL);
+    const uint64_t mid2 = p2 + (mid1 & 0xFFFF'FFFFull);
 
-    const uint64_t low = (mid2 << 32) | (p0 & 0xFFFFFFFFULL);
-    const uint64_t high = p3 + (mid1 >> 32) + (mid2 >> 32);
-
-    return Uint128{high, low};
-#endif
+    const uint64_t lo = (mid2 << 32) | (p0 & 0xFFFF'FFFFull);
+    const uint64_t hi = p3 + (mid1 >> 32) + (mid2 >> 32);
+    return {hi, lo};
 }
+
 inline std::strong_ordering compareExact(int64_t n1, int64_t d1,
                                          int64_t n2, int64_t d2) noexcept {
     if (n1 == n2 && d1 == d2) {
@@ -98,68 +92,43 @@ inline std::strong_ordering compareExact(int64_t n1, int64_t d1,
     if (n1 > 0 && n2 <= 0) return std::strong_ordering::greater;
 
     if (n1 > 0 && n2 > 0) {
-        const Uint128 p1 = mul64(static_cast<uint64_t>(n1), static_cast<uint64_t>(d2));
-        const Uint128 p2 = mul64(static_cast<uint64_t>(n2), static_cast<uint64_t>(d1));
+        const U128 p1 = multiply128(static_cast<uint64_t>(n1), static_cast<uint64_t>(d2));
+        const U128 p2 = multiply128(static_cast<uint64_t>(n2), static_cast<uint64_t>(d1));
         return p1 <=> p2;
     }
     const uint64_t u1 = 0ULL - static_cast<uint64_t>(n1);
     const uint64_t u2 = 0ULL - static_cast<uint64_t>(n2);
-    const Uint128 p1 = mul64(u1, static_cast<uint64_t>(d2));
-    const Uint128 p2 = mul64(u2, static_cast<uint64_t>(d1));
+    const U128 p1 = multiply128(u1, static_cast<uint64_t>(d2));
+    const U128 p2 = multiply128(u2, static_cast<uint64_t>(d1));
     return p2 <=> p1;
 }
-// @rtx-type-justification
-// Category: Hardware-Layout
-// Why-Std-Fails: 硬件/内核参数布局结构：字段序即 PTX 内核参数 ABI 或缓存行对齐布局，std 聚合无法表达布局承诺。
-// Invariant: 内存布局与对齐由硬件消费方逐字读取；禁止增删改字段顺序。
-struct Div128 {
-    uint64_t quotient = 0;
-    uint64_t remainder = 0;
-};
 
-inline Div128 divide128(uint64_t high, uint64_t low, uint64_t divisor) noexcept {
-    Div128 result;
+[[nodiscard]] constexpr Div128Result divide128(uint64_t high, uint64_t low, uint64_t divisor) noexcept {
     if (divisor == 0) {
-        return result;
+        return {{0ull, 0ull}, 0ull};
     }
-#if defined(_MSC_VER) && defined(_M_X64)
-    if (high >= divisor) {
-        result.quotient = UINT64_MAX;
-        return result;
-    }
-    unsigned __int64 remainder = 0;
-    result.quotient = _udiv128(high, low, divisor, &remainder);
-    result.remainder = remainder;
-    return result;
-#elif defined(__SIZEOF_INT128__)
-    const unsigned __int128 total =
-        (static_cast<unsigned __int128>(high) << 64) | static_cast<unsigned __int128>(low);
-    const unsigned __int128 divisor128 = divisor;
-    const unsigned __int128 quotient = total / divisor128;
-    result.quotient = static_cast<uint64_t>(quotient > UINT64_MAX ? UINT64_MAX : quotient);
-    result.remainder = static_cast<uint64_t>(total % divisor128);
-    return result;
+#if defined(__SIZEOF_INT128__)
+    __extension__ using u128_t = unsigned __int128;
+    const u128_t dividend = (static_cast<u128_t>(high) << 64) | static_cast<u128_t>(low);
+    const u128_t q = dividend / divisor;
+    const uint64_t r = static_cast<uint64_t>(dividend % divisor);
+    return {{static_cast<uint64_t>(q >> 64), static_cast<uint64_t>(q)}, r};
 #else
-    if (high >= divisor) {
-        result.quotient = UINT64_MAX;
-        return result;
-    }
-    uint64_t quotient = 0;
-    uint64_t remainder = high;
+    uint64_t rem = high % divisor;
+    const uint64_t q_hi = high / divisor;
+    uint64_t q_lo = 0;
     for (int bit = 63; bit >= 0; --bit) {
-        const uint64_t carry = remainder >> 63;
-        remainder = (remainder << 1) | ((low >> bit) & 1ULL);
-        quotient <<= 1;
-        if (carry != 0 || remainder >= divisor) {
-            remainder -= divisor;
-            quotient |= 1ULL;
+        const uint64_t carry = rem >> 63;
+        rem = (rem << 1) | ((low >> bit) & 1ull);
+        if (carry != 0 || rem >= divisor) {
+            rem -= divisor;
+            q_lo |= (1ull << bit);
         }
     }
-    result.quotient = quotient;
-    result.remainder = remainder;
-    return result;
+    return {{q_hi, q_lo}, rem};
 #endif
 }
+
 }  // namespace detail
 
 Rational::Rational(int64_t numerator, int64_t denominator) : num(numerator), den(denominator) {
@@ -320,43 +289,43 @@ int64_t rescaleToFlicks(int64_t stream_pts, Rational time_base) {
     const bool negative = stream_pts < 0;
     const uint64_t magnitude = negative ? (0ULL - static_cast<uint64_t>(stream_pts))
                                         : static_cast<uint64_t>(stream_pts);
-    const detail::Uint128 scaled = detail::mul64(magnitude, numerator * kFlicksPerSecond);
-    const detail::Div128 divided = detail::divide128(scaled.high, scaled.low, denominator);
-    return negative ? -static_cast<int64_t>(divided.quotient)
-                    : static_cast<int64_t>(divided.quotient);
+    const auto [scaled_hi, scaled_lo] = detail::multiply128(magnitude, numerator * kFlicksPerSecond);
+    const auto [quotient, remainder] = detail::divide128(scaled_hi, scaled_lo, denominator);
+    (void)remainder;
+    const auto [q_hi, q_lo] = quotient;
+    const uint64_t q64 = (q_hi != 0) ? UINT64_MAX : q_lo;
+    return negative ? -static_cast<int64_t>(q64)
+                    : static_cast<int64_t>(q64);
 }
-int64_t FlicksDriftCompensator::rescaleToFlicks(int64_t stream_pts, uint32_t timebase_num,
-                                                uint32_t timebase_den) {
-    if (timebase_num == 0 || timebase_den == 0) {
-        return 0;
-    }
+int64_t rescaleToFlicksAccum(FlicksDriftCompensator& accumulated_remainder, int64_t stream_pts,
+                             uint32_t timebase_num, uint32_t timebase_den) noexcept {
+    if (timebase_num == 0 || timebase_den == 0) return 0;
     const bool negative = stream_pts < 0;
     const uint64_t magnitude = negative ? (0ULL - static_cast<uint64_t>(stream_pts))
                                         : static_cast<uint64_t>(stream_pts);
-
     const uint64_t factor = static_cast<uint64_t>(timebase_num) * kFlicksPerSecond;
-    detail::Uint128 scaled = detail::mul64(magnitude, factor);
-    const uint64_t low_before = scaled.low;
-    scaled.low += accumulated_remainder_;
-    if (scaled.low < low_before) {
-        ++scaled.high;
-    }
-    const detail::Div128 divided = detail::divide128(scaled.high, scaled.low, timebase_den);
-    accumulated_remainder_ = divided.remainder;
-    return negative ? -static_cast<int64_t>(divided.quotient)
-                    : static_cast<int64_t>(divided.quotient);
+    auto [scaled_hi, scaled_lo] = detail::multiply128(magnitude, factor);
+    const uint64_t prev_lo = scaled_lo;
+    scaled_lo += accumulated_remainder;
+    if (scaled_lo < prev_lo) ++scaled_hi;
+    const auto [quotient, next_remainder] = detail::divide128(scaled_hi, scaled_lo, timebase_den);
+    const auto [q_hi, q_lo] = quotient;
+    accumulated_remainder = next_remainder;
+    const uint64_t q64 = (q_hi != 0) ? UINT64_MAX : q_lo;
+    return negative ? -static_cast<int64_t>(q64) : static_cast<int64_t>(q64);
 }
-int64_t FlicksMonotonicGuard::apply(int64_t candidate) noexcept {
-    if (!primed_) {
-        primed_ = true;
-        last_ = candidate;
-        return last_;
+int64_t applyFlicksMonotonic(FlicksMonotonicGuard& guard, int64_t candidate) noexcept {
+    auto& [last, primed, repairs] = guard;
+    if (!primed) {
+        primed = true;
+        last = candidate;
+        return last;
     }
-    if (candidate <= last_) {
-        ++repairs_;
-        candidate = last_ + 1;
+    if (candidate <= last) {
+        ++repairs;
+        candidate = last + 1;
     }
-    last_ = candidate;
-    return last_;
+    last = candidate;
+    return last;
 }
 }  // namespace rtx

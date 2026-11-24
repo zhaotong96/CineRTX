@@ -1,48 +1,43 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// I/O abstractions.  The FFmpeg container layer is an unconditional statically
-// linked core component (Gate 3.0): every build of rtx_core carries
-// libavformat/libavcodec/libavutil/libswresample machine code, and there is no
-// configuration switch that can remove it.
+// Concrete FFmpeg container I/O (Gate 3.0 + Phase 12 Wave 12.2-B2):
+// IDemuxer/IMuxer virtual shells and dead DecodedVideoFrame removed;
+// callers bind directly to concrete FfmpegDemuxer / FfmpegMuxer.
 
 #pragma once
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include "rtx/flicks.h"
 #include "rtx/status.h"
+#include "rtx/timestamp_guard.h"
 #include "rtx/types.h"
+
+struct AVBSFContext;
+struct AVFormatContext;
+struct AVPacket;
+struct AVStream;
 
 namespace rtx {
 
-// Phase 7 (Task 7-B3): one source stream eligible for bitstream-level
-// passthrough into the output container (every audio stream plus the
-// subtitle streams the output container can carry natively).
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct PassthroughStreamInfo {
-    int stream_index = -1;
-    int codec_type = 0;  // 1 = audio (AVMEDIA_TYPE_AUDIO), 2 = subtitle
-    int codec_id = 0;
-    std::string codec_name;
-    Rational time_base{1, 1000};
-// FFmpeg AVCodecParameters clone owning the real extradata/layout.
-    std::shared_ptr<void> opaque_codecpar;
-};
+// Phase 12 (Wave 12.2-C): tuple alias (stream_index, codec_type, codec_id, codec_name, time_base, opaque_codecpar).
+using PassthroughStreamInfo = std::tuple<int, int, int, std::string, Rational, std::shared_ptr<void>>;
 
 // @rtx-type-justification
 // Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
+// Why-Std-Fails: Media probe schema aggregating container metadata, video/audio tracks, passthrough streams, color description, HDR10 metadata, and display matrix.
+// Invariant: width >= 0 and height >= 0 after open(); extradata matches codec record when non-empty.
 struct MediaInfo {
     std::string container;
     std::string video_codec;
@@ -58,89 +53,124 @@ struct MediaInfo {
     int subtitle_streams = 0;
     std::vector<AudioTrackInfo> audio_tracks;
     int primary_audio_index = -1;
-// Phase 7 (Task 7-B3 / verdict §3.2): full multi-audio + subtitle
-// passthrough set (supersedes the single primary_audio_index).
     std::vector<PassthroughStreamInfo> passthrough_streams;
     bool hdr_source = false;
     std::string format_name;
-
-// Codec configuration record exactly as stored in the source container
-// (avcC / hvcC / AV1CodecConfigurationRecord).  Empty for Annex-B streams.
     std::vector<uint8_t> extradata;
-// True when packets produced/consumed by this side of the pipeline use
-// Annex-B start codes.  NVDEC/NVENC speak Annex-B; MP4 stores length
-// prefixed NAL units.
     bool annex_b = false;
-    ColorDescription color{};
+    ColorDescription color{ColorPrimaries::BT709, TransferFunction::BT709, MatrixCoefficients::BT709, ColorRange::Limited};
     Hdr10Metadata hdr{};
     std::array<int32_t, 9> display_matrix{};
     bool has_display_matrix{false};
 };
 
 // @rtx-type-justification
-// Category: Polymorphic-Boundary
-// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
-// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
-class IDemuxer {
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: Manages libavformat AVFormatContext, bitstream filter state, optional MemoryAvioContext lifetime, and monotonic 705.6 MHz Flicks rescaling across packet reads.
+// Invariant: format_ != nullptr after open(); memory_avio_ is detached before avformat_close_input() so custom I/O never double-frees.
+class FfmpegDemuxer final {
 public:
-    virtual ~IDemuxer() = default;
-    virtual Result<MediaInfo> open(const std::filesystem::path& path) = 0;
-    virtual Result<Packet> readPacket() = 0;
-    virtual std::vector<std::string> warnings() const { return {}; }
-// Index of the best audio stream, or -1 when the container has none.
-    virtual int audioStreamIndex() const noexcept { return -1; }
-// Phase 7 scrubbing / Phase 8 checkpoint recovery: repositions the video
-// stream to the latest key frame at or before `video_stream_pts` (PTS in
-// the video stream's own time base).  Subsequent readPacket() calls
-// deliver packets from that point.
-    virtual Result<void> seekToKeyframeBefore([[maybe_unused]] int64_t video_stream_pts) { return err(ErrorCode::Unsupported, "this demuxer cannot seek"); }
+    explicit FfmpegDemuxer(std::string container_hint = {});
+    FfmpegDemuxer(std::vector<uint8_t> bytes, std::string container_hint);
+    ~FfmpegDemuxer() noexcept;
+
+    FfmpegDemuxer(const FfmpegDemuxer&) = delete;
+    FfmpegDemuxer& operator=(const FfmpegDemuxer&) = delete;
+
+    [[nodiscard]] Result<MediaInfo> open(const std::filesystem::path& path);
+    [[nodiscard]] Result<Packet> readPacket();
+    [[nodiscard]] std::vector<std::string> warnings() const { return warnings_; }
+    [[nodiscard]] int audioStreamIndex() const noexcept { return audio_stream_; }
+    [[nodiscard]] Result<void> seekToKeyframeBefore(int64_t video_stream_pts);
+
+private:
+    bool isPassthroughIndex(int stream_index) const noexcept;
+    Result<MediaInfo> finishOpen(const std::filesystem::path& path);
+    void configureBitstreamFilter(const char* name);
+    void drainBitstreamFilter();
+    int64_t projectWithTimebase(const AVPacket& source, Rational time_base,
+                                FlicksDriftCompensator& drift,
+                                FlicksMonotonicGuard& guard, bool* valid) noexcept;
+    int64_t projectVideoPtsToFlicks(int64_t pts, Rational time_base,
+                                    FlicksDriftCompensator& drift, bool* valid) noexcept;
+    Packet convertPacket(const AVPacket& source);
+    void close() noexcept;
+
+    std::vector<uint8_t> memory_bytes_;
+    std::string container_hint_;
+    bool memory_source_ = false;
+    std::shared_ptr<void> memory_avio_;
+    AVFormatContext* format_ = nullptr;
+    AVBSFContext* bitstream_filter_ = nullptr;
+    AVPacket* packet_ = nullptr;
+    std::deque<Packet> pending_;
+    std::vector<std::string> warnings_;
+    MediaInfo info_;
+    FlicksDriftCompensator video_drift_;
+    FlicksDriftCompensator audio_drift_;
+    FlicksMonotonicGuard video_guard_;
+    FlicksMonotonicGuard audio_guard_;
+    int64_t last_audio_flicks_ = 0;
+    bool last_audio_flicks_valid_ = false;
+    int video_stream_ = -1;
+    int audio_stream_ = -1;
+    std::vector<int> passthrough_indices_;
+    bool drained_ = false;
+    bool bitstream_filter_flushed_ = false;
 };
 
 // @rtx-type-justification
-// Category: Polymorphic-Boundary
-// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
-// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
-class IMuxer {
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: Coordinates libavformat output context, interleaved packet mutex, HDR side-data injection, per-stream timestamp guards, and idempotent trailer finalization.
+// Invariant: writePacket() is valid only after open(); finalize() writes the container trailer once and releases AVIO/format resources.
+class FfmpegMuxer final {
 public:
-    virtual ~IMuxer() = default;
-    virtual Result<void> open(const std::filesystem::path& path, const MediaInfo& info,
-                        const Hdr10Metadata& hdr) = 0;
-    virtual Result<void> writePacket(const Packet& packet) = 0;
-    virtual Result<void> writeAudioPacket(const Packet& packet) { return writePacket(packet); }
-    virtual Result<void> finalize() = 0;
+    FfmpegMuxer() = default;
+    explicit FfmpegMuxer(std::vector<uint8_t>* memory_target, std::string format);
+    ~FfmpegMuxer() noexcept;
+
+    FfmpegMuxer(const FfmpegMuxer&) = delete;
+    FfmpegMuxer& operator=(const FfmpegMuxer&) = delete;
+
+    [[nodiscard]] Result<void> open(const std::filesystem::path& path, const MediaInfo& info,
+                                    const Hdr10Metadata& hdr);
+    [[nodiscard]] Result<void> writePacket(const Packet& packet);
+    [[nodiscard]] Result<void> writeAudioPacket(const Packet& packet) { return writePacket(packet); }
+    [[nodiscard]] Result<void> finalize();
+
+private:
+    Result<void> applyHdrSideData(const Hdr10Metadata& hdr);
+    void close() noexcept;
+
+    std::mutex muxer_mutex_;
+    AVStream* audio_stream_ = nullptr;
+    int audio_stream_index_ = -1;
+    int src_audio_stream_index_ = -1;
+    Rational in_audio_time_base_{1, 48000};
+    Rational out_audio_time_base_{1, 48000};
+    // (source_stream_index, output_av_stream, monotonic_timestamp_guard)
+    std::vector<std::tuple<int, AVStream*, StreamTimestampGuard>> passthrough_streams_;
+    StreamTimestampGuard video_guard_ = makeTimestampGuard();
+    std::vector<std::string> warnings_;
+    std::vector<uint8_t>* memory_target_ = nullptr;
+    std::string memory_format_;
+    std::shared_ptr<void> memory_avio_;
+    AVFormatContext* format_ = nullptr;
+    AVStream* stream_ = nullptr;
+    AVPacket* packet_ = nullptr;
+    std::string container_;
+    Hdr10Metadata hdr_{};
+    bool annex_b_ = false;
+    bool opened_ = false;
 };
 
-std::unique_ptr<IDemuxer> makeFfmpegDemuxer();
-std::unique_ptr<IMuxer> makeFfmpegMuxer();
+std::unique_ptr<FfmpegDemuxer> makeFfmpegDemuxer();
+std::unique_ptr<FfmpegMuxer> makeFfmpegMuxer();
 
-// Phase 8 (Task 8-B1): broadcast-tier software decoder (ProRes / DNxHR).
-// NVDEC has no hardware support for these codecs, so the frames are decoded
-// with the statically linked FFmpeg decoders and converted to P010 planes in
-// host memory; the bridge then DMA-uploads them into device memory for the
-// normal VSR + TrueHDR + NVENC remaster path.
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct DecodedVideoFrame {
-    std::vector<uint8_t> y_plane;   // P010 luma (uint16 LE, 10-bit << 6)
-    std::vector<uint8_t> uv_plane;  // interleaved UV (uint16 LE, << 6)
-    uint32_t y_pitch = 0;           // bytes per row
-    uint32_t uv_pitch = 0;          // bytes per row
-    int width = 0;
-    int height = 0;
-    int64_t pts_90k = 0;
-    int64_t dts_90k = 0;
-};
-
-class IDemuxer;
-
-// Compile-time invariant: the media container layer is always present.
 constexpr bool ffmpegAvailable() noexcept { return true; }
 
-// Zero-disk container I/O (ACT-STATIC-03)
-std::unique_ptr<IDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes);
-std::unique_ptr<IMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
-                                        std::string container_format = "matroska");
+std::unique_ptr<FfmpegDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes);
+std::unique_ptr<FfmpegMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
+                                             std::string container_format = "matroska");
 
 }  // namespace rtx

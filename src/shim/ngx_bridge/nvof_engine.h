@@ -9,7 +9,6 @@
 #define RTX_NGX_BRIDGE_NVOF_ENGINE_H
 
 #include <cstdint>
-#include <memory>
 #include <string>
 
 namespace rtx_ngx {
@@ -153,11 +152,7 @@ typedef struct _NV_OF_CUDA_BUFFER_STRIDE_INFO {
     uint32_t numPlanes;
 } NV_OF_CUDA_BUFFER_STRIDE_INFO;
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct NV_OF_CUDA_API_FUNCTION_LIST {
+typedef struct _NV_OF_CUDA_API_FUNCTION_LIST {
     NV_OF_STATUS(__stdcall* nvCreateOpticalFlowCuda)(void* cuContext, NvOFHandle* hOf);
     NV_OF_STATUS(__stdcall* nvOFInit)(NvOFHandle hOf, const NV_OF_INIT_PARAMS* initParams);
     NV_OF_STATUS(__stdcall* nvOFCreateGPUBufferCuda)(
@@ -175,15 +170,15 @@ struct NV_OF_CUDA_API_FUNCTION_LIST {
     NV_OF_STATUS(__stdcall* nvOFDestroy)(NvOFHandle hOf);
     NV_OF_STATUS(__stdcall* nvOFGetLastError)(NvOFHandle hOf, char lastError[], uint32_t* size);
     NV_OF_STATUS(__stdcall* nvOFGetCaps)(NvOFHandle hOf, uint32_t capsParam, uint32_t* capsVal, uint32_t* size);
-};
+} NV_OF_CUDA_API_FUNCTION_LIST;
 
 typedef NV_OF_STATUS(__stdcall* PFNNvOFAPICreateInstanceCuda)(
     uint32_t apiVer, NV_OF_CUDA_API_FUNCTION_LIST* functionList);
 
 // @rtx-type-justification
 // Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
+// Why-Std-Fails: Manages NVIDIA Optical Flow SDK session, input/output buffers, and cost buffers.
+// Invariant: Flow vectors and hardware execution queues are safely synchronized.
 class NvofEngine {
 public:
     NvofEngine();
@@ -211,8 +206,25 @@ public:
     uint32_t costStrideBytes() const noexcept { return cost_stride_bytes_; }
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    void releaseBuffers() noexcept;
+
+    void* nvof_module_ = nullptr;
+    NV_OF_CUDA_API_FUNCTION_LIST api_{};
+    NvOFHandle hof_ = nullptr;
+    NvOFGPUBufferHandle input_buffer_ = nullptr;
+    NvOFGPUBufferHandle ref_buffer_ = nullptr;
+    NvOFGPUBufferHandle fwd_buffer_ = nullptr;
+    NvOFGPUBufferHandle bwd_buffer_ = nullptr;
+    NvOFGPUBufferHandle cost_buffer_ = nullptr;
+    NvOFGPUBufferHandle bwd_cost_buffer_ = nullptr;
+    uint64_t input_devptr_ = 0;
+    uint64_t ref_devptr_ = 0;
+    uint64_t fwd_devptr_ = 0;
+    uint64_t bwd_devptr_ = 0;
+    uint64_t cost_devptr_ = 0;
+    NV_OF_CUDA_BUFFER_STRIDE_INFO input_stride_{};
+    NV_OF_CUDA_BUFFER_STRIDE_INFO flow_stride_{};
+    NV_OF_CUDA_BUFFER_STRIDE_INFO cost_stride_{};
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     uint32_t grid_width_ = 0;

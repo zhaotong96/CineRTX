@@ -4,9 +4,8 @@
 #include "shim_probe.h"
 
 #include <algorithm>
-#include <cstdio>
+#include <format>
 #include <cstring>
-#include <sstream>
 
 #include "rtx/nvidia_shim.h"
 
@@ -24,19 +23,14 @@ std::string safeString(const char* value, size_t capacity) {
     return std::string(value, length);
 }
 void appendUnicodeEscape(std::string& output, uint32_t codepoint) {
-    char buffer[16] = {};
     if (codepoint <= 0xFFFFu) {
-        std::snprintf(buffer, sizeof(buffer), "\\u%04x",
-                      static_cast<unsigned int>(codepoint));
-        output += buffer;
+        output += std::format("\\u{:04x}", static_cast<unsigned int>(codepoint));
         return;
     }
     const uint32_t value = codepoint - 0x10000u;
-    const uint32_t high = 0xD800u + (value >> 10);
-    const uint32_t low = 0xDC00u + (value & 0x3FFu);
-    std::snprintf(buffer, sizeof(buffer), "\\u%04x\\u%04x",
-                  static_cast<unsigned int>(high), static_cast<unsigned int>(low));
-    output += buffer;
+    output += std::format("\\u{:04x}\\u{:04x}",
+                          static_cast<unsigned int>(0xD800u + (value >> 10)),
+                          static_cast<unsigned int>(0xDC00u + (value & 0x3FFu)));
 }
 bool decodeUtf8(const std::string& value, size_t offset, uint32_t* codepoint, size_t* length) {
     const auto byte = [&value](size_t index) {
@@ -202,123 +196,98 @@ std::string capabilityList(uint32_t caps) {
         {RTX_CAP_D3D12_INTEROP, "d3d12-interop"},
         {RTX_CAP_CPU_REFERENCE, "cpu-reference"},
     };
-    std::ostringstream out;
+    std::string out;
     for (const auto& entry : names) {
-        if ((caps & entry.bit) == 0) {
-            continue;
-        }
-        if (out.tellp() > 0) {
-            out << ", ";
-        }
-        out << entry.name;
+        if ((caps & entry.bit) == 0) continue;
+        if (!out.empty()) out += ", ";
+        out += entry.name;
     }
-    if (out.tellp() == 0) {
-        return "none";
-    }
-    return out.str();
+    return out.empty() ? "none" : out;
 }
 ShimProbeResult probeShim() {
-    ShimProbeResult outcome;
     rtx::NvidiaShim shim;
     std::string error;
+    RtxDiagnostics diagnostics{};
     if (!shim.open(&error)) {
-        outcome.error = error;
-        return outcome;
+        return {false, {}, error, 0u, RTX_ERR_DLL_MISSING, diagnostics};
     }
-// NvidiaShim owns the sidecar/embedded resolution: it prefers rtx_shim.dll
-// next to the executable and falls back to the statically linked table in
-// the single-EXE build.
-    outcome.loaded = true;
-    outcome.path = shim.path();
-    outcome.abi_version = RTX_SHIM_ABI_VERSION;
-    outcome.result = static_cast<int32_t>(shim.probe(&outcome.diagnostics));
-    return outcome;
+    const int32_t res = static_cast<int32_t>(shim.probe(&diagnostics));
+    return {true, shim.path(), {}, RTX_SHIM_ABI_VERSION, res, diagnostics};
 }
 std::string formatProbeHuman(const ShimProbeResult& probe) {
-    std::ostringstream out;
-    out << "NVIDIA shim probe\n";
-    if (!probe.loaded) {
-        out << "  status: unavailable\n";
-        out << "  detail: " << probe.error << "\n";
-        return out.str();
+    const auto& [loaded, path, error, abi_version, result, diagnostics] = probe;
+    std::string out = "NVIDIA shim probe\n";
+    if (!loaded) {
+        out += std::format("  status: unavailable\n  detail: {}\n", error);
+        return out;
     }
-    out << "  shim: " << probe.path << " (ABI " << probe.abi_version << ")\n";
-    out << "  result: " << probe.result << " (" << resultLabel(probe.result) << ")\n";
-    if (!probe.error.empty()) {
-        out << "  diagnostic: " << probe.error << "\n";
-    }
-    const RtxDiagnostics& diagnostics = probe.diagnostics;
-    out << "  summary: " << safeString(diagnostics.summary, sizeof(diagnostics.summary)) << "\n";
+    out += std::format("  shim: {} (ABI {})\n  result: {} ({})\n",
+                       path, abi_version, result, resultLabel(result));
+    if (!error.empty()) out += std::format("  diagnostic: {}\n", error);
+    out += std::format("  summary: {}\n", safeString(diagnostics.summary, sizeof(diagnostics.summary)));
     if (diagnostics.device.name[0] != '\0') {
-        out << "  device: " << safeString(diagnostics.device.name, sizeof(diagnostics.device.name))
-            << "\n";
-        out << "  compute: sm_" << diagnostics.device.compute_major
-            << diagnostics.device.compute_minor << "\n";
-        out << "  vram: " << (diagnostics.device.vram_bytes / (1024ull * 1024ull)) << " MiB\n";
-        out << "  cuda: " << diagnostics.device.cuda_version << "\n";
-        out << "  capabilities: " << capabilityList(diagnostics.device.capabilities) << "\n";
+        out += std::format(
+            "  device: {}\n  compute: sm_{}{}\n  vram: {} MiB\n  cuda: {}\n  capabilities: {}\n",
+            safeString(diagnostics.device.name, sizeof(diagnostics.device.name)),
+            diagnostics.device.compute_major, diagnostics.device.compute_minor,
+            diagnostics.device.vram_bytes / (1024ull * 1024ull),
+            diagnostics.device.cuda_version, capabilityList(diagnostics.device.capabilities));
     }
-    out << "  components:\n";
-    const uint32_t component_count =
-        std::min<uint32_t>(diagnostics.component_count, RTX_MAX_COMPONENTS);
+    out += "  components:\n";
+    const uint32_t component_count = std::min<uint32_t>(diagnostics.component_count, RTX_MAX_COMPONENTS);
     for (uint32_t i = 0; i < component_count; ++i) {
-        const RtxComponentInfo& component = diagnostics.components[i];
-        out << "    [" << (component.present ? 'x' : ' ') << "] "
-            << safeString(component.name, sizeof(component.name));
-        if (component.version != 0) {
-            out << " v" << component.version;
+        const RtxComponentInfo& c = diagnostics.components[i];
+        out += std::format("    [{}] {}", c.present ? 'x' : ' ', safeString(c.name, sizeof(c.name)));
+        if (c.version != 0) out += std::format(" v{}", c.version);
+        if (const std::string note = safeString(c.note, sizeof(c.note)); !note.empty()) {
+            out += std::format(" - {}", note);
         }
-        const std::string note = safeString(component.note, sizeof(component.note));
-        if (!note.empty()) {
-            out << " - " << note;
-        }
-        out << "\n";
+        out += '\n';
     }
-    return out.str();
+    return out;
 }
 std::string formatProbeJson(const ShimProbeResult& probe) {
-    std::ostringstream out;
-    out.imbue(std::locale::classic());
-    out << "{\n";
-    out << "  \"loaded\": " << (probe.loaded ? "true" : "false") << ",\n";
-    out << "  \"path\": \"" << escapeJson(probe.path) << "\",\n";
-    out << "  \"error\": \"" << escapeJson(probe.error) << "\",\n";
-    out << "  \"abi_version\": " << probe.abi_version << ",\n";
-    out << "  \"result\": " << probe.result << ",\n";
-    out << "  \"result_name\": \"" << resultLabel(probe.result) << "\",\n";
-    out << "  \"diagnostics\": {\n";
-    out << "    \"summary\": \"" << escapeJson(safeString(
-        probe.diagnostics.summary, sizeof(probe.diagnostics.summary))) << "\",\n";
-    out << "    \"device\": {\n";
-    out << "      \"name\": \"" << escapeJson(safeString(
-        probe.diagnostics.device.name, sizeof(probe.diagnostics.device.name))) << "\",\n";
-    out << "      \"compute_major\": " << probe.diagnostics.device.compute_major << ",\n";
-    out << "      \"compute_minor\": " << probe.diagnostics.device.compute_minor << ",\n";
-    out << "      \"vram_bytes\": " << probe.diagnostics.device.vram_bytes << ",\n";
-    out << "      \"cuda_version\": " << probe.diagnostics.device.cuda_version << ",\n";
-    out << "      \"capabilities\": " << probe.diagnostics.device.capabilities << ",\n";
-    out << "      \"capability_names\": \"" << escapeJson(
-        capabilityList(probe.diagnostics.device.capabilities)) << "\"\n";
-    out << "    },\n";
-    out << "    \"components\": [\n";
-    const uint32_t component_count =
-        std::min<uint32_t>(probe.diagnostics.component_count, RTX_MAX_COMPONENTS);
+    const auto& [loaded, path, error, abi_version, result, diagnostics] = probe;
+    std::string out = std::format(
+        "{{\n"
+        "  \"loaded\": {},\n"
+        "  \"path\": \"{}\",\n"
+        "  \"error\": \"{}\",\n"
+        "  \"abi_version\": {},\n"
+        "  \"result\": {},\n"
+        "  \"result_name\": \"{}\",\n"
+        "  \"diagnostics\": {{\n"
+        "    \"summary\": \"{}\",\n"
+        "    \"device\": {{\n"
+        "      \"name\": \"{}\",\n"
+        "      \"compute_major\": {},\n"
+        "      \"compute_minor\": {},\n"
+        "      \"vram_bytes\": {},\n"
+        "      \"cuda_version\": {},\n"
+        "      \"capabilities\": {},\n"
+        "      \"capability_names\": \"{}\"\n"
+        "    }},\n"
+        "    \"components\": [\n",
+        loaded ? "true" : "false", escapeJson(path), escapeJson(error),
+        abi_version, result, resultLabel(result),
+        escapeJson(safeString(diagnostics.summary, sizeof(diagnostics.summary))),
+        escapeJson(safeString(diagnostics.device.name, sizeof(diagnostics.device.name))),
+        diagnostics.device.compute_major, diagnostics.device.compute_minor,
+        diagnostics.device.vram_bytes, diagnostics.device.cuda_version,
+        diagnostics.device.capabilities,
+        escapeJson(capabilityList(diagnostics.device.capabilities)));
+    const uint32_t component_count = std::min<uint32_t>(diagnostics.component_count, RTX_MAX_COMPONENTS);
     for (uint32_t i = 0; i < component_count; ++i) {
-        const RtxComponentInfo& component = probe.diagnostics.components[i];
-        out << "      {\"name\": \"" << escapeJson(safeString(component.name,
-                                                               sizeof(component.name)))
-            << "\", \"present\": " << (component.present != 0 ? "true" : "false")
-            << ", \"version\": " << component.version << ", \"path\": \""
-            << escapeJson(safeString(component.path, sizeof(component.path))) << "\", \"note\": \""
-            << escapeJson(safeString(component.note, sizeof(component.note))) << "\"}";
-        if (i + 1 != component_count) {
-            out << ",";
-        }
-        out << "\n";
+        const RtxComponentInfo& c = diagnostics.components[i];
+        out += std::format(
+            "      {{\"name\": \"{}\", \"present\": {}, \"version\": {}, \"path\": \"{}\", \"note\": \"{}\"{}\n",
+            escapeJson(safeString(c.name, sizeof(c.name))),
+            c.present ? "true" : "false", c.version,
+            escapeJson(safeString(c.path, sizeof(c.path))),
+            escapeJson(safeString(c.note, sizeof(c.note))),
+            i + 1 < component_count ? "}," : "}");
     }
-    out << "    ]\n";
-    out << "  }\n";
-    out << "}\n";
-    return out.str();
+    out += "    ]\n  }\n}\n";
+    return out;
 }
 }  // namespace rtx::cli

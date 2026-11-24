@@ -11,8 +11,7 @@
 #endif
 
 #include <windowsx.h>
-#include <commctrl.h>
-#include <uxtheme.h>
+#include "rtx/sys_dynload.h"
 
 #include "rtx/flicks.h"
 #include "rtx/i18n.h"
@@ -35,10 +34,18 @@ namespace {
 constexpr int kTrackCount = static_cast<int>(rtx::kNleTrackCount);
 constexpr wchar_t kTrackLabels[kTrackCount][4] = {L"V2", L"V1", L"A1", L"S1"};
 constexpr wchar_t kTimelineCanvasClass[] = L"RTXTimelineCanvasWnd";
+constexpr wchar_t kProgressClassW[] = L"msctls_progress32";
+constexpr wchar_t kTrackbarClassW[] = L"msctls_trackbar32";
+constexpr UINT kPbmSetRange32 = WM_USER + 6;
+constexpr UINT kTbmGetPos     = WM_USER;
+constexpr UINT kTbmSetPos     = WM_USER + 5;
+constexpr UINT kTbmSetRange   = WM_USER + 6;
+constexpr DWORD kTbsHorz      = 0x0000u;
 
-[[nodiscard]] int64_t effectiveTimelineSpan(const rtx::NleProject& project) noexcept {
+[[nodiscard]] int64_t effectiveTimelineSpan(const WorkstationApp& app,
+                                            const rtx::NleProject& project) noexcept {
     return std::max<int64_t>({project.timelineDurationFlicks(),
-                              g_app.mediaDurationFlicks,
+                              app.mediaDurationFlicks,
                               kDefaultTimelineSpan.count()});
 }
 void fillRect(HDC hdc, const RECT& rc, COLORREF color) {
@@ -66,12 +73,11 @@ void drawBrandMark(HDC hdc, int x, int y, int w, int h) {
         {x + w - (h / 3), y + h},
         {x, y + h},
     };
-    HBRUSH brush = CreateSolidBrush(kClrNvGreen);
-    HBRUSH old = (HBRUSH)SelectObject(hdc, brush);
+    HBRUSH old = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(DC_BRUSH)));
+    SetDCBrushColor(hdc, kClrNvGreen);
     SetPolyFillMode(hdc, WINDING);
     Polygon(hdc, pts, 4);
     SelectObject(hdc, old);
-    DeleteObject(brush);
 }
 int timelineRulerHeight(int dpi) { return MulDiv(24, dpi, 96); }
 int timelineLaneHeight(int dpi) { return MulDiv(44, dpi, 96); }
@@ -83,8 +89,9 @@ RECT laneRect(const RECT& area, int track, int dpi) {
             area.top + ruler + (track + 1) * lane};
     return rc;
 }
-int64_t timelineXToFlicks(const RECT& area, const rtx::NleProject& project, int x, int dpi) {
-    const int64_t span = effectiveTimelineSpan(project);
+int64_t timelineXToFlicks(const WorkstationApp& app, const RECT& area,
+                          const rtx::NleProject& project, int x, int dpi) {
+    const int64_t span = effectiveTimelineSpan(app, project);
     const int offset = MulDiv(56, dpi, 96);
     const int width = area.right - area.left - offset;
     if (width <= 0 || span <= 0) {
@@ -94,8 +101,9 @@ int64_t timelineXToFlicks(const RECT& area, const rtx::NleProject& project, int 
         static_cast<double>(x - area.left - offset) / static_cast<double>(width), 0.0, 1.0);
     return static_cast<int64_t>(ratio * static_cast<double>(span));
 }
-int timelineFlicksToX(const RECT& area, const rtx::NleProject& project, int64_t flicks, int dpi) {
-    const int64_t span = effectiveTimelineSpan(project);
+int timelineFlicksToX(const WorkstationApp& app, const RECT& area,
+                      const rtx::NleProject& project, int64_t flicks, int dpi) {
+    const int64_t span = effectiveTimelineSpan(app, project);
     const int offset = MulDiv(56, dpi, 96);
     const int width = area.right - area.left - offset;
     if (width <= 0 || span <= 0) {
@@ -106,13 +114,27 @@ int timelineFlicksToX(const RECT& area, const rtx::NleProject& project, int64_t 
     return area.left + offset + static_cast<int>(ratio * static_cast<double>(width));
 }
 LRESULT CALLBACK timelineCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCCREATE) {
+        const auto* cs = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        return TRUE;
+    }
+    if (msg == WM_NCDESTROY) {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    }
+    WorkstationApp* app_ptr = appFromControl(hwnd);
+    if (!app_ptr) {
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    WorkstationApp& app = *app_ptr;
     switch (msg) {
         case WM_SETFONT:
-            g_app.timelineFont = reinterpret_cast<HFONT>(wParam);
+            app.timelineFont = reinterpret_cast<HFONT>(wParam);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case WM_GETFONT:
-            return reinterpret_cast<LRESULT>(g_app.timelineFont);
+            return reinterpret_cast<LRESULT>(app.timelineFont);
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT: {
@@ -120,21 +142,21 @@ LRESULT CALLBACK timelineCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             GetClientRect(hwnd, &rc);
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-            paintTimelineCanvas(hwnd, rc, g_app.project, g_app.timelineFont);
+            paintTimelineCanvas(hwnd, rc, app.project, app.timelineFont);
             (void)hdc;
             EndPaint(hwnd, &ps);
             return 0;
         }
         case WM_LBUTTONDOWN: {
-            g_app.timelineDragging = true;
+            app.timelineDragging = true;
             SetCapture(hwnd);
             RECT rc{};
             GetClientRect(hwnd, &rc);
             const int dpi = GetDpiForWindow(hwnd);
             const int click_x = GET_X_LPARAM(lParam);
             const int click_y = GET_Y_LPARAM(lParam);
-            const int64_t click_flicks = timelineXToFlicks(rc, g_app.project, click_x, dpi);
-            g_app.project.playhead_flicks = click_flicks;
+            const int64_t click_flicks = timelineXToFlicks(app, rc, app.project, click_x, dpi);
+            app.project.playhead_flicks = click_flicks;
 
             // S-1.4：根据鼠标 (lane, x) 命中选中对应时间轴片段。
             int hit_lane = -1;
@@ -146,11 +168,12 @@ LRESULT CALLBACK timelineCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
             }
             if (hit_lane >= 0) {
-                for (const rtx::TimelineClip& clip : g_app.project.clips) {
-                    const int64_t clip_end = clip.start_flicks + rtx::nleClipDuration(clip);
-                    if (clip.lane == hit_lane &&
-                        click_flicks >= clip.start_flicks && click_flicks <= clip_end) {
-                        g_app.project.selected_clip_id = clip.id;
+                for (const rtx::TimelineClip& clip : app.project.clips) {
+                    const auto& [cid, caid, cname, clane, cstart, cinf, coutf, cgain] = clip;
+                    (void)caid;(void)cname;(void)cinf;(void)coutf;(void)cgain;
+                    const int64_t clip_end = cstart + rtx::nleClipDuration(clip);
+                    if (clane == hit_lane && click_flicks >= cstart && click_flicks <= clip_end) {
+                        app.project.selected_clip_id = cid;
                         break;
                     }
                 }
@@ -160,18 +183,18 @@ LRESULT CALLBACK timelineCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         case WM_MOUSEMOVE:
-            if (g_app.timelineDragging) {
+            if (app.timelineDragging) {
                 RECT rc{};
                 GetClientRect(hwnd, &rc);
                 const int dpi = GetDpiForWindow(hwnd);
-                g_app.project.playhead_flicks =
-                    timelineXToFlicks(rc, g_app.project, GET_X_LPARAM(lParam), dpi);
+                app.project.playhead_flicks =
+                    timelineXToFlicks(app, rc, app.project, GET_X_LPARAM(lParam), dpi);
                 SendMessageW(GetParent(hwnd), WM_APP_TIMELINE_SEEK, 0, 0);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         case WM_LBUTTONUP:
-            g_app.timelineDragging = false;
+            app.timelineDragging = false;
             ReleaseCapture();
             return 0;
         default:
@@ -216,14 +239,14 @@ const wchar_t* chromeText(ChromeText id) noexcept {
         default: return L"";
     }
 }
-void setGuiPlaying(bool playing) noexcept {
-    g_app.playing.store(playing, std::memory_order_release);
+void setGuiPlaying(WorkstationApp& app, bool playing) noexcept {
+    app.playing.store(playing, std::memory_order_release);
 }
-bool guiIsPlaying() noexcept {
-    return g_app.playing.load(std::memory_order_acquire);
+bool guiIsPlaying(const WorkstationApp& app) noexcept {
+    return app.playing.load(std::memory_order_acquire);
 }
-const wchar_t* playbackCaption() noexcept {
-    return chromeText(guiIsPlaying() ? ChromeText::Pause : ChromeText::Play);
+const wchar_t* playbackCaption(const WorkstationApp& app) noexcept {
+    return chromeText(guiIsPlaying(app) ? ChromeText::Pause : ChromeText::Play);
 }
 bool applyGoldenPreset(std::string_view preset_id, rtx::TranscodeProfile& profile) {
     // {id, codec, preset, resolution, vsr_enabled (-1=keep), vsr_quality, fps_mode, peak_nits (0=keep)}
@@ -340,6 +363,7 @@ void paintOwnerDrawButton(const DRAWITEMSTRUCT& dis, const wchar_t* caption, But
     }
 }
 void paintTimelineCanvas(HWND hwnd, const RECT& client, const rtx::NleProject& project, HFONT font) {
+    const WorkstationApp& app = requireApp(hwnd);
     HDC window_dc = GetDC(hwnd);
     HDC mem = CreateCompatibleDC(window_dc);
     HBITMAP dib = CreateCompatibleBitmap(window_dc, client.right - client.left,
@@ -370,45 +394,46 @@ void paintTimelineCanvas(HWND hwnd, const RECT& client, const rtx::NleProject& p
     }
 
     if (project.mark_in_flicks >= 0 && project.mark_out_flicks > project.mark_in_flicks) {
-        const int x0 = timelineFlicksToX(client, project, project.mark_in_flicks, dpi);
-        const int x1 = timelineFlicksToX(client, project, project.mark_out_flicks, dpi);
+        const int x0 = timelineFlicksToX(app, client, project, project.mark_in_flicks, dpi);
+        const int x1 = timelineFlicksToX(app, client, project, project.mark_out_flicks, dpi);
         RECT io{x0, lanes_top, x1, client.bottom};
         fillRect(mem, io, kClrNvGreenDim);
     }
     for (const rtx::TimelineClip& clip : project.clips) {
-        if (clip.lane < 0 || clip.lane >= kTrackCount) {
-            continue;
-        }
-        RECT lane = laneRect(client, clip.lane, dpi);
-        const int x0 = timelineFlicksToX(client, project, clip.start_flicks, dpi);
-        const int x1 = timelineFlicksToX(client, project, clip.start_flicks + rtx::nleClipDuration(clip), dpi);
+        const auto& [cid, caid, cname, clane, cstart, cinf, coutf, cgain] = clip;
+        (void)caid;(void)cinf;(void)coutf;(void)cgain;
+        if (clane < 0 || clane >= kTrackCount) continue;
+        RECT lane = laneRect(client, clane, dpi);
+        const int x0 = timelineFlicksToX(app, client, project, cstart, dpi);
+        const int x1 = timelineFlicksToX(app, client, project, cstart + rtx::nleClipDuration(clip), dpi);
         RECT clip_rc{x0, lane.top + MulDiv(6, dpi, 96), std::max(x1, x0 + 2),
                      lane.bottom - MulDiv(6, dpi, 96)};
-        const bool selected = (clip.id == project.selected_clip_id);
+        const bool selected = (cid == project.selected_clip_id);
         fillRect(mem, clip_rc, selected ? kClrNvGreenDim : kClrCtrl);
         frameRect(mem, clip_rc, selected ? kClrNvGreen : kClrLineStrong);
         RECT text{clip_rc.left + MulDiv(6, dpi, 96), clip_rc.top, clip_rc.right, clip_rc.bottom};
-        const std::wstring wname = utf8ToWide(clip.name);
+        const std::wstring wname = utf8ToWide(cname);
         drawTextDim(mem, text, wname.c_str(), kClrText, font,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    const int64_t span = effectiveTimelineSpan(project);
+    const int64_t span = effectiveTimelineSpan(app, project);
     const int64_t tick_step = std::chrono::duration_cast<rtx::Flicks>(std::chrono::seconds(5)).count();
     if (span > 0 && tick_step > 0) {
         for (int64_t t = 0; t <= span; t += tick_step) {
-            const int x = timelineFlicksToX(client, project, t, dpi);
+            const int x = timelineFlicksToX(app, client, project, t, dpi);
             RECT tick{x, ruler.bottom - MulDiv(6, dpi, 96), x + 1, ruler.bottom};
             fillRect(mem, tick, kClrLineStrong);
         }
     }
-    const int phx = timelineFlicksToX(client, project, project.playhead_flicks, dpi);
+    const int phx = timelineFlicksToX(app, client, project, project.playhead_flicks, dpi);
     RECT playhead{phx - 1, client.top, phx + 1, client.bottom};
     fillRect(mem, playhead, kClrNvGreen);
 
+    rtx::UniqueBitmap dib_owner{dib};
     BitBlt(window_dc, client.left, client.top, client.right - client.left,
            client.bottom - client.top, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old_bmp);
-    DeleteObject(dib);
+    dib_owner.reset();
     DeleteDC(mem);
     ReleaseDC(hwnd, window_dc);
 }
@@ -426,71 +451,57 @@ bool registerTimelineCanvasWindowClass(HINSTANCE instance) {
     }
     return true;
 }
-rtx::TranscodeProfile& guiProfile() {
-    return g_app.profile;
+const rtx::TranscodeProfile& guiProfile(const WorkstationApp& app) noexcept {
+    return app.profile;
 }
-void setGuiTranscoding(bool busy) noexcept {
-    g_app.transcoding.store(busy, std::memory_order_release);
+rtx::TranscodeProfile& guiProfile(WorkstationApp& app) noexcept {
+    return app.profile;
 }
-bool guiIsTranscoding() noexcept {
-    return g_app.transcoding.load(std::memory_order_acquire);
+void setGuiTranscoding(WorkstationApp& app, bool busy) noexcept {
+    app.transcoding.store(busy, std::memory_order_release);
 }
-void setActiveWorkspace(WorkspaceMode mode) noexcept {
-    g_app.workspace = mode;
+bool guiIsTranscoding(const WorkstationApp& app) noexcept {
+    return app.transcoding.load(std::memory_order_acquire);
+}
+void setActiveWorkspace(WorkstationApp& app, WorkspaceMode mode) noexcept {
+    app.workspace = mode;
 }
 
 void runHardwareProbe(HWND hwnd) {
-    rtx::cli::ShimProbeResult probe = rtx::cli::probeShim();
+    const rtx::cli::ShimProbeResult probe = rtx::cli::probeShim();
+    const auto& [loaded, path, err_str, abi_ver, result, diag] = probe;
+    (void)path; (void)err_str; (void)abi_ver; (void)diag;
     const std::string human = rtx::cli::formatProbeHuman(probe);
-    rtx::logInfo("hardware probe: result=" + std::to_string(probe.result) + " loaded=" +
-                 std::string(probe.loaded ? "true" : "false"));
+    rtx::logInfo("hardware probe: result=" + std::to_string(result) + " loaded=" +
+                 std::string(loaded ? "true" : "false"));
     MessageBoxA(hwnd, human.c_str(), "NVIDIA shim probe", MB_ICONINFORMATION);
 }
 void refreshBinListbox(HWND hwnd) {
     SendDlgItemMessageW(hwnd, IDC_LST_BIN, LB_RESETCONTENT, 0, 0);
-    const rtx::NleProject& project = g_app.project;
+    const rtx::NleProject& project = requireApp(hwnd).project;
     for (const rtx::TimelineClip& clip : project.clips) {
-        const std::wstring wname = utf8ToWide(clip.name);
+        const auto& [cid, caid, cname, clane, cstart, cinf, coutf, cgain] = clip;
+        (void)cid;(void)caid;(void)clane;(void)cstart;(void)cinf;(void)coutf;(void)cgain;
+        const std::wstring wname = utf8ToWide(cname);
         SendDlgItemMessageW(hwnd, IDC_LST_BIN, LB_ADDSTRING, 0,
                             reinterpret_cast<LPARAM>(wname.c_str()));
     }
 }
 void addFilesToBin(HWND hwnd, const std::vector<std::wstring>& paths) {
-    rtx::NleProject& project = g_app.project;
+    rtx::NleProject& project = requireApp(hwnd).project;
     int64_t end_flicks = project.timelineDurationFlicks();
     for (const std::wstring& path : paths) {
-        const ProbedMedia media = probeMediaFile(path);
-        const int64_t dur = media.ok ? media.duration_flicks : kDefaultTimelineSpan.count();
+        const auto [media_w, media_h, media_dur, media_ok] = probeMediaFile(path);
+        const int64_t dur = media_ok ? media_dur : kDefaultTimelineSpan.count();
         const std::string name = wideToUtf8(std::filesystem::path(path).filename().wstring());
-        auto asset_id = rtx::nleRegisterAsset(project, rtx::NleMediaAsset{
-            .uuid = "asset-" + std::to_string(project.next_id),
-            .name = name,
-            .path = wideToUtf8(path),
-            .duration_flicks = dur,
-            .width = media.width,
-            .height = media.height,
-            .offline = false,
-        });
+        auto asset_id = rtx::nleRegisterAsset(project, rtx::makeNleAsset(
+            0, "asset-" + std::to_string(project.next_id), name, wideToUtf8(path), dur, media_w, media_h, false));
         if (!asset_id.has_value()) continue;
-        auto v_clip_id = rtx::nleAddClip(project, g_app.history, rtx::TimelineClip{
-            .asset_id = *asset_id,
-            .name = name,
-            .lane = 1,  // V1 主视频轨
-            .start_flicks = end_flicks,
-            .in_flicks = 0,
-            .out_flicks = dur,
-            .gain = 1.0f,
-        });
+        auto v_clip_id = rtx::nleAddClip(project, requireApp(hwnd).history, rtx::makeTimelineClip(
+            0, *asset_id, name, 1, end_flicks, 0, dur, 1.0f));
         // S-1.4：同步向 A1 主音轨插入对应音频段，严禁 A1 留空。
-        (void)rtx::nleAddClip(project, g_app.history, rtx::TimelineClip{
-            .asset_id = *asset_id,
-            .name = name + " [A1]",
-            .lane = 2,  // A1 主音轨
-            .start_flicks = end_flicks,
-            .in_flicks = 0,
-            .out_flicks = dur,
-            .gain = 1.0f,
-        });
+        (void)rtx::nleAddClip(project, requireApp(hwnd).history, rtx::makeTimelineClip(
+            0, *asset_id, name + " [A1]", 2, end_flicks, 0, dur, 1.0f));
         if (v_clip_id.has_value()) {
             project.selected_clip_id = *v_clip_id;
             end_flicks += dur;
@@ -501,12 +512,13 @@ void addFilesToBin(HWND hwnd, const std::vector<std::wstring>& paths) {
     rtx::logInfo("media bin now holds " + std::to_string(project.clips.size()) + " clip(s)");
 }
 void updateNleTimecode(HWND hwnd) {
-    const rtx::NleProject& project = g_app.project;
+    const WorkstationApp& app = requireApp(hwnd);
+    const rtx::NleProject& project = app.project;
     SetDlgItemTextW(hwnd, IDC_LBL_TIMECODE,
-                    formatFlicksTimecode(project.playhead_flicks, effectiveTimelineSpan(project)).c_str());
+                    formatFlicksTimecode(project.playhead_flicks, effectiveTimelineSpan(app, project)).c_str());
 }
 void onNleMarkIn(HWND hwnd) {
-    rtx::NleProject& project = g_app.project;
+    rtx::NleProject& project = requireApp(hwnd).project;
     project.mark_in_flicks = project.playhead_flicks;
     if (project.mark_out_flicks >= 0 && project.mark_out_flicks <= project.mark_in_flicks) {
         project.mark_out_flicks = -1;
@@ -515,7 +527,7 @@ void onNleMarkIn(HWND hwnd) {
     rtx::logInfo("NLE mark IN at " + std::to_string(project.mark_in_flicks) + " flicks");
 }
 void onNleMarkOut(HWND hwnd) {
-    rtx::NleProject& project = g_app.project;
+    rtx::NleProject& project = requireApp(hwnd).project;
     project.mark_out_flicks = project.playhead_flicks;
     if (project.mark_in_flicks >= 0 && project.mark_out_flicks <= project.mark_in_flicks) {
         project.mark_in_flicks = -1;
@@ -524,11 +536,11 @@ void onNleMarkOut(HWND hwnd) {
     rtx::logInfo("NLE mark OUT at " + std::to_string(project.mark_out_flicks) + " flicks");
 }
 void onNleRazor(HWND hwnd) {
-    rtx::NleProject& project = g_app.project;
+    rtx::NleProject& project = requireApp(hwnd).project;
     if (project.selected_clip_id == 0) {
         return;
     }
-    if (auto split = rtx::nleSplitClip(project, g_app.history, project.selected_clip_id,
+    if (auto split = rtx::nleSplitClip(project, requireApp(hwnd).history, project.selected_clip_id,
                                        project.playhead_flicks);
         split.has_value()) {
         refreshBinListbox(hwnd);
@@ -537,40 +549,41 @@ void onNleRazor(HWND hwnd) {
     }
 }
 void onNleDeleteSelected(HWND hwnd) {
-    rtx::NleProject& project = g_app.project;
+    rtx::NleProject& project = requireApp(hwnd).project;
     if (project.selected_clip_id == 0) {
         return;
     }
-    if (rtx::nleDeleteClip(project, g_app.history, project.selected_clip_id).has_value()) {
+    if (rtx::nleDeleteClip(project, requireApp(hwnd).history, project.selected_clip_id).has_value()) {
         refreshBinListbox(hwnd);
         InvalidateRect(GetDlgItem(hwnd, IDC_NLE_TIMELINE), nullptr, FALSE);
     }
 }
 void onNleUndo(HWND hwnd) {
-    if (rtx::nleUndo(g_app.project, g_app.history).has_value()) {
+    if (rtx::nleUndo(requireApp(hwnd).project, requireApp(hwnd).history).has_value()) {
         refreshBinListbox(hwnd);
         InvalidateRect(GetDlgItem(hwnd, IDC_NLE_TIMELINE), nullptr, FALSE);
     }
 }
 void onNleRedo(HWND hwnd) {
-    if (rtx::nleRedo(g_app.project, g_app.history).has_value()) {
+    if (rtx::nleRedo(requireApp(hwnd).project, requireApp(hwnd).history).has_value()) {
         refreshBinListbox(hwnd);
         InvalidateRect(GetDlgItem(hwnd, IDC_NLE_TIMELINE), nullptr, FALSE);
     }
 }
 void onNleExportSequence(HWND hwnd) {
-    if (guiIsTranscoding()) {
+    if (guiIsTranscoding(requireApp(hwnd))) {
         return;
     }
-    if (g_app.exportThread.joinable()) {
-        g_app.exportThread.request_stop();
-        g_app.exportThread.join();
+    if (requireApp(hwnd).exportThread.joinable()) {
+        requireApp(hwnd).exportThread.request_stop();
+        requireApp(hwnd).exportThread.join();
     }
-    const rtx::NleProject snapshot = g_app.project;
+    const rtx::NleProject snapshot = requireApp(hwnd).project;
     rtx::TranscodeProfile profile = collectProfileFromUi(hwnd);
-    setGuiTranscoding(true);
+    setGuiTranscoding(requireApp(hwnd), true);
     syncControlStates(hwnd);
-    g_app.exportThread = std::jthread([hwnd, snapshot, profile = std::move(profile)](std::stop_token stop) mutable {
+    WorkstationApp* export_app = appFromControl(hwnd);
+    export_app->exportThread = std::jthread([hwnd, export_app, snapshot, profile = std::move(profile)](std::stop_token stop) mutable {
         auto msg = std::make_unique<std::wstring>();
         auto compiled = rtx::compileRenderGraph(snapshot);
         auto audio_compiled = rtx::compileAudioRenderGraph(snapshot);
@@ -582,14 +595,16 @@ void onNleExportSequence(HWND hwnd) {
             *msg = L"NLE Export Cancelled";
         } else {
             if (profile.input.empty()) {
-                profile.input = compiled->front().source_path;
+                const auto& [first_src, s_in, s_out, t_in, t_out, hc, fk] = compiled->front();
+                (void)s_in; (void)s_out; (void)t_in; (void)t_out; (void)hc; (void)fk;
+                profile.input = first_src;
             }
             (void)rtx::validateAndNormalizeProfile(profile, false);
             profile.output = rtx::deriveOutputPath(profile.input, profile.codec, profile.output,
                                                    profile.auto_output);
             rtx::HwTranscodeOptions opts = rtx::profileToHwOptions(profile);
-            opts.cancel = &g_app.cancelRequested;
-            opts.split_ratio = &g_app.splitRatio;
+            opts.cancel = &(*export_app).cancelRequested;
+            opts.split_ratio = &(*export_app).splitRatio;
             auto exported = rtx::runNvidiaRemasterRenderGraph(opts, *compiled, *audio_compiled, stop);
             if (!exported.has_value()) {
                 *msg = L"NLE Export Failed: " + utf8ToWide(exported.error().message);
@@ -602,12 +617,12 @@ void onNleExportSequence(HWND hwnd) {
         if (!stop.stop_requested() && IsWindow(hwnd)) {
             if (!PostMessageW(hwnd, WM_APP_NLE_EXPORT_DONE, 0,
                               reinterpret_cast<LPARAM>(msg.get()))) {
-                setGuiTranscoding(false);
+                setGuiTranscoding(*export_app, false);
             } else {
                 (void)msg.release();
             }
         } else {
-            setGuiTranscoding(false);
+            setGuiTranscoding(*export_app, false);
         }
     });
 }
@@ -631,7 +646,7 @@ void refreshUiLanguage(HWND hwnd) {
     for (const auto& [id, str_id] : kLabels) {
         SetDlgItemTextW(hwnd, id, rtx::trW(str_id));
     }
-    if (!guiIsTranscoding()) {
+    if (!guiIsTranscoding(requireApp(hwnd))) {
         SetDlgItemTextW(hwnd, IDC_LBL_STATUS, rtx::trW(StrId::StatusReady));
     }
     SetDlgItemTextW(hwnd, IDC_LBL_TELEMETRY,
@@ -653,7 +668,7 @@ void refreshUiLanguage(HWND hwnd) {
     InvalidateRect(hwnd, nullptr, TRUE);
 }
 rtx::TranscodeProfile collectProfileFromUi(HWND hwnd) {
-    rtx::TranscodeProfile profile = guiProfile();
+    rtx::TranscodeProfile profile = guiProfile(requireApp(hwnd));
     wchar_t buf[MAX_PATH] = {};
     auto text = [&](int id) {
         GetDlgItemTextW(hwnd, id, buf, MAX_PATH);
@@ -755,7 +770,7 @@ void autoFillOutputPath(HWND hwnd) {
     if (inPath[0] == L'\0') return;
     wchar_t outPath[MAX_PATH] = {};
     GetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, outPath, MAX_PATH);
-    rtx::TranscodeProfile& profile = guiProfile();
+    rtx::TranscodeProfile& profile = guiProfile(requireApp(hwnd));
     profile.input = wideToUtf8(inPath);
     profile.output = wideToUtf8(outPath);
     profile.output = rtx::deriveOutputPath(profile.input, profile.codec, profile.output,
@@ -763,6 +778,7 @@ void autoFillOutputPath(HWND hwnd) {
     SetDlgItemTextW(hwnd, IDC_EDT_OUTPUT, utf8ToWide(profile.output).c_str());
 }
 void populateComboBoxes(HWND hwnd) {
+    constexpr UINT kCbSetMinVisible = 0x1701u;  // CB_SETMINVISIBLE (Win32 standard ABI)
     auto refill = [&](int id, std::initializer_list<rtx::StrId> options, int defaultSel) {
         HWND h = GetDlgItem(hwnd, id);
         int sel = ComboBox_GetCurSel(h);
@@ -771,6 +787,7 @@ void populateComboBoxes(HWND hwnd) {
         for (rtx::StrId option : options) {
             ComboBox_AddString(h, rtx::trW(option));
         }
+        SendMessageW(h, kCbSetMinVisible, 10, 0);
         ComboBox_SetCurSel(h, sel);
     };
     refill(IDC_CMB_CODEC,
@@ -797,48 +814,50 @@ void syncControlStates(HWND hwnd) {
     const int rcSel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_RC));
     const bool usesQualityTarget = (rcSel == 0 || rcSel == 3);
     const bool usesBitrateTarget = (rcSel == 1 || rcSel == 2);
-    EnableWindow(GetDlgItem(hwnd, IDC_EDT_BITRATE), usesBitrateTarget && !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_EDT_QP), usesQualityTarget && !guiIsTranscoding());
+    EnableWindow(GetDlgItem(hwnd, IDC_EDT_BITRATE), usesBitrateTarget && !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_EDT_QP), usesQualityTarget && !guiIsTranscoding(requireApp(hwnd)));
 
     const int fpsSel = ComboBox_GetCurSel(GetDlgItem(hwnd, IDC_CMB_FPS));
     const bool rifeMode = (fpsSel == 3 || fpsSel == 4);
-    EnableWindow(GetDlgItem(hwnd, IDC_EDT_RIFE_ENGINE), rifeMode && !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_BTN_BROWSE_RIFE), rifeMode && !guiIsTranscoding());
+    EnableWindow(GetDlgItem(hwnd, IDC_EDT_RIFE_ENGINE), rifeMode && !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_BTN_BROWSE_RIFE), rifeMode && !guiIsTranscoding(requireApp(hwnd)));
 
     const bool vsrChecked = (Button_GetCheck(GetDlgItem(hwnd, IDC_CHK_VSR)) == BST_CHECKED);
-    EnableWindow(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL), vsrChecked && !guiIsTranscoding());
+    EnableWindow(GetDlgItem(hwnd, IDC_CMB_VSR_QUAL), vsrChecked && !guiIsTranscoding(requireApp(hwnd)));
 
-    EnableWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_CHK_HDR10PLUS), !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_EDT_LUT), !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_BTN_BROWSE_LUT), !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_CMB_FPS), !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_BTN_START), !guiIsTranscoding());
-    EnableWindow(GetDlgItem(hwnd, IDC_BTN_STOP), guiIsTranscoding());
+    EnableWindow(GetDlgItem(hwnd, IDC_EDT_PEAK_NITS), !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_CHK_HDR10PLUS), !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_EDT_LUT), !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_BTN_BROWSE_LUT), !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_CMB_FPS), !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_BTN_START), !guiIsTranscoding(requireApp(hwnd)));
+    EnableWindow(GetDlgItem(hwnd, IDC_BTN_STOP), guiIsTranscoding(requireApp(hwnd)));
 }
 void applyGoldenPresetById(HWND hwnd, const std::string& preset_id) {
-    if (!applyGoldenPreset(preset_id, guiProfile())) {
+    WorkstationApp& app = requireApp(hwnd);
+    if (!applyGoldenPreset(preset_id, guiProfile(app))) {
         return;
     }
-    applyProfileToUi(hwnd, guiProfile());
+    applyProfileToUi(hwnd, guiProfile(app));
     syncControlStates(hwnd);
-    const rtx::TranscodeProfile& profile = guiProfile();
+    const rtx::TranscodeProfile& profile = guiProfile(app);
     rtx::logInfo("golden preset applied: " + preset_id + " (codec=" + profile.codec +
                  " preset=" + std::to_string(profile.preset) + " res=" + profile.resolution +
                  " fps=" + profile.fps_mode + ")");
 }
 bool paintCommandButton(const DRAWITEMSTRUCT* dis, HFONT font) {
     using rtx::trW;
+    const WorkstationApp& app = requireApp(dis->hwndItem);
     const int id = static_cast<int>(dis->CtlID);
     const wchar_t* caption = nullptr;
     ButtonSkin skin = ButtonSkin::Subtle;
     switch (id) {
         case IDC_TAB_WS_ENCODER: caption = chromeText(ChromeText::WsEncoder);
-            skin = (g_app.workspace == WorkspaceMode::Encoder) ? ButtonSkin::TabActive : ButtonSkin::Tab; break;
+            skin = (app.workspace == WorkspaceMode::Encoder) ? ButtonSkin::TabActive : ButtonSkin::Tab; break;
         case IDC_TAB_WS_PLAYER: caption = chromeText(ChromeText::WsPlayer);
-            skin = (g_app.workspace == WorkspaceMode::Player) ? ButtonSkin::TabActive : ButtonSkin::Tab; break;
+            skin = (app.workspace == WorkspaceMode::Player) ? ButtonSkin::TabActive : ButtonSkin::Tab; break;
         case IDC_TAB_WS_NLE: caption = chromeText(ChromeText::WsNle);
-            skin = (g_app.workspace == WorkspaceMode::Nle) ? ButtonSkin::TabActive : ButtonSkin::Tab; break;
+            skin = (app.workspace == WorkspaceMode::Nle) ? ButtonSkin::TabActive : ButtonSkin::Tab; break;
         case IDC_BTN_START: caption = trW(rtx::StrId::ButtonStart); skin = ButtonSkin::GreenSolid; break;
         case IDC_BTN_STOP: caption = trW(rtx::StrId::ButtonStop); break;
         case IDC_BTN_PROBE: caption = chromeText(ChromeText::Probe); break;
@@ -860,7 +879,7 @@ bool paintCommandButton(const DRAWITEMSTRUCT* dis, HFONT font) {
         case IDC_BTN_RAZOR: caption = chromeText(ChromeText::Razor); break;
         case IDC_BTN_STEP_BACK: caption = chromeText(ChromeText::StepBack); break;
         case IDC_BTN_STEP_FWD: caption = chromeText(ChromeText::StepFwd); break;
-        case IDC_BTN_PLAYER_PLAY: caption = playbackCaption(); skin = ButtonSkin::GreenSolid; break;
+        case IDC_BTN_PLAYER_PLAY: caption = playbackCaption(app); skin = ButtonSkin::GreenSolid; break;
         case IDC_BTN_NLE_EXPORT: caption = chromeText(ChromeText::SendEncoder); skin = ButtonSkin::GreenSolid; break;
         default: return false;
     }
@@ -873,7 +892,7 @@ void createWorkstationControls(HWND hwnd, HFONT font, HFONT font_bold) {
         HWND h = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0,
                                  hwnd, (HMENU)(intptr_t)id, GetModuleHandleW(nullptr), nullptr);
         SendMessageW(h, WM_SETFONT, (WPARAM)font, TRUE);
-        SetWindowTheme(h, L"DarkMode_Explorer", nullptr);
+        rtx::sys::setWindowTheme(h, L"DarkMode_Explorer", nullptr);
         return h;
     };
     using CtrlSpec = std::tuple<const wchar_t*, int, const wchar_t*, DWORD>;
@@ -926,38 +945,37 @@ void createWorkstationControls(HWND hwnd, HFONT font, HFONT font_bold) {
         (void)createCtrl(cls, txt, style, id);
     }
     (void)createCtrl(L"BUTTON", chromeText(ChromeText::LangButton), BS_OWNERDRAW, IDC_BTN_LANG);
-    (void)createCtrl(L"BUTTON", playbackCaption(), BS_OWNERDRAW, IDC_BTN_PLAYER_PLAY);
+    (void)createCtrl(L"BUTTON", playbackCaption(requireApp(hwnd)), BS_OWNERDRAW, IDC_BTN_PLAYER_PLAY);
     Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_VSR), BST_CHECKED);
     Button_SetCheck(GetDlgItem(hwnd, IDC_CHK_AUDIO), BST_CHECKED);
     EnableWindow(GetDlgItem(hwnd, IDC_BTN_STOP), FALSE);
-    HWND hProgress = createCtrl(PROGRESS_CLASSW, L"", 0, IDC_PROGRESS);
-    SendMessageW(hProgress, PBM_SETRANGE32, 0, 1000);
-    HWND hScrub = createCtrl(TRACKBAR_CLASSW, L"", TBS_HORZ, IDC_TRK_SCRUB);
-    SendMessageW(hScrub, TBM_SETRANGE, TRUE, MAKELPARAM(0, 30000));
-    SendMessageW(hScrub, TBM_SETPOS, TRUE, 0);
+    HWND hProgress = createCtrl(kProgressClassW, L"", 0, IDC_PROGRESS);
+    SendMessageW(hProgress, kPbmSetRange32, 0, 1000);
+    HWND hScrub = createCtrl(kTrackbarClassW, L"", kTbsHorz, IDC_TRK_SCRUB);
+    SendMessageW(hScrub, kTbmSetRange, TRUE, MAKELPARAM(0, 30000));
+    SendMessageW(hScrub, kTbmSetPos, TRUE, 0);
 
     HINSTANCE instance = GetModuleHandleW(nullptr);
     (void)registerTimelineCanvasWindowClass(instance);
     HWND hTimeline = CreateWindowExW(0, kTimelineCanvasClass, L"",
                                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwnd,
-                                     (HMENU)(intptr_t)IDC_NLE_TIMELINE, instance, nullptr);
+                                     (HMENU)(intptr_t)IDC_NLE_TIMELINE, instance, &requireApp(hwnd));
     SendMessageW(hTimeline, WM_SETFONT, (WPARAM)font, TRUE);
 }
-WorkstationApp g_app;
 
-void stopPlaybackSession() {
-    g_app.playbackBorrow = nullptr;
-    g_app.playbackSession.reset();  // 1. 先 join 工作线程，切断一切 sink->present() 调用
-    if (g_app.previewViewport.has_value()) {
-        (void)g_app.previewViewport->waitForGpuIdle(1000);
+void stopPlaybackSession(WorkstationApp& app) noexcept {
+    app.playbackBorrow = nullptr;
+    app.playbackSession.reset();  // 1. 先 join 工作线程，切断一切 sink->present() 调用
+    if (app.previewViewport.has_value()) {
+        (void)app.previewViewport->waitForGpuIdle(1000);
     }
     rtx::gui::drainDeferredRetirement();
-    g_app.playbackSink.reset();     // 2. 线程退出且视口 GPU 队列排空后，安全释放无头桥与 slot_flags_
-    g_app.playbackLastSlot = 0xFFFFFFFFu;
+    app.playbackSink.reset();     // 2. 线程退出且视口 GPU 队列排空后，安全释放无头桥与 slot_flags_
+    app.playbackLastSlot = 0xFFFFFFFFu;
 }
 bool startPlaybackSession(HWND hwnd, const std::filesystem::path& path) {
-    stopPlaybackSession();
-    if (!g_app.previewViewport.has_value()) {
+    stopPlaybackSession(requireApp(hwnd));
+    if (!requireApp(hwnd).previewViewport.has_value()) {
         return false;
     }
     auto demuxer = rtx::makeFfmpegDemuxer();
@@ -971,64 +989,66 @@ bool startPlaybackSession(HWND hwnd, const std::filesystem::path& path) {
         return false;
     }
     auto sink = rtx::createHeadlessPreviewSink(
-        info.value(), [hwnd] { PostMessageW(hwnd, WM_APP_PREVIEW, 0, 0); }, g_app.playbackBorrow);
+        info.value(), [hwnd] { PostMessageW(hwnd, WM_APP_PREVIEW, 0, 0); }, requireApp(hwnd).playbackBorrow);
     if (!sink) {
         rtx::logError("playback: zero-readback sink unavailable (no NVIDIA GPU?)");
         return false;
     }
-    rtx::PlaybackOptions options{};
+    rtx::PlaybackOptions options = rtx::defaultPlaybackOptions();
     if (info.value().frame_rate.valid() && info.value().frame_rate.num > 0) {
-        options.frame_rate = info.value().frame_rate;
+        auto& [o_fps, o_spd, o_ah, o_vram, o_dev, o_aud] = options;
+        (void)o_spd; (void)o_ah; (void)o_vram; (void)o_dev; (void)o_aud;
+        o_fps = info.value().frame_rate;
     }
-    auto session = rtx::MediaPlaybackSession::create(std::move(demuxer), info.value(), sink.get(),
+    auto session = rtx::MediaPlaybackSession::create(std::move(demuxer), info.value(), *sink,
                                                      options);
     if (!session.has_value()) {
         rtx::logError("playback: session create failed: " + session.error().toString());
-        g_app.playbackBorrow = nullptr;
+        requireApp(hwnd).playbackBorrow = nullptr;
         return false;
     }
-    g_app.playbackInfo = info.value();
-    g_app.playbackSink = std::move(sink);
-    g_app.playbackSession = std::move(session.value());
-    g_app.playbackLastSlot = 0xFFFFFFFFu;
-    (void)g_app.playbackSession->play();
-    g_app.isPlaying = true;
-    setGuiPlaying(true);
+    requireApp(hwnd).playbackInfo = info.value();
+    requireApp(hwnd).playbackSink = std::move(sink);
+    requireApp(hwnd).playbackSession = std::move(session.value());
+    requireApp(hwnd).playbackLastSlot = 0xFFFFFFFFu;
+    (void)requireApp(hwnd).playbackSession->play();
+    requireApp(hwnd).isPlaying = true;
+    setGuiPlaying(requireApp(hwnd), true);
     rtx::logInfo("playback started: " + wideToUtf8(path.wstring()) + " pq=" +
-                 (info.value().color.transfer == rtx::TransferFunction::SMPTE2084 ? "1" : "0"));
+                 ([](const rtx::ColorDescription& c) { const auto [p, t, m, r] = c; (void)p; (void)m; (void)r; return t == rtx::TransferFunction::SMPTE2084 ? "1" : "0"; }(info.value().color)));
     return true;
 }
 void togglePlayback(HWND hwnd) {
-    if (g_app.playbackSession) {
-        if (g_app.isPlaying) {
-            g_app.playbackSession->pause();
+    if (requireApp(hwnd).playbackSession) {
+        if (requireApp(hwnd).isPlaying) {
+            requireApp(hwnd).playbackSession->pause();
         } else {
-            (void)g_app.playbackSession->play();
+            (void)requireApp(hwnd).playbackSession->play();
         }
     }
-    g_app.isPlaying = !g_app.isPlaying;
-    setGuiPlaying(g_app.isPlaying);
+    requireApp(hwnd).isPlaying = !requireApp(hwnd).isPlaying;
+    setGuiPlaying(requireApp(hwnd), requireApp(hwnd).isPlaying);
     InvalidateRect(GetDlgItem(hwnd, IDC_BTN_PLAYER_PLAY), nullptr, FALSE);
-    rtx::logInfo(std::string("playback -> ") + (g_app.isPlaying ? "playing" : "paused"));
+    rtx::logInfo(std::string("playback -> ") + (requireApp(hwnd).isPlaying ? "playing" : "paused"));
 }
 void stepPlayback(HWND hwnd, int direction) {
-    if (g_app.playbackSession) {
-        (void)g_app.playbackSession->stepFrame(direction);
+    if (requireApp(hwnd).playbackSession) {
+        (void)requireApp(hwnd).playbackSession->stepFrame(direction);
         presentPlaybackFrame(hwnd);
     }
 }
 void seekPlaybackFromSlider(HWND hwnd) {
-    if (!g_app.playbackSession) {
+    if (!requireApp(hwnd).playbackSession) {
         return;
     }
-    const LRESULT pos = SendMessageW(GetDlgItem(hwnd, IDC_TRK_SCRUB), TBM_GETPOS, 0, 0);
+    const LRESULT pos = SendMessageW(GetDlgItem(hwnd, IDC_TRK_SCRUB), kTbmGetPos, 0, 0);
     const rtx::Flicks target_flicks = std::chrono::duration_cast<rtx::Flicks>(
         std::chrono::milliseconds(std::max<int64_t>(0, static_cast<int64_t>(pos))));
-    (void)g_app.playbackSession->seek(target_flicks.count());
+    (void)requireApp(hwnd).playbackSession->seek(target_flicks.count());
     presentPlaybackFrame(hwnd);
 }
-void installTranscodeBorrow() {
-    g_app.transcodeBorrow = [](std::uint32_t& slot, rtx::PreviewSlotBorrow& borrow) {
+void installTranscodeBorrow(WorkstationApp& app) {
+    app.transcodeBorrow = [](std::uint32_t& slot, rtx::PreviewSlotBorrow& borrow) {
         const std::uint32_t latest = rtx::NgxRemasterBridge::latestPreviewSlot();
         if (latest == slot || latest > 2) {
             return false;
@@ -1048,8 +1068,7 @@ void installTranscodeBorrow() {
 void presentSlotToViewport(HWND hwnd, rtx::BorrowCallback& borrow, std::uint32_t& last_slot,
                            std::uint32_t src_width, std::uint32_t src_height, bool input_is_pq,
                            float max_nits) {
-    (void)hwnd;
-    if (!g_app.previewViewport.has_value() || !borrow) {
+    if (!requireApp(hwnd).previewViewport.has_value() || !borrow) {
         return;
     }
     std::uint32_t slot = last_slot;
@@ -1061,22 +1080,22 @@ void presentSlotToViewport(HWND hwnd, rtx::BorrowCallback& borrow, std::uint32_t
     if (resource == nullptr || flags == nullptr) {
         return;
     }
-    g_app.previewViewport->presentShared(device, resource, pitch, src_width, src_height,
+    requireApp(hwnd).previewViewport->presentShared(device, resource, pitch, src_width, src_height,
                                          input_is_pq, max_nits,
                                          PreviewSlotTicket{flags, slot});
     last_slot = slot;
 }
 void presentPlaybackFrame(HWND hwnd) {
-    const auto& info = g_app.playbackInfo;
-    presentSlotToViewport(hwnd, g_app.playbackBorrow, g_app.playbackLastSlot,
+    const auto& info = requireApp(hwnd).playbackInfo;
+    presentSlotToViewport(hwnd, requireApp(hwnd).playbackBorrow, requireApp(hwnd).playbackLastSlot,
                           static_cast<std::uint32_t>(info.width),
                           static_cast<std::uint32_t>(info.height),
-                          info.color.transfer == rtx::TransferFunction::SMPTE2084,
-                          info.hdr.cll.max_cll > 0 ? static_cast<float>(info.hdr.cll.max_cll)
+                          ([](const rtx::ColorDescription& c) { const auto [p, t, m, r] = c; (void)p; (void)m; (void)r; return t == rtx::TransferFunction::SMPTE2084; }(info.color)),
+                          info.hdr.cll.first > 0 ? static_cast<float>(info.hdr.cll.first)
                                                    : 100.0f);
 }
 void presentTranscodePreview(HWND hwnd) {
-    presentSlotToViewport(hwnd, g_app.transcodeBorrow, g_app.transcodeLastSlot, 960, 540,
+    presentSlotToViewport(hwnd, requireApp(hwnd).transcodeBorrow, requireApp(hwnd).transcodeLastSlot, 960, 540,
                           /*input_is_pq=*/true, 100.0f);
 }
 }  // namespace rtx::gui

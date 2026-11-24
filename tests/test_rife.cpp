@@ -84,32 +84,6 @@ struct TestCudaDriver {
     }
 };
 
-void setTestEnvVar(const char* name, const char* value) {
-#if defined(_WIN32)
-    _putenv_s(name, value);
-#else
-    ::setenv(name, value, 1);
-#endif
-}
-void unsetTestEnvVar(const char* name) {
-#if defined(_WIN32)
-    _putenv_s(name, "");
-#else
-    ::unsetenv(name);
-#endif
-}
-/* MSVC-safe environment read (Phase 9): the project builds with /WX and MSVC
- * emits C4996 for getenv; suppress exactly that warning around the call. */
-const char* readEnvValue(const char* name) {
-#if defined(_MSC_VER)
-#pragma warning(push)
-#pragma warning(disable : 4996)
-    return std::getenv(name);
-#pragma warning(pop)
-#else
-    return std::getenv(name);
-#endif
-}
 constexpr uint32_t kProbeFrameSize = 256u;
 constexpr uint32_t kProbePitch = kProbeFrameSize;
 constexpr size_t kProbeNv12Bytes = static_cast<size_t>(kProbePitch) * kProbeFrameSize * 3u / 2u;
@@ -231,10 +205,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
         std::printf("[SKIP-GPU] rife_four_phase_monotonic_progression: no sm_70+ CUDA device (JIT unavailable)\n");
         return;
     }
-    const char* old_env = readEnvValue("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH");
-    const bool had_old_env = (old_env != nullptr);
-    const std::string saved_env = had_old_env ? old_env : "";
-    setTestEnvVar("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH", "1");
 
     std::error_code fs_ec;
 // Loud GPU capability probe first: the Phase 9 PTX module is sm_70+ JIT
@@ -263,11 +233,6 @@ RTX_TEST(rife_four_phase_monotonic_progression) {
         if (dev_prev != 0 && cuda.mem_free != nullptr) cuda.mem_free(dev_prev);
         dev_out = dev_curr = dev_prev = 0;
         std::filesystem::remove(engine_path, fs_ec);
-        if (had_old_env) {
-            setTestEnvVar("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH", saved_env.c_str());
-        } else {
-            unsetTestEnvVar("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH");
-        }
     };
 
     do {
@@ -489,10 +454,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
         std::printf("[SKIP-GPU] rife_fp16_roundtrip_and_cache_progression: no sm_70+ CUDA device (JIT unavailable)\n");
         return;
     }
-    const char* old_env = readEnvValue("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH");
-    const bool had_old_env = (old_env != nullptr);
-    const std::string saved_env = had_old_env ? old_env : "";
-    setTestEnvVar("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH", "1");
 
     rtx::NgxRemasterBridge bridge;
     RtxNgxBridge* raw_bridge = nullptr;
@@ -524,11 +485,6 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
         if (dev_f32 != 0 && cuda.mem_free != nullptr) cuda.mem_free(dev_f32);
         dev_out = dev_curr = dev_prev = dev_f32_back = dev_f16 = dev_f32 = 0;
         std::filesystem::remove(engine_path, fs_ec);
-        if (had_old_env) {
-            setTestEnvVar("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH", saved_env.c_str());
-        } else {
-            unsetTestEnvVar("CINERTX_ALLOW_BUILTIN_RIFE_SYNTH");
-        }
     };
 
     do {
@@ -735,11 +691,12 @@ RTX_TEST(rife_fp16_roundtrip_and_cache_progression) {
 #include "rtx/shot_segmenter.h"
 
 RTX_TEST(test_shot_group_segmenter_hard_and_subtle_cuts) {
-    rtx::ShotGroupSegmenter seg;
+    rtx::ShotGroupSegmenter seg = rtx::makeShotSegmenter();
     std::array<uint32_t, 64> calm{};
     calm.fill(10000);
-    const auto d0 = seg.evaluate(calm, 1920, 1080, 255);
-    RTX_CHECK(!d0.is_scene_cut);
+    const auto [c0, r0, i0, g0, s0, o0] = rtx::evaluateShot(seg, calm, 1920, 1080, 255);
+    (void)r0; (void)i0; (void)g0; (void)s0; (void)o0;
+    RTX_CHECK(!c0);
 
     std::array<uint32_t, 64> subtle_cut{};
     for (int row = 0; row < 8; ++row) {
@@ -747,10 +704,11 @@ RTX_TEST(test_shot_group_segmenter_hard_and_subtle_cuts) {
             subtle_cut[row * 8 + col] = (col < 4) ? 1600000u : 20000u;
         }
     }
-    const auto d1 = seg.evaluate(subtle_cut, 1920, 1080, 255);
-    RTX_CHECK(d1.is_scene_cut);
-    RTX_CHECK(d1.reset_vsr_temporal);
-    RTX_CHECK(d1.force_encoder_idr);
-    RTX_CHECK_EQ(d1.shot_group_id, static_cast<uint64_t>(1));
+    const auto [c1, r1, i1, g1, s1, o1] = rtx::evaluateShot(seg, subtle_cut, 1920, 1080, 255);
+    (void)s1; (void)o1;
+    RTX_CHECK(c1);
+    RTX_CHECK(r1);
+    RTX_CHECK(i1);
+    RTX_CHECK_EQ(g1, static_cast<uint64_t>(1));
 }
 // Subtle cut: left half of screen changes sharply (global avg diff ~0.11)

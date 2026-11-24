@@ -25,9 +25,9 @@ extern "C" {
 using namespace rtx;
 
 RTX_TEST(io_ffmpeg_diagnostics) {
-    std::unique_ptr<IDemuxer> demuxer = makeFfmpegDemuxer();
+    std::unique_ptr<FfmpegDemuxer> demuxer = makeFfmpegDemuxer();
     RTX_REQUIRE(demuxer != nullptr);
-    std::unique_ptr<IMuxer> muxer = makeFfmpegMuxer();
+    std::unique_ptr<FfmpegMuxer> muxer = makeFfmpegMuxer();
     RTX_REQUIRE(muxer != nullptr);
 
     RTX_CHECK(ffmpegAvailable());
@@ -54,75 +54,75 @@ RTX_TEST(io_memory_avio_read_seek) {
     for (size_t i = 0; i < source.size(); ++i) {
         source[i] = static_cast<uint8_t>(i);
     }
-    io::MemoryAvioContext context(std::span<const uint8_t>(source.data(), source.size()));
-    RTX_REQUIRE(context.valid());
-    RTX_CHECK(context.writable() == false);
-    RTX_CHECK_EQ(context.size(), static_cast<size_t>(256));
+    auto context = io::makeMemoryAvioRead(std::span<const uint8_t>(source.data(), source.size()));
+    RTX_REQUIRE(io::memoryAvioValid(context));
+    RTX_CHECK(io::memoryAvioWritable(context) == false);
+    RTX_CHECK_EQ(io::memoryAvioSize(context), static_cast<size_t>(256));
 
     uint8_t buffer[16] = {};
-    RTX_CHECK_EQ(avio_read(context.raw(), buffer, 16), 16);
+    RTX_CHECK_EQ(avio_read(io::memoryAvioRaw(context), buffer, 16), 16);
     RTX_CHECK_EQ(buffer[0], static_cast<uint8_t>(0));
     RTX_CHECK_EQ(buffer[15], static_cast<uint8_t>(15));
-    RTX_CHECK_EQ(avio_tell(context.raw()), static_cast<int64_t>(16));
+    RTX_CHECK_EQ(avio_tell(io::memoryAvioRaw(context)), static_cast<int64_t>(16));
 
-    RTX_CHECK_EQ(avio_seek(context.raw(), 32, SEEK_SET), static_cast<int64_t>(32));
+    RTX_CHECK_EQ(avio_seek(io::memoryAvioRaw(context), 32, SEEK_SET), static_cast<int64_t>(32));
 // The *logical* position advances by 16; the underlying stream position has
 // already been refilled to the end of the 32 KB page.
-    RTX_CHECK_EQ(avio_read(context.raw(), buffer, 4), 4);
+    RTX_CHECK_EQ(avio_read(io::memoryAvioRaw(context), buffer, 4), 4);
     RTX_CHECK_EQ(buffer[0], static_cast<uint8_t>(32));
 // libavformat's avio_seek() itself accepts only SEEK_SET/SEEK_CUR; the
 // SEEK_END branch belongs to the callback and is probed separately below.
-    RTX_CHECK_EQ(avio_seek(context.raw(), -4, SEEK_CUR), static_cast<int64_t>(32));
-    RTX_CHECK_EQ(avio_seek(context.raw(), 248, SEEK_SET), static_cast<int64_t>(248));
-    RTX_CHECK_EQ(avio_read(context.raw(), buffer, 8), 8);
+    RTX_CHECK_EQ(avio_seek(io::memoryAvioRaw(context), -4, SEEK_CUR), static_cast<int64_t>(32));
+    RTX_CHECK_EQ(avio_seek(io::memoryAvioRaw(context), 248, SEEK_SET), static_cast<int64_t>(248));
+    RTX_CHECK_EQ(avio_read(io::memoryAvioRaw(context), buffer, 8), 8);
     RTX_CHECK_EQ(buffer[7], static_cast<uint8_t>(255));
-    RTX_CHECK_EQ(avio_size(context.raw()), static_cast<int64_t>(256));
+    RTX_CHECK_EQ(avio_size(io::memoryAvioRaw(context)), static_cast<int64_t>(256));
 
-    RTX_CHECK_EQ(avio_read(context.raw(), buffer, 8), AVERROR_EOF);
+    RTX_CHECK_EQ(avio_read(io::memoryAvioRaw(context), buffer, 8), AVERROR_EOF);
 
-    RTX_CHECK_EQ(avio_seek(context.raw(), -1, SEEK_SET), AVERROR(EINVAL));
+    RTX_CHECK_EQ(avio_seek(io::memoryAvioRaw(context), -1, SEEK_SET), AVERROR(EINVAL));
 // Reading past the tail is a clean EOF, not an error.
 
-    io::MemoryAvioContext tail(std::span<const uint8_t>(source.data(), source.size()));
+    auto tail = io::makeMemoryAvioRead(std::span<const uint8_t>(source.data(), source.size()));
 // A negative absolute seek is rejected by avio_seek().
-    RTX_REQUIRE(tail.valid());
-    RTX_CHECK_EQ(tail.raw()->seek(tail.raw()->opaque, -8, SEEK_END),
+    RTX_REQUIRE(io::memoryAvioValid(tail));
+    RTX_CHECK_EQ(io::memoryAvioRaw(tail)->seek(io::memoryAvioRaw(tail)->opaque, -8, SEEK_END),
 // The underlying callback must still answer SEEK_END for the avio_size()
 // fallback path used by non-seekable-looking custom contexts.
                  static_cast<int64_t>(248));
 }
 RTX_TEST(io_memory_avio_write) {
     std::vector<uint8_t> sink;
-    io::MemoryAvioContext context(&sink);
-    RTX_REQUIRE(context.valid());
-    RTX_CHECK(context.writable());
+    auto context = io::makeMemoryAvioWrite(&sink);
+    RTX_REQUIRE(io::memoryAvioValid(context));
+    RTX_CHECK(io::memoryAvioWritable(context));
 
     const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    avio_write(context.raw(), payload, 8);
-    avio_flush(context.raw());
+    avio_write(io::memoryAvioRaw(context), payload, 8);
+    avio_flush(io::memoryAvioRaw(context));
     RTX_REQUIRE(sink.size() == 8);
     RTX_CHECK_EQ(sink[0], static_cast<uint8_t>(1));
     RTX_CHECK_EQ(sink[7], static_cast<uint8_t>(8));
 
-    RTX_CHECK_EQ(avio_seek(context.raw(), 4, SEEK_SET), static_cast<int64_t>(4));
+    RTX_CHECK_EQ(avio_seek(io::memoryAvioRaw(context), 4, SEEK_SET), static_cast<int64_t>(4));
     const uint8_t patch[2] = {0xAA, 0xBB};
-    avio_write(context.raw(), patch, 2);
-    avio_flush(context.raw());
+    avio_write(io::memoryAvioRaw(context), patch, 2);
+    avio_flush(io::memoryAvioRaw(context));
 // Overwrite in place: a muxer back-patches box sizes this way.
     RTX_CHECK_EQ(sink.size(), static_cast<size_t>(8));
     RTX_CHECK_EQ(sink[4], static_cast<uint8_t>(0xAA));
     RTX_CHECK_EQ(sink[5], static_cast<uint8_t>(0xBB));
     RTX_CHECK_EQ(sink[6], static_cast<uint8_t>(7));
 
-    RTX_CHECK_EQ(avio_seek(context.raw(), 16, SEEK_SET), static_cast<int64_t>(16));
+    RTX_CHECK_EQ(avio_seek(io::memoryAvioRaw(context), 16, SEEK_SET), static_cast<int64_t>(16));
     const uint8_t tail[1] = {0x5A};
-    avio_write(context.raw(), tail, 1);
-    avio_flush(context.raw());
+    avio_write(io::memoryAvioRaw(context), tail, 1);
+    avio_flush(io::memoryAvioRaw(context));
 // Seeking past the tail extends the sink with zeroes (sparse write).
     RTX_CHECK_EQ(sink.size(), static_cast<size_t>(17));
     RTX_CHECK_EQ(sink[15], static_cast<uint8_t>(0));
     RTX_CHECK_EQ(sink[16], static_cast<uint8_t>(0x5A));
-    RTX_CHECK_EQ(avio_size(context.raw()), static_cast<int64_t>(17));
+    RTX_CHECK_EQ(avio_size(io::memoryAvioRaw(context)), static_cast<int64_t>(17));
 }
 RTX_TEST(io_memory_demux_parse) {
     std::vector<uint8_t> wav;
@@ -160,14 +160,14 @@ RTX_TEST(io_memory_demux_parse) {
     for (uint32_t i = 0; i < samples; ++i) {
         appendLe16(static_cast<uint16_t>(i * 97));
     }
-    std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(std::move(wav));
+    std::unique_ptr<FfmpegDemuxer> demuxer = makeMemoryDemuxer(std::move(wav));
     RTX_REQUIRE(demuxer != nullptr);
     const Result<MediaInfo> opened = demuxer->open("memory.wav");
     RTX_CHECK(!opened.has_value());
     RTX_CHECK_EQ(opened.error().code, ErrorCode::InvalidArgument);
     RTX_CHECK_EQ(demuxer->readPacket().error().code, ErrorCode::State);
 
-    std::unique_ptr<IDemuxer> garbage =
+    std::unique_ptr<FfmpegDemuxer> garbage =
         makeMemoryDemuxer(std::vector<uint8_t>(512, 0x7F));
     RTX_REQUIRE(garbage != nullptr);
     RTX_CHECK_EQ(garbage->open("memory.bin").error().code, ErrorCode::Io);
@@ -210,7 +210,7 @@ RTX_TEST(io_memory_container_round_trip) {
                                     0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA};
 
     std::vector<uint8_t> container;
-    std::unique_ptr<IMuxer> muxer = makeMemoryMuxer(&container, "matroska");
+    std::unique_ptr<FfmpegMuxer> muxer = makeMemoryMuxer(&container, "matroska");
     RTX_REQUIRE(muxer != nullptr);
     RTX_REQUIRE(muxer->open("memory.mkv", info, Hdr10Metadata{}).has_value());
 // Annex-B shaped payload: the demuxer detects the start code and therefore
@@ -228,7 +228,7 @@ RTX_TEST(io_memory_container_round_trip) {
     RTX_REQUIRE(muxer->finalize().has_value());
     RTX_CHECK(container.size() > 64);
 
-    std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(container);
+    std::unique_ptr<FfmpegDemuxer> demuxer = makeMemoryDemuxer(container);
     RTX_REQUIRE(demuxer != nullptr);
     const Result<MediaInfo> opened = demuxer->open("memory.mkv");
     RTX_REQUIRE(opened.has_value());
@@ -280,7 +280,7 @@ RTX_TEST(io_memory_bframe_pts_reordering) {
     const int64_t dts_order[] = {0, 40, 80, 120};
 
     std::vector<uint8_t> container;
-    std::unique_ptr<IMuxer> muxer = makeMemoryMuxer(&container, "matroska");
+    std::unique_ptr<FfmpegMuxer> muxer = makeMemoryMuxer(&container, "matroska");
     RTX_REQUIRE(muxer != nullptr);
     RTX_REQUIRE(muxer->open("bframe.mkv", info, Hdr10Metadata{}).has_value());
 
@@ -301,7 +301,7 @@ RTX_TEST(io_memory_bframe_pts_reordering) {
     }
     RTX_REQUIRE(muxer->finalize().has_value());
 
-    std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(container);
+    std::unique_ptr<FfmpegDemuxer> demuxer = makeMemoryDemuxer(container);
     RTX_REQUIRE(demuxer != nullptr);
     RTX_REQUIRE(demuxer->open("bframe.mkv").has_value());
 
@@ -365,14 +365,9 @@ RTX_TEST(io_memory_audio_video_stream_copy_roundtrip) {
     info.audio_streams = 1;
     info.primary_audio_index = 1;
 
-    PassthroughStreamInfo audio_ps;
-    audio_ps.stream_index = 1;
-    audio_ps.codec_type = 1;
-    audio_ps.codec_id = static_cast<int>(AV_CODEC_ID_PCM_S16LE);
-    audio_ps.codec_name = "pcm_s16le";
-    audio_ps.time_base = Rational{1, 1000};
-    audio_ps.opaque_codecpar = owned_audio_par;
-    info.passthrough_streams.push_back(audio_ps);
+    info.passthrough_streams.emplace_back(
+        1, 1, static_cast<int>(AV_CODEC_ID_PCM_S16LE), std::string("pcm_s16le"),
+        Rational{1, 1000}, owned_audio_par);
 
     std::vector<uint8_t> video_payload = {
         0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0C, 0x01, 0x11, 0x22, 0x33, 0x44
@@ -380,7 +375,7 @@ RTX_TEST(io_memory_audio_video_stream_copy_roundtrip) {
     std::vector<uint8_t> audio_payload(1920, 0x55); // 10 ms of 48kHz stereo S16LE
 
     std::vector<uint8_t> container;
-    std::unique_ptr<IMuxer> muxer = makeMemoryMuxer(&container, "matroska");
+    std::unique_ptr<FfmpegMuxer> muxer = makeMemoryMuxer(&container, "matroska");
     RTX_REQUIRE(muxer != nullptr);
     RTX_REQUIRE(muxer->open("av_roundtrip.mkv", info, Hdr10Metadata{}).has_value());
 
@@ -408,15 +403,17 @@ RTX_TEST(io_memory_audio_video_stream_copy_roundtrip) {
     RTX_REQUIRE(muxer->finalize().has_value());
     RTX_CHECK(container.size() > 512);
 
-    std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(container);
+    std::unique_ptr<FfmpegDemuxer> demuxer = makeMemoryDemuxer(container);
     RTX_REQUIRE(demuxer != nullptr);
     const Result<MediaInfo> opened = demuxer->open("av_roundtrip.mkv");
     RTX_REQUIRE(opened.has_value());
     RTX_CHECK_EQ(opened.value().audio_streams, 1);
     RTX_CHECK(opened.value().primary_audio_index >= 0);
     RTX_REQUIRE(!opened.value().audio_tracks.empty());
-    RTX_CHECK_EQ(opened.value().audio_tracks.front().sample_rate, 48000);
-    RTX_CHECK_EQ(opened.value().audio_tracks.front().channels, 2);
+    const auto& [at_idx, at_sr, at_ch, at_par] = opened.value().audio_tracks.front();
+    (void)at_idx; (void)at_par;
+    RTX_CHECK_EQ(at_sr, 48000);
+    RTX_CHECK_EQ(at_ch, 2);
 
     int video_read = 0;
     int audio_read = 0;
@@ -457,14 +454,9 @@ RTX_TEST(test_nvenc_cq_and_qp_config) {
     RTX_CHECK_EQ(qp_b, 26);
 }
 RTX_TEST(test_cpu_crf_encoder_10bit_hdr10) {
-    CpuEncoderConfig cfg{};
-    cfg.codec = VideoCodec::AV1;
-    cfg.width = 128;
-    cfg.height = 128;
-    cfg.crf = 20;
-    cfg.preset = 8;
-    cfg.hdr.enabled = true;
-    auto enc = CpuVideoEncoder::create(cfg);
+    Hdr10Metadata hdr{};
+    hdr.enabled = true;
+    auto enc = CpuVideoEncoder::create(VideoCodec::AV1, 128, 128, Rational{60, 1}, 20, 8, 0, hdr);
     if (!enc.has_value()) {
         RTX_CHECK(enc.error().code == ErrorCode::Unsupported || enc.error().code == ErrorCode::Internal);
         return;
@@ -513,7 +505,7 @@ RTX_TEST(io_display_matrix_passthrough_roundtrip) {
     out_info.display_matrix = kRot90;
     out_info.has_display_matrix = true;
 
-    std::unique_ptr<IMuxer> muxer = makeFfmpegMuxer();
+    std::unique_ptr<FfmpegMuxer> muxer = makeFfmpegMuxer();
     RTX_REQUIRE(muxer != nullptr);
     RTX_REQUIRE(muxer->open(mp4_path, out_info, Hdr10Metadata{}).has_value());
 
@@ -527,7 +519,7 @@ RTX_TEST(io_display_matrix_passthrough_roundtrip) {
     RTX_REQUIRE(muxer->writePacket(pkt).has_value());
     RTX_REQUIRE(muxer->finalize().has_value());
 
-    std::unique_ptr<IDemuxer> demuxer = makeFfmpegDemuxer();
+    std::unique_ptr<FfmpegDemuxer> demuxer = makeFfmpegDemuxer();
     RTX_REQUIRE(demuxer != nullptr);
     auto reopened = demuxer->open(mp4_path);
     RTX_REQUIRE(reopened.has_value());

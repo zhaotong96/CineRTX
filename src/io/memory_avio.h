@@ -1,78 +1,44 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 // Copyright (C) 2026 RTX Transcode Engine contributors
 //
-// In-memory AVIOContext wrapper (ACT-STATIC-03).
-//
-// The container layer must be verifiable without a single byte touching the
-// filesystem: the hermetic test suite muxes a container into a std::vector,
-// demuxes it back, and never creates a temporary file.  This class owns the
-// libavformat AVIOContext plus its 32 KB I/O page and implements the read /
-// write / seek callbacks over a span or a vector.
+// In-memory AVIOContext wrapper (ACT-STATIC-03 / Wave 12.2-D).
+// Owns libavformat AVIOContext plus its 32 KB I/O page via std::shared_ptr custom deleter.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
+#include <tuple>
 #include <vector>
 
-// Forward declaration only: the elaborated form below is used everywhere so the
-// header stays valid whether or not <libavformat/avio.h> was included first.
 struct AVIOContext;
 
 namespace rtx::io {
 
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-class MemoryAvioContext final {
-public:
-// 32 KB I/O page: one L2-friendly chunk per refill, matching libavformat's
-// default IO_BUFFER_SIZE class of workloads.
-    static constexpr size_t kPageSize = 32768;
+inline constexpr size_t kMemoryAvioPageSize = 32768;
 
-// Read-only view over caller-owned bytes.  The span must outlive the
-// context; the demuxer keeps the source vector alive for its own lifetime.
-    explicit MemoryAvioContext(std::span<const uint8_t> read_only_buf);
-    explicit MemoryAvioContext(std::span<const std::byte> read_only_buf);
+// Layout: (read_view, write_vec, pos, is_writable, avio_ctx).
+using MemoryAvioState = std::tuple<
+    std::span<const uint8_t>,
+    std::vector<uint8_t>*,
+    size_t,
+    bool,
+    struct AVIOContext*>;
 
-// Append/overwrite sink.  The vector is resized on demand and the context
-// never takes ownership of it.
-    explicit MemoryAvioContext(std::vector<uint8_t>* write_buf);
+// Phase 12 (Wave 12.2-D): std::shared_ptr<MemoryAvioState> with custom deleter replaces MemoryAvioContext class.
+using MemoryAvioContext = std::shared_ptr<MemoryAvioState>;
 
-    ~MemoryAvioContext();
+[[nodiscard]] MemoryAvioContext makeMemoryAvioRead(std::span<const uint8_t> read_only_buf);
+[[nodiscard]] MemoryAvioContext makeMemoryAvioRead(std::span<const std::byte> read_only_buf);
+[[nodiscard]] MemoryAvioContext makeMemoryAvioWrite(std::vector<uint8_t>* write_buf);
 
-    MemoryAvioContext(const MemoryAvioContext&) = delete;
-    MemoryAvioContext& operator=(const MemoryAvioContext&) = delete;
-    MemoryAvioContext(MemoryAvioContext&&) = delete;
-    MemoryAvioContext& operator=(MemoryAvioContext&&) = delete;
-
-    [[nodiscard]] struct AVIOContext* raw() const noexcept { return avio_ctx_; }
-    [[nodiscard]] bool valid() const noexcept { return avio_ctx_ != nullptr; }
-    [[nodiscard]] bool writable() const noexcept { return is_writable_; }
-    [[nodiscard]] size_t position() const noexcept { return pos_; }
-    [[nodiscard]] size_t size() const noexcept;
-    [[nodiscard]] bool isInitialized() const noexcept { return valid(); }
-
-// Marks the stream as seekable (AVIO_SEEKABLE_NORMAL).  libavformat leaves
-// avio_alloc_context() contexts non-seekable by default, and the mov /
-// matroska muxers refuse to finalise a non-seekable target.
-    void setSeekable(bool seekable) noexcept;
-
-private:
-    void initAvio(int write_flag);
-    void releaseAvio() noexcept;
-
-    static int readPacketCallback(void* opaque, uint8_t* buf, int buf_size) noexcept;
-    static int writePacketCallback(void* opaque, const uint8_t* buf, int buf_size) noexcept;
-    static int64_t seekCallback(void* opaque, int64_t offset, int whence) noexcept;
-
-    std::span<const uint8_t> read_view_{};
-    std::vector<uint8_t>* write_vec_{nullptr};
-    size_t pos_{0};
-    bool is_writable_{false};
-    struct AVIOContext* avio_ctx_{nullptr};
-};
+[[nodiscard]] struct AVIOContext* memoryAvioRaw(const MemoryAvioContext& ctx) noexcept;
+[[nodiscard]] bool memoryAvioValid(const MemoryAvioContext& ctx) noexcept;
+[[nodiscard]] bool memoryAvioWritable(const MemoryAvioContext& ctx) noexcept;
+[[nodiscard]] size_t memoryAvioPosition(const MemoryAvioContext& ctx) noexcept;
+[[nodiscard]] size_t memoryAvioSize(const MemoryAvioContext& ctx) noexcept;
+void memoryAvioSetSeekable(const MemoryAvioContext& ctx, bool seekable) noexcept;
 
 }  // namespace rtx::io

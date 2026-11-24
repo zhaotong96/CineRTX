@@ -10,14 +10,15 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <optional>
 #include <tuple>
 
+#include "rtx/playback_session.h"
 #include "shim/ngx_bridge_abi.h"
 
 namespace rtx {
 
 struct MediaInfo;
-class IVideoFrameSink;
 
 using PreviewSlotFlags = std::shared_ptr<std::array<std::atomic<std::uint32_t>, 3>>;
 
@@ -26,7 +27,7 @@ using PreviewSlotBorrow =
 
 using BorrowCallback = std::function<bool(std::uint32_t& slot, PreviewSlotBorrow& borrow)>;
 
-[[nodiscard]] std::unique_ptr<IVideoFrameSink> createHeadlessPreviewSink(
+[[nodiscard]] std::optional<VideoFrameSink> createHeadlessPreviewSink(
     const MediaInfo& info, std::function<void()> on_frame, BorrowCallback& out_borrow);
 
 // @rtx-type-justification

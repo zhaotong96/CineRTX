@@ -1,7 +1,7 @@
 # 18_CineRTX Phase 10 C++ 核心三大实测故障（无 CQ / 无音频 / 插帧失效）法医级解剖与 SuperPower 返工规范
 
 - **文档编号**：`DOC-P10-18`
-- **审计标的**：`Google Drive\work\CineRTX\` 下的 Phase 10 C++26 核心引擎、Win32 原生 GUI 与 CLI 源码（[`src/gui/workstation_canvas.cpp`](../../src/gui/workstation_canvas.cpp)、[`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp)、[`src/core/hw_transcode.cpp`](../../src/core/hw_transcode.cpp)、[`src/core/hw_transcode_internal.h`](../../src/core/hw_transcode_internal.h)、[`src/core/hw_transcode_stages.cpp`](../../src/core/hw_transcode_stages.cpp)、[`src/cli/main.cpp`](../../src/cli/main.cpp)、[`src/shim/loader/nv_encoder.cpp`](../../src/shim/loader/nv_encoder.cpp)）
+- **审计标的**：`workspace\work\CineRTX\` 下的 Phase 10 C++26 核心引擎、Win32 原生 GUI 与 CLI 源码（[`src/gui/workstation_canvas.cpp`](../../src/gui/workstation_canvas.cpp)、[`src/gui/rtx_gui.cpp`](../../src/gui/rtx_gui.cpp)、[`src/core/hw_transcode.cpp`](../../src/core/hw_transcode.cpp)、[`src/core/hw_transcode_internal.h`](../../src/core/hw_transcode_internal.h)、[`src/core/hw_transcode_stages.cpp`](../../src/core/hw_transcode_stages.cpp)、[`src/cli/main.cpp`](../../src/cli/main.cpp)、[`src/shim/loader/nv_encoder.cpp`](../../src/shim/loader/nv_encoder.cpp)）
 - **关联前置规范**：[`15_CineRTX_Phase10_全栈收官终审驳回裁决暨C++主干合龙SuperPower返工规范.md`](15_CineRTX_Phase10_全栈收官终审驳回裁决暨C++主干合龙SuperPower返工规范.md)
 - **签发角色**：多媒体系统工程与 GPU 异构计算首席领域专家（Chief Domain Expert）
 - **审计日期**：2026-11-18

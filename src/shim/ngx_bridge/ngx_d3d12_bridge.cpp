@@ -12,6 +12,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <format>
 
 #include <d3d12.h>
 
@@ -72,10 +73,7 @@ T* as(void* pointer) {
     return static_cast<T*>(pointer);
 }
 std::string ngxResultText(const char* call, NVSDK_NGX_Result result) {
-    char text[160] = {};
-    std::snprintf(text, sizeof(text), "%s failed (NVSDK_NGX_Result 0x%08X)", call,
-                  static_cast<unsigned int>(result));
-    return text;
+    return std::format("{} failed (NVSDK_NGX_Result 0x{:08X})", call, static_cast<unsigned int>(result));
 }
 bool fileExists(const std::wstring& path) {
     const DWORD attributes = GetFileAttributesW(path.c_str());
@@ -99,16 +97,13 @@ std::wstring makeAppDataDirectory(const std::wstring& fallback) {
         return directory;
     };
     wchar_t buffer[32768] = {};
-    DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, 32768);
+    const DWORD length = GetTempPathW(32768, buffer);
     if (length > 0 && length < 32768) {
-        std::wstring directory = prepare(buffer, L"ngx");
-        if (!directory.empty()) {
-            return directory;
+        std::wstring base(buffer, length);
+        while (!base.empty() && (base.back() == L'\\' || base.back() == L'/')) {
+            base.pop_back();
         }
-    }
-    length = GetEnvironmentVariableW(L"TEMP", buffer, 32768);
-    if (length > 0 && length < 32768) {
-        std::wstring directory = prepare(buffer, L"RTXTranscode_ngx");
+        std::wstring directory = prepare(base.c_str(), L"ngx");
         if (!directory.empty()) {
             return directory;
         }
@@ -307,11 +302,7 @@ bool NgxD3D12Bridge::create(D3D12Interop& interop, const RtxNgxBridgeConfig& con
     if (!interop.flush_queue(&flush_error)) {
         return fail("NGX feature creation submission failed: " + flush_error);
     }
-    char text[256] = {};
-    std::snprintf(text, sizeof(text),
-                  "NGX ready: %dx%d -> %dx%d, VSR quality %d, TrueHDR %s, mid texture %s",
-                  input_width_, input_height_, output_width_, output_height_, vsr_quality_,
-                  needs_truehdr_ ? "on" : "off", needs_mid_ ? "RGBA8 4K" : "unused");
+    const std::string text = std::format("NGX ready: {}x{} -> {}x{}, VSR quality {}, TrueHDR {}, mid texture {}", input_width_, input_height_, output_width_, output_height_, vsr_quality_, needs_truehdr_ ? "on" : "off", needs_mid_ ? "RGBA8 4K" : "unused");
     diagnostics_ = text;
     initialized_ = true;
     return true;
@@ -340,11 +331,7 @@ bool NgxD3D12Bridge::create_features(std::string* error) {
             return false;
         }
         if (scratch != 0) {
-            char text[96] = {};
-            std::snprintf(text, sizeof(text),
-                          "%s unexpectedly needs %llu scratch bytes", name,
-                          static_cast<unsigned long long>(scratch));
-            *error = text;
+            *error = std::format("{} unexpectedly needs {} scratch bytes", name, static_cast<unsigned long long>(scratch));
             return false;
         }
         NVSDK_NGX_Feature_Create_Params create{};
@@ -411,9 +398,9 @@ bool NgxD3D12Bridge::process(uint64_t input_fence_value, std::string* error, boo
         *error = "resetting the NGX command list failed";
         return false;
     }
-    ID3D12Resource* input = as<ID3D12Resource>(interop_->input().resource);
-    ID3D12Resource* output = as<ID3D12Resource>(interop_->output().resource);
-    ID3D12Resource* mid = needs_mid_ ? as<ID3D12Resource>(interop_->mid().resource) : nullptr;
+    ID3D12Resource* input = as<ID3D12Resource>(interop_->input_resource());
+    ID3D12Resource* output = as<ID3D12Resource>(interop_->output_resource());
+    ID3D12Resource* mid = needs_mid_ ? as<ID3D12Resource>(interop_->mid_resource()) : nullptr;
     const int common = static_cast<int>(D3D12_RESOURCE_STATE_COMMON);
     const int srv = static_cast<int>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     const int uav = static_cast<int>(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -704,13 +691,13 @@ bool NgxD3D12Bridge::create_sdr_blit(std::string* error) {
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv_desc.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(as<ID3D12Resource>(interop_->mid().resource), &srv_desc, cpu_handle);
+    device->CreateShaderResourceView(as<ID3D12Resource>(interop_->mid_resource()), &srv_desc, cpu_handle);
 
     cpu_handle.ptr += inc_size;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc{};
     uav_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     uav_desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    device->CreateUnorderedAccessView(as<ID3D12Resource>(interop_->output().resource), nullptr, &uav_desc, cpu_handle);
+    device->CreateUnorderedAccessView(as<ID3D12Resource>(interop_->output_resource()), nullptr, &uav_desc, cpu_handle);
 
     return true;
 }

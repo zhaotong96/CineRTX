@@ -47,7 +47,7 @@
 ## 三、 阻塞项与宿主机合龙收尾指令
 
 1. **物理删除 `scripts/` 与 `schema/` 目录（Drive API 无删除权限）**：
-   - 本离线环境无 Google Drive 删除工具与 Git 写权限，且严禁触碰根 `CMakeLists.txt` 与 `cmake/`。
+   - 本离线环境无 workspace 删除工具与 Git 写权限，且严禁触碰根 `CMakeLists.txt` 与 `cmake/`。
    - 请协调负责人在本地宿主机同步后执行以下清理与 CMake 合龙命令：
      ```powershell
      # 1. 移除废弃目录与 .pre39.bak 替换备份

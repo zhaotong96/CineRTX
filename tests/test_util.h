@@ -73,7 +73,7 @@ inline Result<void> allocateTestFrame(Frame& frame, int frame_width, int frame_h
         return err(ErrorCode::InvalidArgument, "unsupported frame format");
     }
     auto buffer = std::make_shared<FrameBuffer>();
-    const Result<void> status = buffer->allocate(total, alignment);
+    const Result<void> status = allocateFrameBuffer(*buffer, total, alignment);
     if (!status.has_value()) {
         return std::unexpected(status.error());
     }
@@ -85,7 +85,7 @@ inline Result<void> allocateTestFrame(Frame& frame, int frame_width, int frame_h
     frame.chroma_height = local_chroma_height;
     frame.storage = std::move(buffer);
 
-    uint8_t* base = frame.storage->data();
+    uint8_t* base = frameBufferData(*frame.storage);
     frame.planes[0] = base;
     frame.planes[1] = nullptr;
     frame.planes[2] = nullptr;

@@ -80,11 +80,7 @@ inline constexpr int CU_MEMORYTYPE_DEVICE = 2;
 inline constexpr int CU_MEMORYTYPE_ARRAY = 3;
 inline constexpr int CU_MEMORYTYPE_UNIFIED = 4;
 
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_MEMCPY2D {
+typedef struct CUDA_MEMCPY2D_st {
     size_t srcXInBytes = 0;
     size_t srcY = 0;
     int srcMemoryType = 0;
@@ -103,124 +99,7 @@ struct CUDA_MEMCPY2D {
 
     size_t WidthInBytes = 0;
     size_t Height = 0;
-};
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_ARRAY3D_DESCRIPTOR {
-    size_t Width = 0;
-    size_t Height = 0;
-    size_t Depth = 0;
-    unsigned int Format = 0;
-    unsigned int NumChannels = 0;
-    unsigned int Flags = 0;
-};
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
-    int type = 0;
-    union {
-        int fd;
-        struct {
-            void* handle;
-            const void* name;
-        } win32;
-        const void* nvSciBufObject;
-    } handle = {};
-    unsigned long long size = 0;
-    unsigned int flags = 0;
-    unsigned int reserved[16] = {};
-};
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC {
-    unsigned long long offset = 0;
-    CUDA_ARRAY3D_DESCRIPTOR arrayDesc{};
-    unsigned int numLevels = 0;
-    unsigned int reserved[16] = {};
-};
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_EXTERNAL_MEMORY_BUFFER_DESC {
-    unsigned long long offset = 0;
-    unsigned long long size = 0;
-    unsigned int flags = 0;
-    unsigned int reserved[16] = {};
-};
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC {
-    int type = 0;
-    union {
-        int fd;
-        struct {
-            void* handle;
-            const void* name;
-        } win32;
-        const void* nvSciSyncObj;
-    } handle = {};
-    unsigned int flags = 0;
-    unsigned int reserved[16] = {};
-};
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS {
-    struct {
-        struct {
-            unsigned long long value;
-        } fence;
-        union {
-            void* fence;
-            unsigned long long reserved;
-        } nvSciSync;
-        struct {
-            unsigned long long key;
-        } keyedMutex;
-        unsigned int reserved[12];
-    } params;
-    unsigned int flags;
-    unsigned int reserved[16];
-};
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS {
-    struct {
-        struct {
-            unsigned long long value;
-        } fence;
-        union {
-            void* fence;
-            unsigned long long reserved;
-        } nvSciSync;
-        struct {
-            unsigned long long key;
-            unsigned int timeoutMs;
-        } keyedMutex;
-        unsigned int reserved[10];
-    } params;
-    unsigned int flags;
-    unsigned int reserved[16];
-};
+} CUDA_MEMCPY2D;
 
 // @rtx-type-justification
 // Category: C-ABI
@@ -258,20 +137,6 @@ struct DriverTable {
     using PFN_cuEventSynchronize = CUresult (*)(CUevent);
     using PFN_cuEventQuery = CUresult (*)(CUevent);
     using PFN_cuEventDestroy = CUresult (*)(CUevent);
-    using PFN_cuImportExternalMemory = CUresult (*)(CUexternalMemory*, const CUDA_EXTERNAL_MEMORY_HANDLE_DESC*);
-    using PFN_cuExternalMemoryGetMappedMipmappedArray =
-        CUresult (*)(CUmipmappedArray*, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC*);
-    using PFN_cuExternalMemoryGetMappedBuffer =
-        CUresult (*)(CUdeviceptr*, CUexternalMemory, const CUDA_EXTERNAL_MEMORY_BUFFER_DESC*);
-    using PFN_cuDestroyExternalMemory = CUresult (*)(CUexternalMemory);
-    using PFN_cuImportExternalSemaphore = CUresult (*)(CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC*);
-    using PFN_cuDestroyExternalSemaphore = CUresult (*)(CUexternalSemaphore);
-    using PFN_cuSignalExternalSemaphoresAsync =
-        CUresult (*)(const CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS*, unsigned int, CUstream);
-    using PFN_cuWaitExternalSemaphoresAsync =
-        CUresult (*)(const CUexternalSemaphore*, const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS*, unsigned int, CUstream);
-    using PFN_cuMipmappedArrayGetLevel = CUresult (*)(CUarray*, CUmipmappedArray, unsigned int);
-    using PFN_cuMipmappedArrayDestroy = CUresult (*)(CUmipmappedArray);
     using PFN_cuSurfObjectCreate = CUresult (*)(CUsurfObject*, const void*);
     using PFN_cuSurfObjectDestroy = CUresult (*)(CUsurfObject);
 
@@ -306,16 +171,16 @@ struct DriverTable {
     PFN_cuEventSynchronize cuEventSynchronize = nullptr;
     PFN_cuEventQuery cuEventQuery = nullptr;
     PFN_cuEventDestroy cuEventDestroy = nullptr;
-    PFN_cuImportExternalMemory cuImportExternalMemory = nullptr;
-    PFN_cuExternalMemoryGetMappedMipmappedArray cuExternalMemoryGetMappedMipmappedArray = nullptr;
-    PFN_cuExternalMemoryGetMappedBuffer cuExternalMemoryGetMappedBuffer = nullptr;
-    PFN_cuDestroyExternalMemory cuDestroyExternalMemory = nullptr;
-    PFN_cuImportExternalSemaphore cuImportExternalSemaphore = nullptr;
-    PFN_cuDestroyExternalSemaphore cuDestroyExternalSemaphore = nullptr;
-    PFN_cuSignalExternalSemaphoresAsync cuSignalExternalSemaphoresAsync = nullptr;
-    PFN_cuWaitExternalSemaphoresAsync cuWaitExternalSemaphoresAsync = nullptr;
-    PFN_cuMipmappedArrayGetLevel cuMipmappedArrayGetLevel = nullptr;
-    PFN_cuMipmappedArrayDestroy cuMipmappedArrayDestroy = nullptr;
+    void* cuImportExternalMemory = nullptr;
+    void* cuExternalMemoryGetMappedMipmappedArray = nullptr;
+    void* cuExternalMemoryGetMappedBuffer = nullptr;
+    void* cuDestroyExternalMemory = nullptr;
+    void* cuImportExternalSemaphore = nullptr;
+    void* cuDestroyExternalSemaphore = nullptr;
+    void* cuSignalExternalSemaphoresAsync = nullptr;
+    void* cuWaitExternalSemaphoresAsync = nullptr;
+    void* cuMipmappedArrayGetLevel = nullptr;
+    void* cuMipmappedArrayDestroy = nullptr;
     PFN_cuSurfObjectCreate cuSurfObjectCreate = nullptr;
     PFN_cuSurfObjectDestroy cuSurfObjectDestroy = nullptr;
 
@@ -336,55 +201,12 @@ inline constexpr NVENCSTATUS NV_ENC_SUCCESS = 0;
 using PFN_NvEncodeAPICreateInstance = NVENCSTATUS (*)(void*);
 using PFN_NvEncodeAPIGetMaxSupportedVersion = NVENCSTATUS (*)(uint32_t*);
 
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct Table {
-    PFN_NvEncodeAPICreateInstance createInstance = nullptr;
-    PFN_NvEncodeAPIGetMaxSupportedVersion getMaxSupportedVersion = nullptr;
-    bool resolve(const DynLibrary& library, std::string* error = nullptr);
-};
-
 }  // namespace rtx_shim::nvenc
 
 namespace rtx_shim::ngx {
 
-using PFN_Init = int (*)(const char*, const char*, const char*, int, void*, void*);
-using PFN_AllocateParameters = int (*)(void**, int);
-using PFN_GetScratchBufferSize = int (*)(int, uint64_t*);
-using PFN_CreateFeature = int (*)(void*, int, void*, void**);
-using PFN_EvaluateFeature = int (*)(void*, void*, void*, void*);
-using PFN_ReleaseParameters = int (*)(void*);
-using PFN_DestroyFeature = int (*)(void*);
-using PFN_Shutdown = int (*)(void);
-using PFN_ParameterSetUI = int (*)(void*, const char*, unsigned int);
-using PFN_ParameterSetI = int (*)(void*, const char*, int);
-using PFN_ParameterSetF = int (*)(void*, const char*, float);
-using PFN_ParameterSetD = int (*)(void*, const char*, double);
-using PFN_ParameterSetULL = int (*)(void*, const char*, unsigned long long);
-
-// @rtx-type-justification
-// Category: C-ABI
-// Why-Std-Fails: extern "C" 跨模块导出结构/函数指针表：字段序与调用约定即 shim C ABI 契约，std::function/std::tuple 无法表达 C 布局承诺。
-// Invariant: 字段序、对齐与函数指针签名与 ABI 头逐字对应；append-only，禁止重排字段。
-struct Table {
-    PFN_Init init = nullptr;
-    PFN_AllocateParameters allocateParameters = nullptr;
-    PFN_GetScratchBufferSize getScratchBufferSize = nullptr;
-    PFN_CreateFeature createFeature = nullptr;
-    PFN_EvaluateFeature evaluateFeature = nullptr;
-    PFN_ReleaseParameters releaseParameters = nullptr;
-    PFN_DestroyFeature destroyFeature = nullptr;
-    PFN_Shutdown shutdown = nullptr;
-    PFN_ParameterSetUI setUI = nullptr;
-    PFN_ParameterSetI setI = nullptr;
-    PFN_ParameterSetF setF = nullptr;
-    PFN_ParameterSetD setD = nullptr;
-    PFN_ParameterSetULL setULL = nullptr;
-
-    bool resolve(const DynLibrary& library, std::string* error = nullptr);
-};
+// Phase 12 (Wave 12.2-C): free export verifier replaces passive ngx::Table struct.
+bool resolveExports(const DynLibrary& library, std::string* error = nullptr);
 
 }  // namespace rtx_shim::ngx
 

@@ -8,6 +8,7 @@
 #include "rtx/i18n.h"
 
 #include <algorithm>
+#include <format>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -481,9 +482,7 @@ std::string escapeJsonUtf8(std::string_view input) {
         } else if (c == '\t') {
             out += "\\t";
         } else if (c < 0x20) {
-            char buf[8] = {};
-            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-            out += buf;
+            out += std::format("\\u{:04x}", static_cast<unsigned int>(c));
         } else {
             out.push_back(raw);
         }

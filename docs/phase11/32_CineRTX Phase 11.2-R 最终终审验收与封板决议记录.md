@@ -49,7 +49,7 @@
     ```
     [==========] 128 test(s) run, 0 failed (114266 ms)
     ```
-  * **测试 2（项目根目录直接调用）**：`C:\PUBLIC\CineRTX\.vs\build\cmake\windows-msvc-ninja\rtx_tests.exe`：
+  * **测试 2（项目根目录直接调用）**：`[REDACTED_PATH]\.vs\build\cmake\windows-msvc-ninja\rtx_tests.exe`：
     ```
     [ RUN      ] playback_session_fence_gated_slot_retirement
     [       OK ] playback_session_fence_gated_slot_retirement

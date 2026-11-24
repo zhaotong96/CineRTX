@@ -15,51 +15,48 @@ using rtx::gui::computeViewportVsrTarget;
 using rtx::gui::formatFlicksTimecode;
 
 RTX_TEST(gui_vsr_scale_2x) {
-// Spec reference: a 1920x1080 source in a 3840x2160 viewport scales 2.00x.
-    const auto target = computeViewportVsrTarget(1920, 1080, 3840, 2160);
-    RTX_CHECK(target.vsr_active);
-    RTX_CHECK_EQ(target.scale, 2.0);
-    RTX_CHECK_EQ(target.target_width, 3840);
-    RTX_CHECK_EQ(target.target_height, 2160);
+    const auto [tw, th, sc, act] = computeViewportVsrTarget(1920, 1080, 3840, 2160);
+    RTX_CHECK(act);
+    RTX_CHECK_EQ(sc, 2.0);
+    RTX_CHECK_EQ(tw, 3840);
+    RTX_CHECK_EQ(th, 2160);
 }
 RTX_TEST(gui_vsr_scale_portrait_1_6875) {
-    const auto target = computeViewportVsrTarget(720, 1280, 3840, 2160);
-// Spec reference: a 720x1280 portrait source in a 3840x2160 viewport
-// scales 1.6875x -> 1216x2160.
-    RTX_CHECK(target.vsr_active);
-    RTX_CHECK_EQ(target.scale, 1.6875);
-    RTX_CHECK_EQ(target.target_width, 1216);
-    RTX_CHECK_EQ(target.target_height, 2160);
+    const auto [tw, th, sc, act] = computeViewportVsrTarget(720, 1280, 3840, 2160);
+    RTX_CHECK(act);
+    RTX_CHECK_EQ(sc, 1.6875);
+    RTX_CHECK_EQ(tw, 1216);
+    RTX_CHECK_EQ(th, 2160);
 }
 RTX_TEST(gui_vsr_bypass_below_unity) {
-    const auto down = computeViewportVsrTarget(3840, 2160, 1920, 1080);
-    RTX_CHECK(!down.vsr_active);
-// Scale <= 1.0 must bypass VSR and keep the source geometry untouched.
-    RTX_CHECK_EQ(down.scale, 0.5);
-    RTX_CHECK_EQ(down.target_width, 3840);
-    RTX_CHECK_EQ(down.target_height, 2160);
+    const auto [dw, dh, dsc, dact] = computeViewportVsrTarget(3840, 2160, 1920, 1080);
+    RTX_CHECK(!dact);
+    RTX_CHECK_EQ(dsc, 0.5);
+    RTX_CHECK_EQ(dw, 3840);
+    RTX_CHECK_EQ(dh, 2160);
 
-    const auto unity = computeViewportVsrTarget(1920, 1080, 1920, 1080);
-    RTX_CHECK(!unity.vsr_active);
-    RTX_CHECK_EQ(unity.scale, 1.0);
-    RTX_CHECK_EQ(unity.target_width, 1920);
-    RTX_CHECK_EQ(unity.target_height, 1080);
+    const auto [uw, uh, usc, uact] = computeViewportVsrTarget(1920, 1080, 1920, 1080);
+    RTX_CHECK(!uact);
+    RTX_CHECK_EQ(usc, 1.0);
+    RTX_CHECK_EQ(uw, 1920);
+    RTX_CHECK_EQ(uh, 1080);
 }
 RTX_TEST(gui_vsr_degenerate_inputs) {
-    const auto zero = computeViewportVsrTarget(0, 0, 1920, 1080);
-    RTX_CHECK(!zero.vsr_active);
-    const auto negative = computeViewportVsrTarget(1920, 1080, -1, 540);
-    RTX_CHECK(!negative.vsr_active);
+    const auto [zw, zh, zsc, zact] = computeViewportVsrTarget(0, 0, 1920, 1080);
+    (void)zw; (void)zh; (void)zsc;
+    RTX_CHECK(!zact);
+    const auto [nw, nh, nsc, nact] = computeViewportVsrTarget(1920, 1080, -1, 540);
+    (void)nw; (void)nh; (void)nsc;
+    RTX_CHECK(!nact);
 }
 RTX_TEST(gui_vsr_even_alignment) {
     for (int src_w = 637; src_w < 700; ++src_w) {
         for (int src_h = 359; src_h < 400; ++src_h) {
-            const auto target = computeViewportVsrTarget(src_w, src_h, 3840, 2160);
-            if (target.vsr_active) {
-// Every recomputed target dimension must be even-aligned (NVENC + NGX
-// require 2-alignment).
-                RTX_CHECK_EQ(target.target_width % 2, 0);
-                RTX_CHECK_EQ(target.target_height % 2, 0);
+            const auto [tw, th, sc, act] = computeViewportVsrTarget(src_w, src_h, 3840, 2160);
+            (void)sc;
+            if (act) {
+                RTX_CHECK_EQ(tw % 2, 0);
+                RTX_CHECK_EQ(th % 2, 0);
             }
         }
     }
@@ -71,42 +68,32 @@ RTX_TEST(gui_flicks_timebase) {
     RTX_CHECK_EQ(duration_cast<rtx::Flicks>(milliseconds(0)).count(), 0LL);
 }
 RTX_TEST(gui_format_vsr_scale) {
-// WebUI parity: FLICKS_PER_MS = 705600; 1 s = 705,600,000 flicks.
     RTX_CHECK(rtx::gui::formatVsrScale(1.6875f) == std::wstring(L"1.6875x"));
     RTX_CHECK(rtx::gui::formatVsrScale(2.0f) == std::wstring(L"2.00x"));
     RTX_CHECK(rtx::gui::formatVsrScale(0.64f) == std::wstring(L"0.64x"));
     RTX_CHECK(rtx::gui::formatVsrScale(1.0f) == std::wstring(L"1.00x"));
     RTX_CHECK(rtx::gui::formatVsrScale(0.5f) == std::wstring(L"0.50x"));
 }
-// RW-3 fix: exact scale formatting — no %.2f truncation of 1.6875.
 RTX_TEST(gui_probe_media_file) {
-    const auto missing = rtx::gui::probeMediaFile(
+    const auto [mw, mh, mdur, mok] = rtx::gui::probeMediaFile(
         std::filesystem::temp_directory_path() / "rtx_gui_probe_missing_media.mp4");
-    RTX_CHECK(!missing.ok);
-    RTX_CHECK_EQ(missing.width, 1920);
-    RTX_CHECK_EQ(missing.height, 1080);
-    RTX_CHECK_EQ(missing.duration_flicks, rtx::gui::kDefaultTimelineSpan.count());
+    RTX_CHECK(!mok);
+    RTX_CHECK_EQ(mw, 1920);
+    RTX_CHECK_EQ(mh, 1080);
+    RTX_CHECK_EQ(mdur, rtx::gui::kDefaultTimelineSpan.count());
 
-// RW-2 fix: probe failures fall back to the canonical baseline geometry
-// and the kDefaultTimelineSpan duration instead of lying about real dimensions.
-    const auto empty = rtx::gui::probeMediaFile(std::filesystem::path{});
-    RTX_CHECK(!empty.ok);
-    RTX_CHECK_EQ(empty.width, 1920);
+    const auto [ew, eh, edur, eok] = rtx::gui::probeMediaFile(std::filesystem::path{});
+    (void)eh; (void)edur;
+    RTX_CHECK(!eok);
+    RTX_CHECK_EQ(ew, 1920);
 }
 RTX_TEST(gui_active_vsr_target_state) {
-    rtx::gui::DynamicVsrTarget probe{};
-    probe.scale = 1.6875;
-    probe.target_width = 1216;
-    probe.target_height = 2160;
-    probe.vsr_active = true;
-    rtx::gui::storeActiveVsrTarget(probe);
-    const auto& stored = rtx::gui::activeVsrTarget();
-    RTX_CHECK_EQ(stored.scale, 1.6875);
-// RW-3 fix: the recomputed target is stored state, consumable by the
-// preview / quick-play pipelines.
-    RTX_CHECK_EQ(stored.target_width, 1216);
-    RTX_CHECK_EQ(stored.target_height, 2160);
-    RTX_CHECK(stored.vsr_active);
+    rtx::gui::storeActiveVsrTarget({1216, 2160, 1.6875, true});
+    const auto& [tw, th, sc, act] = rtx::gui::activeVsrTarget();
+    RTX_CHECK_EQ(sc, 1.6875);
+    RTX_CHECK_EQ(tw, 1216);
+    RTX_CHECK_EQ(th, 2160);
+    RTX_CHECK(act);
 }
 RTX_TEST(gui_flicks_timecode_format) {
     using namespace std::chrono;

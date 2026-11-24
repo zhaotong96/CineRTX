@@ -3,7 +3,7 @@
 //
 // Modern C++23 std::expected error model for CineRTX.
 // Control plane: Error with explicit message & detail (zero heap allocation on success path)
-// Data plane: FastError (8B trivial, register passing)
+// Data plane: std::pair<ErrorCode, std::int32_t> (8B trivial, register passing)
 
 #pragma once
 
@@ -45,28 +45,13 @@ enum class ErrorCode : int {
 
 [[nodiscard]] const char* errorCodeName(ErrorCode code) noexcept;
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct FastError {
-    ErrorCode code{ErrorCode::Internal};
-    std::int32_t vendor_status{0};
-
-    constexpr FastError() noexcept = default;
-    constexpr explicit FastError(ErrorCode c, std::int32_t vs = 0) noexcept
-        : code(c), vendor_status(vs) {}
-    constexpr bool operator==(const FastError&) const noexcept = default;
-};
-static_assert(sizeof(FastError) == 8);
-
 template <typename T>
-using HotResult = std::expected<T, FastError>;
+using HotResult = std::expected<T, std::pair<ErrorCode, std::int32_t>>;
 
 // @rtx-type-justification
 // Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
+// Why-Std-Fails: 控制面错误载体需组合 ErrorCode、vendor_status、双层诊断文本及 std::source_location 与 toString() 格式化方法，std::error_code 无法携带动态厂商上下文。
+// Invariant: code 为受控枚举值；location 默认锚定出错调用点；toString() 永不返回空串。
 struct Error {
     ErrorCode code{ErrorCode::Internal};
     std::int32_t vendor_status{0};
@@ -75,8 +60,8 @@ struct Error {
     std::source_location location{std::source_location::current()};
 
     constexpr Error() noexcept = default;
-    constexpr explicit Error(FastError fast) noexcept
-        : code(fast.code), vendor_status(fast.vendor_status) {}
+    constexpr explicit Error(std::pair<ErrorCode, std::int32_t> fast) noexcept
+        : code(fast.first), vendor_status(fast.second) {}
 
     Error(ErrorCode c, std::string msg, std::string det = {},
           std::source_location loc = std::source_location::current())
@@ -94,6 +79,8 @@ using Result = std::expected<T, Error>;
     return std::unexpected<Error>(Error{code, std::move(msg), std::move(det), loc});
 }
 [[nodiscard]] constexpr auto fastErr(ErrorCode code, std::int32_t vendor_status = 0) noexcept {
-    return std::unexpected<FastError>(FastError{code, vendor_status});
+    return std::unexpected<std::pair<ErrorCode, std::int32_t>>(
+        std::pair<ErrorCode, std::int32_t>{code, vendor_status});
 }
+
 }  // namespace rtx

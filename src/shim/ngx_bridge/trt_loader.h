@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT OR Apache-2.0
  * Copyright (c) 2026 RTX Transcode Engine contributors
  *
- * Dynamic loader and version gate for TensorRT 10.13.3.9 runtime and ONNX parser.
+ * Dynamic loader for TensorRT 10.13.3.9 (nvinfer_10.dll & nvonnxparser_10.dll).
+ * Phase 12 (Wave 12.2-B1): zero-class free-function namespace dispatch.
  */
 
 #ifndef RTX_NGX_BRIDGE_TRT_LOADER_H
@@ -10,47 +11,22 @@
 #include <cstdint>
 #include <string>
 
-namespace rtx_ngx {
+namespace rtx_ngx::trt_loader {
 
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-class TrtLoader {
-public:
-    static constexpr int32_t kExpectedTrtVersion = 101303;  // (10 * 10000) + (13 * 100) + 3
+[[nodiscard]] bool loadRuntime(std::string* error = nullptr);
+[[nodiscard]] bool loadParser(std::string* error = nullptr);
 
-    static TrtLoader& instance();
+[[nodiscard]] bool isRuntimeLoaded() noexcept;
+[[nodiscard]] bool isParserLoaded() noexcept;
+[[nodiscard]] int32_t getVersion() noexcept;
 
-    bool loadRuntime(std::string* error = nullptr);
-    bool loadParser(std::string* error = nullptr);
+[[nodiscard]] void* createInferRuntime(void* logger) noexcept;
+[[nodiscard]] void* createInferBuilder(void* logger) noexcept;
+[[nodiscard]] void* createNvOnnxParser(void* network, void* logger) noexcept;
 
-    bool isRuntimeLoaded() const noexcept;
-    bool isParserLoaded() const noexcept;
+/* Single shared nvinfer1::ILogger instance (defined in rife_builder.cpp). */
+[[nodiscard]] void* rifeTrtLogger() noexcept;
 
-    int32_t getVersion() const noexcept;
-
-    void* createInferRuntime(void* logger);
-    void* createInferBuilder(void* logger);
-    void* createNvOnnxParser(void* network, void* logger);
-
-private:
-    TrtLoader() = default;
-    ~TrtLoader();
-    TrtLoader(const TrtLoader&) = delete;
-    TrtLoader& operator=(const TrtLoader&) = delete;
-
-    void* hNvInfer_ = nullptr;
-    void* hNvOnnxParser_ = nullptr;
-    int32_t version_ = 0;
-    std::wstring trtDir_;
-
-    void* (*createInferRuntime_INTERNAL_)(void* logger, int32_t version) = nullptr;
-    void* (*createInferBuilder_INTERNAL_)(void* logger, int32_t version) = nullptr;
-    int32_t (*getInferLibVersion_)() = nullptr;
-    void* (*createNvOnnxParser_INTERNAL_)(void* network, void* logger, int32_t version) = nullptr;
-};
-
-}  // namespace rtx_ngx
+}  // namespace rtx_ngx::trt_loader
 
 #endif  // RTX_NGX_BRIDGE_TRT_LOADER_H

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <tuple>
 
 namespace rtx {
 
@@ -12,37 +13,13 @@ enum class GeometryTargetMode : int32_t {
     Pillarbox = 1,   // Mode B: 3840x2160 canvas, center effective video with studio black padding
 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct GeometryResult {
-    int canvas_width = 3840;
-    int canvas_height = 2160;
-    int scaled_width = 3840;
-    int scaled_height = 2160;
-    int offset_x = 0;
-    int offset_y = 0;
-    int pillarbox_left = 0;
-    int pillarbox_right = 0;
-    bool is_portrait = false;
-};
+// Phase 12 (Wave 12.2-B2): tuple alias replaces passive GeometryResult bag.
+// (canvas_width, canvas_height, scaled_width, scaled_height,
+//  offset_x, offset_y, pillarbox_left, pillarbox_right, is_portrait)
+using GeometryResult = std::tuple<int, int, int, int, int, int, int, int, bool>;
 
 GeometryResult calculateSmartGeometry(int src_w, int src_h,
                                       GeometryTargetMode mode = GeometryTargetMode::AutoDirect,
                                       int user_target_w = 0, int user_target_h = 0);
-
-// Backward-compatibility alias
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct SmartGeometryCalculator {
-    static GeometryResult calculate(int src_w, int src_h,
-                                    GeometryTargetMode mode = GeometryTargetMode::AutoDirect,
-                                    int user_target_w = 0, int user_target_h = 0) {
-        return calculateSmartGeometry(src_w, src_h, mode, user_target_w, user_target_h);
-    }
-};
 
 }  // namespace rtx

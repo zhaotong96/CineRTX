@@ -6,18 +6,16 @@
 
 namespace rtx {
 
-ShotTransitionDecision ShotGroupSegmenter::evaluate(
+ShotTransitionDecision evaluateShot(
+    ShotGroupSegmenter& state,
     const std::array<uint32_t, 64>& block_sad,
     int width, int height, int max_sample_val) noexcept {
-    ShotTransitionDecision decision{};
+    auto& [shot_group_id, frames_in_shot, ema_motion] = state;
     if (width <= 0 || height <= 0 || max_sample_val <= 0) {
-        decision.shot_group_id = shot_group_id_;
-        return decision;
+        return {false, false, false, shot_group_id, 0.0f, 0.0f};
     }
     uint64_t total_sad = 0;
-    for (uint32_t s : block_sad) {
-        total_sad += s;
-    }
+    for (uint32_t s : block_sad) total_sad += s;
     const double total_norm_denom =
         static_cast<double>(width) * static_cast<double>(height) * static_cast<double>(max_sample_val);
     const float mu_k = static_cast<float>(static_cast<double>(total_sad) / total_norm_denom);
@@ -28,66 +26,51 @@ ShotTransitionDecision ShotGroupSegmenter::evaluate(
 
     int outlier_blocks = 0;
     for (uint32_t s : block_sad) {
-        const float m_b = static_cast<float>(static_cast<double>(s) / block_denom);
-        if (m_b > 0.16f) {
-            ++outlier_blocks;
-        }
+        if (static_cast<float>(static_cast<double>(s) / block_denom) > 0.16f) ++outlier_blocks;
     }
     const float p_outlier = static_cast<float>(outlier_blocks) / 64.0f;
-
-    const float baseline = std::max(ema_motion_, 0.025f);
+    const float baseline = std::max(ema_motion, 0.025f);
     const bool hard_cut =
         (mu_k > 0.22f) ||
         (mu_k > 0.085f && mu_k > 3.2f * baseline && p_outlier >= 0.30f) ||
-        (p_outlier >= 0.375f && mu_k > 2.4f * ema_motion_);
-
-    decision.global_sad_norm = mu_k;
-    decision.outlier_block_ratio = p_outlier;
+        (p_outlier >= 0.375f && mu_k > 2.4f * ema_motion);
 
     if (hard_cut) {
-        ++shot_group_id_;
-        frames_in_shot_ = 1;
-        ema_motion_ = 0.03f;
-        decision.is_scene_cut = true;
-        decision.reset_vsr_temporal = true;
-        decision.force_encoder_idr = true;
-    } else {
-        ++frames_in_shot_;
-        constexpr float kAlpha = 2.0f / (8.0f + 1.0f);
-        ema_motion_ = (1.0f - kAlpha) * ema_motion_ + kAlpha * mu_k;
+        ++shot_group_id;
+        frames_in_shot = 1;
+        ema_motion = 0.03f;
+        return {true, true, true, shot_group_id, mu_k, p_outlier};
     }
-    decision.shot_group_id = shot_group_id_;
-    return decision;
+    ++frames_in_shot;
+    constexpr float kAlpha = 2.0f / (8.0f + 1.0f);
+    ema_motion = (1.0f - kAlpha) * ema_motion + kAlpha * mu_k;
+    return {false, false, false, shot_group_id, mu_k, p_outlier};
 }
-ShotTransitionDecision ShotGroupSegmenter::evaluateTransition(
+
+ShotTransitionDecision evaluateShotTransition(
+    ShotGroupSegmenter& state,
     uint64_t frame_index, const FrameDiffMetrics& metrics) noexcept {
     (void)frame_index;
-    ShotTransitionDecision decision{};
-    const float mu_k = metrics.mean_sad;
-    const float p_outlier = metrics.changed_block_ratio;
-    const float baseline = std::max(ema_motion_, 0.025f);
+    auto& [shot_group_id, frames_in_shot, ema_motion] = state;
+    const auto [mu_k, max_block_sad, p_outlier, hist_dist] = metrics;
+    (void)hist_dist;
+    const float baseline = std::max(ema_motion, 0.025f);
     const bool hard_cut =
         (mu_k > 0.22f) ||
         (mu_k > 0.085f && mu_k > 3.2f * baseline) ||
-        (p_outlier >= 0.375f && mu_k > 2.4f * ema_motion_) ||
-        (metrics.max_block_sad > 0.40f && p_outlier >= 0.25f);
-
-    decision.global_sad_norm = mu_k;
-    decision.outlier_block_ratio = p_outlier;
+        (p_outlier >= 0.375f && mu_k > 2.4f * ema_motion) ||
+        (max_block_sad > 0.40f && p_outlier >= 0.25f);
 
     if (hard_cut) {
-        ++shot_group_id_;
-        frames_in_shot_ = 1;
-        ema_motion_ = 0.03f;
-        decision.is_scene_cut = true;
-        decision.reset_vsr_temporal = true;
-        decision.force_encoder_idr = true;
-    } else {
-        ++frames_in_shot_;
-        constexpr float kAlpha = 2.0f / (8.0f + 1.0f);
-        ema_motion_ = (1.0f - kAlpha) * ema_motion_ + kAlpha * mu_k;
+        ++shot_group_id;
+        frames_in_shot = 1;
+        ema_motion = 0.03f;
+        return {true, true, true, shot_group_id, mu_k, p_outlier};
     }
-    decision.shot_group_id = shot_group_id_;
-    return decision;
+    ++frames_in_shot;
+    constexpr float kAlpha = 2.0f / (8.0f + 1.0f);
+    ema_motion = (1.0f - kAlpha) * ema_motion + kAlpha * mu_k;
+    return {false, false, false, shot_group_id, mu_k, p_outlier};
 }
-} // namespace rtx
+
+}  // namespace rtx

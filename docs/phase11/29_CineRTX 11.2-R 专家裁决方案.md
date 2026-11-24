@@ -300,7 +300,7 @@ void stopPlaybackSession() {
 
 > 1. 依据 docs/archive/phase112r\_governance\_archive.md 定向回植全部被剥离的设计契约注释、多行 @rtx-type-justification 完整上下文及段落分隔空行（保留 A-1 的 −83 行良性格式清理），验收无误后物理删除该归档文件1。  
 > 2. 合入直通加固补丁：修复 cmake/AuditTypes.cmake 逻辑反转与单行/继承匹配缺陷并肃清全仓漏审与伪模板标注2；修正 WorkstationApp 成员拓扑、stopPlaybackSession() 关停时序与 std::shared\_ptr 槽位标志共享所有权14；落地 workstation\_canvas/rtx\_gui 与 playback\_session 实质去重压缩；合入 readFixture 标准实现及 CMakeLists.txt 双平台测试部署加固10。  
-> 3. 执行全量自动化构建与双目录单测门禁：确认 cmake \-P cmake/AuditTypes.cmake（含针对 WorkstationApp、Control 等全仓留存类型的 100% 合法输出）、AuditSpdx.cmake、AuditImports.cmake 与 MSVC /MT 0 警告编译全部通过；分别在**项目根目录 C:\\PUBLIC\\CineRTX** 与 **构建输出目录** 两次直接运行 rtx\_tests.exe，确证 **128/128 PASS 且 0 SKIP-GPU、0 SKIP-AUDIO**1，并核验 CineRTX.exe.map 核心非内联修饰符号留存3。  
+> 3. 执行全量自动化构建与双目录单测门禁：确认 cmake \-P cmake/AuditTypes.cmake（含针对 WorkstationApp、Control 等全仓留存类型的 100% 合法输出）、AuditSpdx.cmake、AuditImports.cmake 与 MSVC /MT 0 警告编译全部通过；分别在**项目根目录 `[REDACTED_PATH]`** 与 **构建输出目录** 两次直接运行 rtx\_tests.exe，确证 **128/128 PASS 且 0 SKIP-GPU、0 SKIP-AUDIO**1，并核验 CineRTX.exe.map 核心非内联修饰符号留存3。  
 > 4. 执行 Gate R-8 本地宿主机真机桌面闭环：将 gate\_r8\_desktop\_check.ps1 的压力次数由 80 次修正为 **100 次 Resize**1，在协调负责人宿主机（RTX 5060 \+ 621.24 WHQL \+ Active WTS Session 1）实测并落盘五项铁证：H.264/HEVC/AV1 原生播放与转码监看实现 presented \> 0 且 D2H \== 0 B3；连续 100 次窗口缩放零崩溃泄漏3；快速连续启停播放会话（触发 stopPlaybackSession()）20 次零 UAF 异常；enable\_truehdr \= 0 下 SDR 预览无压暗且 HDR/SDR 跨屏切换正常3；物理拔插音频设备触发 AUDCLNT\_E\_DEVICE\_INVALIDATED 后无锁自动续播3。  
 > 5. 编制双轨行数统计表（分别列明物理总行数、SLOC 纯净有效代码行数、本次真实消肿减量与核定转入 Phase 11.3/11.4 追偿的赤字额度）并归档 29 号验收封板记录；随后派发 19 号施工单，并在开工首日即由新版 AuditTypes.cmake 与 SLOC 负增长红线强制锁死 workstation\_canvas 存量 NleTimeline 清零追偿进度14。
 

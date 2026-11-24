@@ -17,6 +17,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <format>
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -45,6 +47,8 @@
 #include "preview_viewport.h"
 
 namespace rtx::gui {
+
+struct WorkstationApp;
 
 enum class WorkspaceMode : int {
     Encoder = 0,
@@ -67,21 +71,13 @@ inline constexpr COLORREF kClrNvGreenDim  = RGB(78, 122, 0);    // --accent-dim 
 inline constexpr COLORREF kClrOnAccent    = RGB(7, 13, 0);      // --on-accent   #070d00
 inline constexpr COLORREF kClrHdrGold     = RGB(255, 209, 102); // --hdr-badge   #ffd166
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 视口动态超分辨率计算目标领域模型：封装目标宽高、缩放比与 VSR 激活状态，std::tuple 丢失具名渲染上下文。
-// Invariant: scale >= 1.0；target_width/height 必须为偶数或与源一致；vsr_active 与 scale > 1.0 严格单调。
-struct DynamicVsrTarget {
-    int target_width = 0;
-    int target_height = 0;
-    double scale = 1.0;
-    bool vsr_active = false;
-};
+// Phase 12 (Wave 12.2-B2): tuple alias (target_width, target_height, scale, vsr_active).
+using DynamicVsrTarget = std::tuple<int, int, double, bool>;
 
 using ViewportVsrTarget = DynamicVsrTarget;
 
 [[nodiscard]] inline ViewportVsrTarget& active_vsr_target() noexcept {
-    static ViewportVsrTarget target{};
+    static ViewportVsrTarget target{0, 0, 1.0, false};
     return target;
 }
 inline void storeActiveVsrTarget(const ViewportVsrTarget& target) noexcept {
@@ -132,53 +128,38 @@ inline constexpr rtx::Flicks kDefaultTimelineSpan =
                                                        int64_t duration_flicks) {
     const int64_t clamped = std::clamp(playhead_flicks, int64_t{0},
                                        duration_flicks > 0 ? duration_flicks : playhead_flicks);
-    const std::string tc = rtx::formatSmpteTimecode(clamped, rtx::TimecodeFormat{});
-    wchar_t buf[128];
-    _snwprintf_s(buf, _countof(buf), _TRUNCATE,
-                 L"SMPTE %ls | %lld Flicks (705,600,000 Hz)",
-                 utf8ToWide(tc).c_str(), static_cast<long long>(clamped));
-    return buf;
+    const std::string tc = rtx::formatSmpteTimecode(clamped, rtx::kDefaultTimecodeFormat);
+    return std::format(L"SMPTE {} | {} Flicks (705,600,000 Hz)", utf8ToWide(tc), static_cast<long long>(clamped));
 }
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 媒体容器 CPU 静态探测结果领域模型：封装宽高、Flicks 时长与探测有效性，std::tuple 丢失具名解析语义。
-// Invariant: ok 为 false 时降级为 1080p/30s 默认参数；ok 为 true 时 width/height > 0 且 duration_flicks >= 0。
-struct ProbedMedia {
+// Phase 12 (Wave 12.2-B2): tuple alias (width, height, duration_flicks, ok).
+using ProbedMedia = std::tuple<int, int, int64_t, bool>;
+
+[[nodiscard]] inline ProbedMedia probeMediaFile(const std::filesystem::path& path) noexcept {
     int width = 1920;
     int height = 1080;
     int64_t duration_flicks = kDefaultTimelineSpan.count();
     bool ok = false;
-};
-
-[[nodiscard]] inline ProbedMedia probeMediaFile(const std::filesystem::path& path) noexcept {
-    ProbedMedia out{};
-    if (path.empty()) {
-        return out;
-    }
+    if (path.empty()) return {width, height, duration_flicks, ok};
     auto demux = rtx::makeFfmpegDemuxer();
-    if (demux == nullptr) {
-        return out;
-    }
+    if (demux == nullptr) return {width, height, duration_flicks, ok};
     auto info = demux->open(path);
     if (info.has_value()) {
         const rtx::MediaInfo& media = info.value();
         if (media.width > 0 && media.height > 0) {
-            out.width = media.width;
-            out.height = media.height;
+            width = media.width;
+            height = media.height;
         }
         if (media.duration_ms > 0) {
-            out.duration_flicks = std::chrono::duration_cast<rtx::Flicks>(
+            duration_flicks = std::chrono::duration_cast<rtx::Flicks>(
                 std::chrono::milliseconds(media.duration_ms)).count();
         }
-        out.ok = true;
+        ok = true;
     }
-    return out;
+    return {width, height, duration_flicks, ok};
 }
 [[nodiscard]] inline std::wstring formatVsrScale(float scale) noexcept {
-    wchar_t buf[32];
-    _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%.4f", static_cast<double>(scale));
-    std::wstring s(buf);
+    std::wstring s = std::format(L"{:.4f}", static_cast<double>(scale));
     const size_t dot = s.find(L'.');
     if (dot != std::wstring::npos) {
         while (s.size() > dot + 3 && s.back() == L'0') {
@@ -223,14 +204,15 @@ enum class ChromeText : int {
 [[nodiscard]] bool applyGoldenPreset(std::string_view preset_id, rtx::TranscodeProfile& profile);
 void applyGoldenPresetById(HWND hwnd, const std::string& preset_id);
 [[nodiscard]] std::vector<std::pair<std::string, ChromeText>> goldenPresetList();
-[[nodiscard]] rtx::TranscodeProfile& guiProfile();
+[[nodiscard]] const rtx::TranscodeProfile& guiProfile(const WorkstationApp& app) noexcept;
+[[nodiscard]] rtx::TranscodeProfile& guiProfile(WorkstationApp& app) noexcept;
 
-void setGuiTranscoding(bool busy) noexcept;
-[[nodiscard]] bool guiIsTranscoding() noexcept;
-void setActiveWorkspace(WorkspaceMode mode) noexcept;
-void setGuiPlaying(bool playing) noexcept;
-[[nodiscard]] bool guiIsPlaying() noexcept;
-[[nodiscard]] const wchar_t* playbackCaption() noexcept;
+void setGuiTranscoding(WorkstationApp& app, bool busy) noexcept;
+[[nodiscard]] bool guiIsTranscoding(const WorkstationApp& app) noexcept;
+void setActiveWorkspace(WorkstationApp& app, WorkspaceMode mode) noexcept;
+void setGuiPlaying(WorkstationApp& app, bool playing) noexcept;
+[[nodiscard]] bool guiIsPlaying(const WorkstationApp& app) noexcept;
+[[nodiscard]] const wchar_t* playbackCaption(const WorkstationApp& app) noexcept;
 
 enum ControlId : int {
     IDC_LBL_INPUT = 1001,
@@ -389,7 +371,7 @@ struct WorkstationApp {
     rtx::EncoderJobQueue jobQueue{};
     std::jthread exportThread;
 
-    std::unique_ptr<rtx::IVideoFrameSink> playbackSink;          // 先声明，逆序最后析构
+    std::optional<rtx::VideoFrameSink> playbackSink;          // 先声明，逆序最后析构
     std::unique_ptr<rtx::MediaPlaybackSession> playbackSession;  // 后声明，逆序先析构（join 工作线程）
     rtx::BorrowCallback playbackBorrow;
     rtx::BorrowCallback transcodeBorrow;
@@ -405,10 +387,25 @@ struct WorkstationApp {
     std::optional<PreviewViewport> previewViewport;
 };
 
-extern WorkstationApp g_app;
+// Phase 12 (HYG-P12-05): Zero mutable global app singleton; WorkstationApp is owned by wWinMain
+// and bound to top-level / child window GWLP_USERDATA in WM_NCCREATE (cleared in WM_NCDESTROY).
+[[nodiscard]] inline WorkstationApp* appFromHwnd(HWND hwnd) noexcept {
+    return hwnd ? reinterpret_cast<WorkstationApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA)) : nullptr;
+}
+[[nodiscard]] inline WorkstationApp* appFromControl(HWND hwnd) noexcept {
+    if (auto* direct = appFromHwnd(hwnd)) return direct;
+    HWND root = hwnd ? GetAncestor(hwnd, GA_ROOT) : nullptr;
+    return root ? appFromHwnd(root) : nullptr;
+}
+[[nodiscard]] inline WorkstationApp* getWindowApp(HWND hwnd) noexcept {
+    return appFromControl(hwnd);
+}
+[[nodiscard]] inline WorkstationApp& requireApp(HWND hwnd) noexcept {
+    return *appFromControl(hwnd);
+}
 
-void installTranscodeBorrow();
-void stopPlaybackSession();
+void installTranscodeBorrow(WorkstationApp& app);
+void stopPlaybackSession(WorkstationApp& app) noexcept;
 bool startPlaybackSession(HWND hwnd, const std::filesystem::path& path);
 void togglePlayback(HWND hwnd);
 void stepPlayback(HWND hwnd, int direction);

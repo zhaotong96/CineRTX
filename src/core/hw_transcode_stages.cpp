@@ -34,10 +34,10 @@ bool RemasterPipeline::consumerStopped() const noexcept {
 void RemasterPipeline::reportProgress() {
     if (!options_.progress) return;
     options_.progress(HwTranscodeProgress{
-        .frames_decoded = report_.frames_decoded,
-        .frames_encoded = report_.frames_encoded,
-        .total_frames = estimated_total_frames_,
-        .elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - started_).count(),
+        report_.frames_decoded,
+        report_.frames_encoded,
+        estimated_total_frames_,
+        std::chrono::duration<double, std::milli>(Clock::now() - started_).count(),
     });
 }
 Result<void> RemasterPipeline::initDecodeAndDemuxStage() {
@@ -71,12 +71,12 @@ Result<void> RemasterPipeline::initDecodeAndDemuxStage() {
     if (info.duration_ms > 0 && frame_rate.num > 0 && frame_rate.den > 0) {
         estimated_total_frames_ = info.duration_ms * frame_rate.num / (1000 * static_cast<int64_t>(frame_rate.den));
     }
-    cuda_.init();
+    cuda_drv::init();
     NgxRemasterBridge::publishActivePreviewBridge(session_->bridgeLoader(), session_->bridge());
     return {};
 }
 Result<void> RemasterPipeline::initRemasterAndFgStage() {
-    segmenter_.reset();
+    resetShotSegmenter(segmenter_);
     const bool fruc_enabled = options_.fruc_enabled;
 // Phase 11.2 (C-02)：把本流水线的桥注册为监看消费者眼中的活动预览源；
 // 槽位空闲标志随发布清零，跨作业互不残留。
@@ -123,13 +123,13 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
             });
         report_.fruc_backend = (rife_scale <= 0.5f) ? "rife-trt-scale05" : "rife-trt";
         fruc_out_buffer_ = session_->bridgeLoader().getInterpBuffer(session_->bridge(), rife_w, rife_h);
-        vram_scheduler_.setTrtPeakAllocationBytes(trt_peak_bytes);
-        vram_scheduler_.setCodecRefPoolBytes(static_cast<uint64_t>(rife_w) * rife_h * 3ull * 8ull);
+        vramSetTrtPeakAllocationBytes(vram_scheduler_, trt_peak_bytes);
+        vramSetCodecRefPoolBytes(vram_scheduler_, static_cast<uint64_t>(rife_w) * rife_h * 3ull * 8ull);
         logInfo(std::format("FRUC Route B active: TensorRT RIFE ({}, {}x{}, scale={:.1f}, topology={}, A=128, reflect101, trt_peak={} MiB, vram_budget={} MiB)",
                             engine_path_str, rife_w, rife_h, rife_scale,
                             use_fg_first ? "fg-first" : "4k-scale05",
                             trt_peak_bytes / (1024ull * 1024ull),
-                            vram_scheduler_.dxgiBudgetBytes() / (1024ull * 1024ull)));
+                            vramDxgiBudgetBytes(vram_scheduler_) / (1024ull * 1024ull)));
     } else if (fruc_enabled) {
         report_.fruc_backend = "nvof";
         fruc_out_buffer_ = session_->bridgeLoader().getInterpBuffer(
@@ -148,11 +148,11 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
     const size_t frame_bytes = static_cast<size_t>(target_w) * target_h * 3;
     if (options_.use_cpu_encoder) {
         pinned_buf_bytes_ = frame_bytes;
-        const bool pinned = cuda_.loaded && cuda_.mem_alloc_host && cuda_.mem_free_host;
+        const bool pinned = cuda_drv::loaded && cuda_drv::mem_alloc_host && cuda_drv::mem_free_host;
         for (auto& buf : pinned_host_buf_) {
             void* p = nullptr;
             if (pinned) {
-                (void)cuda_.mem_alloc_host(&p, frame_bytes);
+                (void)cuda_drv::mem_alloc_host(&p, frame_bytes);
             } else {
                 p = std::malloc(frame_bytes);
             }
@@ -160,7 +160,7 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
                 return err(ErrorCode::OutOfMemory,
                            "cannot allocate the CPU-encoder P010 staging buffer");
             }
-            buf = pinned ? wrapCudaPinnedHost(p, frame_bytes, cuda_.mem_free_host)
+            buf = pinned ? wrapCudaPinnedHost(p, frame_bytes, cuda_drv::mem_free_host)
                          : wrapSystemHeapHost(p, frame_bytes);
         }
     }
@@ -187,6 +187,8 @@ void RemasterPipeline::encodeWorkerBody(std::stop_token stop) {
             item = std::move(encode_queue_.front());
             encode_queue_.pop_front();
         }
+        auto& [remaster_out, item_pts, hdr10plus_prefix, force_keyframe, item_pinned_slot] = item;
+        (void)item_pinned_slot;
         if (options_.use_cpu_encoder) {
             const int target_w = session_->targetWidth();
             const int target_h = session_->targetHeight();
@@ -195,17 +197,17 @@ void RemasterPipeline::encodeWorkerBody(std::stop_token stop) {
             uint8_t* dst = static_cast<uint8_t*>(pinned_host_buf_[pinned_slot_ & 1u].first.get());
             pinned_slot_ ^= 1u;
 
-                if (cuda_.loaded && cuda_.memcpy_dtoh) {
-                    cuda_.memcpy_dtoh(dst, item.remaster_out.y_plane, y_bytes);
-                    cuda_.memcpy_dtoh(dst + y_bytes, item.remaster_out.uv_plane, uv_bytes);
+                if (cuda_drv::loaded && cuda_drv::memcpy_dtoh) {
+                    cuda_drv::memcpy_dtoh(dst, remaster_out.y_plane, y_bytes);
+                    cuda_drv::memcpy_dtoh(dst + y_bytes, remaster_out.uv_plane, uv_bytes);
                 } else {
-                    std::memcpy(dst, reinterpret_cast<const void*>(item.remaster_out.y_plane), y_bytes);
-                    std::memcpy(dst + y_bytes, reinterpret_cast<const void*>(item.remaster_out.uv_plane), uv_bytes);
+                    std::memcpy(dst, reinterpret_cast<const void*>(remaster_out.y_plane), y_bytes);
+                    std::memcpy(dst + y_bytes, reinterpret_cast<const void*>(remaster_out.uv_plane), uv_bytes);
                 }
                 auto pkts = session_->cpuEncoder()->encodeP010Frame(
                     reinterpret_cast<const uint16_t*>(dst), target_w * 2,
                     reinterpret_cast<const uint16_t*>(dst + y_bytes), target_w * 2,
-                    item.pts, item.force_keyframe, item.hdr10plus_prefix);
+                    item_pts, force_keyframe, hdr10plus_prefix);
                 if (!pkts.has_value()) {
                     std::lock_guard<std::mutex> lock(pipeline_mutex_);
                     consumer_failed_ = true;
@@ -228,17 +230,17 @@ void RemasterPipeline::encodeWorkerBody(std::stop_token stop) {
             } else {
                 RtxPacketDesc packet{};
                 RtxFrameDesc encode_frame{};
-                encode_frame.width = item.remaster_out.width;
-                encode_frame.height = item.remaster_out.height;
-                encode_frame.format = item.remaster_out.format;
-                encode_frame.planes[0] = item.remaster_out.y_plane;
-                encode_frame.planes[1] = item.remaster_out.uv_plane;
-                encode_frame.pitches[0] = item.remaster_out.y_pitch;
-                encode_frame.pitches[1] = item.remaster_out.uv_pitch;
+                encode_frame.width = remaster_out.width;
+                encode_frame.height = remaster_out.height;
+                encode_frame.format = remaster_out.format;
+                encode_frame.planes[0] = remaster_out.y_plane;
+                encode_frame.planes[1] = remaster_out.uv_plane;
+                encode_frame.pitches[0] = remaster_out.y_pitch;
+                encode_frame.pitches[1] = remaster_out.uv_pitch;
                 encode_frame.bit_depth = 10;
-                encode_frame.pts = item.pts;
+                encode_frame.pts = item_pts;
                 encode_frame.slot_index = 0;
-                encode_frame.keyframe = item.force_keyframe ? 1 : 0;
+                encode_frame.keyframe = force_keyframe ? 1 : 0;
                 const RtxResult encoded = session_->shim().encoderEncode(session_->encoder(), &encode_frame, &packet);
                 if (encoded != RTX_OK) {
                     std::lock_guard<std::mutex> lock(pipeline_mutex_);
@@ -248,7 +250,7 @@ void RemasterPipeline::encodeWorkerBody(std::stop_token stop) {
                     slot_free_.notify_all();
                     return;
                 }
-                auto written = session_->writeEncodedPacket(packet, item.pts, report_, item.hdr10plus_prefix);
+                auto written = session_->writeEncodedPacket(packet, item_pts, report_, hdr10plus_prefix);
                 if (!written.has_value()) {
                     std::lock_guard<std::mutex> lock(pipeline_mutex_);
                     consumer_failed_ = true;
@@ -279,13 +281,7 @@ Result<void> RemasterPipeline::queueEncodeItem(const RtxNgxRemasterOutput& out, 
     }
     {
         std::lock_guard<std::mutex> lock(pipeline_mutex_);
-        encode_queue_.push_back(PendingEncodeItem{
-            .remaster_out = out,
-            .pts = pts,
-            .hdr10plus_prefix = hdr10plus,
-            .force_keyframe = force_key,
-            .pinned_slot = pinned_slot_,
-        });
+        encode_queue_.emplace_back(out, pts, hdr10plus, force_key, pinned_slot_);
         ++remasters_issued_;
     }
     queue_ready_.notify_all();
@@ -338,8 +334,10 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
     in.y_pitch = frame.pitches[0];
     in.uv_pitch = frame.pitches[1];
     in.format = frame.format;
-    in.full_range = (info.color.range == ColorRange::Full) ? 1 : 0;
-    in.matrix = (info.color.matrix == MatrixCoefficients::BT2020NC) ? 1 : 0;
+    const auto [icp, ict, icm, icr] = info.color;
+    (void)icp; (void)ict;
+    in.full_range = (icr == ColorRange::Full) ? 1 : 0;
+    in.matrix = (icm == MatrixCoefficients::BT2020NC) ? 1 : 0;
     in.reset_temporal = reset_temporal ? 1 : 0;
 
     bool preview_this_frame = false;
@@ -385,16 +383,13 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
     }
     std::vector<uint8_t> hdr10plus;
     if (options_.hdr10plus) {
-        Hdr10PlusFrameStats fstats{};
-        fstats.maxscl_r_nits = std::max<uint32_t>(1u, out.frame_max_nits);
-        fstats.maxscl_g_nits = std::max<uint32_t>(1u, out.frame_max_nits);
-        fstats.maxscl_b_nits = std::max<uint32_t>(1u, out.frame_max_nits);
-        fstats.average_maxrgb_nits = std::max<uint32_t>(1u, out.frame_avg_nits);
-// 归还本次失败的槽位：空闲标志不还，生产端会被永久卡死。
         const float ratio = out.frame_max_nits > 0
             ? static_cast<float>(out.frame_avg_nits) / static_cast<float>(out.frame_max_nits) : 0.5f;
-        fstats.knee_point_x = 500;
-        fstats.knee_point_y = static_cast<uint16_t>(std::clamp(static_cast<int>(ratio * 1000.0f), 1, 1000));
+        const uint32_t max_nits = std::max<uint32_t>(1u, out.frame_max_nits);
+        const uint32_t avg_nits = std::max<uint32_t>(1u, out.frame_avg_nits);
+        const Hdr10PlusFrameStats fstats{
+            max_nits, max_nits, max_nits, avg_nits, uint16_t{500},
+            static_cast<uint16_t>(std::clamp(static_cast<int>(ratio * 1000.0f), 1, 1000))};
         hdr10plus = (options_.codec == VideoCodec::HEVC)
             ? SeiSynthesizer::hevcHdr10PlusPrefixSei(fstats)
             : SeiSynthesizer::av1Hdr10PlusMetadataObu(fstats);
@@ -416,7 +411,8 @@ Result<void> RemasterPipeline::synthesizeAndRemasterWindow(
         return remasterAndEnqueueFrame(curr_f, out_pts_90k, /*release_slot=*/false);
     }
     const uint32_t pitch = prev_f.pitches[0];
-    const int input_full_range = (session_->info().color.range == ColorRange::Full) ? 1 : 0;
+    const auto [fcp, fct, fcm, fcr] = session_->info().color; (void)fcp; (void)fct; (void)fcm;
+    const int input_full_range = (fcr == ColorRange::Full) ? 1 : 0;
 
     if (rife_destroy_guard_) {
         int32_t scene_cut = 0;
@@ -466,10 +462,10 @@ Result<void> RemasterPipeline::handleDecodedFrame(const RtxFrameDesc& frame) {
         const uint64_t working_set =
             static_cast<uint64_t>(session_->targetWidth()) *
             static_cast<uint64_t>(session_->targetHeight()) * 16ull;
-        if (vram_scheduler_.observeFrame(0ull, working_set)) {
+        if (vramObserveFrame(vram_scheduler_, 0ull, working_set)) {
             logWarn(std::format("[VRAM-SCHED] Tier transitioned to {} (pressure={:.1f}%)",
-                                pipelineTierName(vram_scheduler_.currentTier()),
-                                vram_scheduler_.lastPressureRatio() * 100.0));
+                                pipelineTierName(vramCurrentTier(vram_scheduler_)),
+                                vramLastPressureRatio(vram_scheduler_) * 100.0));
         }
     }
     constexpr int64_t kFlicksPerTick90k = 7840;
@@ -668,13 +664,15 @@ Result<HwTranscodeReport> RemasterPipeline::run() {
 }
 
 Result<void> RemasterPipeline::runRenderGraph(std::span<const RenderGraphSegment> segments,
-                                              std::span<const AudioGraphSegment> audio_segments,
+                                              std::span<const AudioGraphSegment> /*audio_segments*/,
                                               std::stop_token stop_tok) {
     if (segments.empty()) {
         return err(ErrorCode::InvalidArgument, "render graph: empty segment list");
     }
+    const auto& [first_path, f_sin, f_sout, f_tin, f_tout, f_hc, f_fk] = segments.front();
+    (void)f_sin; (void)f_sout; (void)f_tin; (void)f_tout; (void)f_hc; (void)f_fk;
     if (options_.input_path.empty()) {
-        options_.input_path = std::filesystem::path(segments.front().source_path);
+        options_.input_path = std::filesystem::path(first_path);
     }
 
     auto d_res = initDecodeAndDemuxStage();
@@ -688,9 +686,9 @@ Result<void> RemasterPipeline::runRenderGraph(std::span<const RenderGraphSegment
     const Rational clock_tb{1, 90000};
     const Clock::time_point loop_start = Clock::now();
 
-    std::string active_source = segments.front().source_path;
-    std::unique_ptr<IDemuxer> owned_demux;
-    IDemuxer* active_demux = session_->demuxer();
+    std::string active_source = first_path;
+    std::unique_ptr<FfmpegDemuxer> owned_demux;
+    FfmpegDemuxer* active_demux = session_->demuxer();
     MediaInfo active_info = session_->info();
 
     auto destroyExtraDecoder = [sh = &session_->shim()](RtxDecoder* d) {
@@ -703,18 +701,19 @@ Result<void> RemasterPipeline::runRenderGraph(std::span<const RenderGraphSegment
     Result<void> pipe_status;
 
     for (std::size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
-        const RenderGraphSegment& segment = segments[seg_idx];
+        const auto& [seg_source_path, seg_src_in, seg_src_out, seg_tl_in, seg_tl_out, seg_hard_cut, seg_force_kf] = segments[seg_idx];
+        (void)seg_tl_out; (void)seg_hard_cut;
         if (stop_tok.stop_requested() || consumerStopped()) {
             pipe_status = err(ErrorCode::State, "transcode cancelled");
             break;
         }
-        if (segment.source_path != active_source) {
+        if (seg_source_path != active_source) {
             auto next_demux = makeFfmpegDemuxer();
             if (!next_demux) {
                 pipe_status = err(ErrorCode::Internal, "render graph: failed to allocate segment demuxer");
                 break;
             }
-            auto opened = next_demux->open(std::filesystem::path(segment.source_path));
+            auto opened = next_demux->open(std::filesystem::path(seg_source_path));
             if (!opened.has_value()) {
                 pipe_status = std::unexpected(opened.error());
                 break;
@@ -741,14 +740,14 @@ Result<void> RemasterPipeline::runRenderGraph(std::span<const RenderGraphSegment
             active_info = *opened;
             owned_decoder.reset(raw_dec);
             active_decoder = owned_decoder.get();
-            active_source = segment.source_path;
+            active_source = seg_source_path;
         } else if (seg_idx > 0) {
             (void)session_->shim().decoderReset(active_decoder);
         }
 
         const Rational input_tb = active_info.time_base.valid() ? active_info.time_base : clock_tb;
-        if (segment.source_in_flicks > 0) {
-            const int64_t seek_pts = rescaleQ(segment.source_in_flicks, kTimeBaseFlicks, input_tb);
+        if (seg_src_in > 0) {
+            const int64_t seek_pts = rescaleQ(seg_src_in, kTimeBaseFlicks, input_tb);
             (void)active_demux->seekToKeyframeBefore(seek_pts);
         }
 
@@ -757,24 +756,24 @@ Result<void> RemasterPipeline::runRenderGraph(std::span<const RenderGraphSegment
                                   : session_->frameRate();
         const int64_t frame_ticks = (fps.num > 0 && fps.den > 0)
             ? std::max<int64_t>(1, static_cast<int64_t>(90000) * fps.den / fps.num) : 3000;
-        int64_t fallback_pts = rescaleQ(segment.source_in_flicks, kTimeBaseFlicks, clock_tb);
+        int64_t fallback_pts = rescaleQ(seg_src_in, kTimeBaseFlicks, clock_tb);
         bool first_frame_of_segment = true;
         bool seg_done = false;
 
         auto emitFrame = [&](const RtxFrameDesc& fdesc) -> Result<void> {
             const int64_t frame_src_flicks = absoluteTimestampToFlicks(fdesc.pts, clock_tb);
-            if (frame_src_flicks < segment.source_in_flicks) {
+            if (frame_src_flicks < seg_src_in) {
                 session_->shim().decoderReleaseFrame(active_decoder, fdesc.slot_index);
                 return {};
             }
-            if (frame_src_flicks >= segment.source_out_flicks) {
+            if (frame_src_flicks >= seg_src_out) {
                 session_->shim().decoderReleaseFrame(active_decoder, fdesc.slot_index);
                 seg_done = true;
                 return {};
             }
-            const int64_t frame_flicks_offset = frame_src_flicks - segment.source_in_flicks;
+            const int64_t frame_flicks_offset = frame_src_flicks - seg_src_in;
             int64_t pts_90k = std::chrono::duration_cast<Ticks90k>(
-                Flicks{segment.timeline_in_flicks + frame_flicks_offset}).count();
+                Flicks{seg_tl_in + frame_flicks_offset}).count();
             if (last_emitted_pts_90k >= 0 && pts_90k <= last_emitted_pts_90k) {
                 pts_90k = last_emitted_pts_90k + 1;
             }
@@ -782,7 +781,7 @@ Result<void> RemasterPipeline::runRenderGraph(std::span<const RenderGraphSegment
 
             // 段首帧强制重置 VSR 时域历史并在硬切点强制注入 IDR 关键帧（C-05 闭环）。
             const bool reset_temporal = first_frame_of_segment;
-            if (first_frame_of_segment && segment.force_keyframe) {
+            if (first_frame_of_segment && seg_force_kf) {
                 last_was_cut_ = true;
             }
             first_frame_of_segment = false;

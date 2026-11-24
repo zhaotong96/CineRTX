@@ -4,8 +4,8 @@
 
 #include "nv_func_tables.h"
 
-#include <sstream>
 #include <vector>
+#include <format>
 
 namespace rtx_shim {
 namespace {
@@ -13,7 +13,7 @@ namespace {
 template <typename Fn>
 bool resolveOne(const DynLibrary& library, const char* name, Fn& target,
                 std::vector<std::string>& missing) {
-    void* address = library.symbol(name);
+    void* address = dynSymbol(library, name);
     if (address == nullptr) {
         target = nullptr;
         missing.emplace_back(name);
@@ -23,12 +23,12 @@ bool resolveOne(const DynLibrary& library, const char* name, Fn& target,
     return true;
 }
 std::string missingMessage(const char* component, const std::vector<std::string>& missing) {
-    std::ostringstream out;
-    out << component << " is missing required exports:";
+    std::string out = std::format("{} is missing required exports:", component);
     for (const std::string& name : missing) {
-        out << ' ' << name;
+        out += ' ';
+        out += name;
     }
-    return out.str();
+    return out;
 }
 }  // namespace
 
@@ -141,54 +141,28 @@ const char* resultName(CUresult result) {
 }
 }  // namespace rtx_shim::cuda
 
-namespace nvenc {
-
-bool Table::resolve(const DynLibrary& library, std::string* error) {
-    std::vector<std::string> missing;
-    resolveOne(library, "NvEncodeAPICreateInstance", createInstance, missing);
-    resolveOne(library, "NvEncodeAPIGetMaxSupportedVersion", getMaxSupportedVersion, missing);
-    if (createInstance == nullptr) {
-        if (error != nullptr) {
-            *error = missingMessage("nvEncodeAPI", missing);
-        }
-        return false;
-    }
-    if (error != nullptr) {
-        error->clear();
-    }
-    return true;
-}
-}  // namespace rtx_shim::nvenc
-
 namespace ngx {
 
-bool Table::resolve(const DynLibrary& library, std::string* error) {
-    std::vector<std::string> optional;
-    resolveOne(library, "NVSDK_NGX_D3D12_Init", init, optional);
-    resolveOne(library, "NVSDK_NGX_D3D12_AllocateParameters", allocateParameters, optional);
-    resolveOne(library, "NVSDK_NGX_D3D12_GetScratchBufferSize", getScratchBufferSize, optional);
-    resolveOne(library, "NVSDK_NGX_D3D12_CreateFeature", createFeature, optional);
-    resolveOne(library, "NVSDK_NGX_D3D12_EvaluateFeature", evaluateFeature, optional);
-    resolveOne(library, "NVSDK_NGX_D3D12_ReleaseParameters", releaseParameters, optional);
-    resolveOne(library, "NVSDK_NGX_D3D12_DestroyFeature", destroyFeature, optional);
-    resolveOne(library, "NVSDK_NGX_D3D12_Shutdown", shutdown, optional);
-    resolveOne(library, "NVSDK_NGX_Parameter_SetUI", setUI, optional);
-    resolveOne(library, "NVSDK_NGX_Parameter_SetI", setI, optional);
-    resolveOne(library, "NVSDK_NGX_Parameter_SetF", setF, optional);
-    resolveOne(library, "NVSDK_NGX_Parameter_SetD", setD, optional);
-    resolveOne(library, "NVSDK_NGX_Parameter_SetULL", setULL, optional);
-
-    if (init == nullptr) {
-        if (error != nullptr) {
-            *error = missingMessage("nvsdk_ngx", optional);
+bool resolveExports(const DynLibrary& library, std::string* error) {
+    static constexpr const char* kRequired[] = {
+        "NVSDK_NGX_D3D12_Init",
+        "NVSDK_NGX_D3D12_AllocateParameters",
+        "NVSDK_NGX_D3D12_CreateFeature",
+        "NVSDK_NGX_D3D12_EvaluateFeature",
+        "NVSDK_NGX_D3D12_ReleaseFeature",
+        "NVSDK_NGX_D3D12_DestroyParameters",
+        "NVSDK_NGX_D3D12_Shutdown1",
+    };
+    for (const char* name : kRequired) {
+        if (dynSymbol(library, name) == nullptr) {
+            if (error != nullptr) *error = std::string("missing NGX export: ") + name;
+            return false;
         }
-        return false;
     }
-    if (error != nullptr) {
-        error->clear();
-    }
+    if (error != nullptr) error->clear();
     return true;
 }
-}  // namespace rtx_shim::ngx
+
+}  // namespace ngx
 
 }  // namespace rtx_shim

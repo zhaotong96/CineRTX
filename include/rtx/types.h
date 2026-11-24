@@ -31,98 +31,9 @@ inline constexpr std::size_t kCacheLineSize = std::hardware_destructive_interfer
 inline constexpr std::size_t kCacheLineSize = 64;
 #endif
 
-// Tagged strong handle: strong typing with zero-cost compile-time semantics
-template <typename Tag, std::integral ValueType = std::int64_t,
-          ValueType InvalidValue = static_cast<ValueType>(-1)>
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct TaggedHandle {
-    using value_type = ValueType;
-    using tag_type = Tag;
-    static constexpr ValueType kInvalid = InvalidValue;
-
-    ValueType v{kInvalid};
-
-    [[nodiscard]] static constexpr TaggedHandle invalid() noexcept { return TaggedHandle{}; }
-
-    constexpr TaggedHandle() noexcept = default;
-    constexpr explicit(!std::is_same_v<ValueType, std::uint32_t>)
-        TaggedHandle(ValueType val) noexcept : v(val) {}
-
-    [[nodiscard("Handle validity check should not be ignored")]]
-    constexpr bool isValid() const noexcept {
-        if constexpr (std::is_signed_v<ValueType>) {
-            return v >= 0 && v != kInvalid;
-        } else {
-            return v != kInvalid;
-        }
-    }
-    [[nodiscard]] constexpr ValueType value() const noexcept { return v; }
-
-    constexpr operator ValueType() const noexcept { return v; }
-
-    static constexpr ValueType visitor(const auto& other) noexcept {
-        using OtherT = std::decay_t<decltype(other)>;
-        if constexpr (std::is_same_v<OtherT, TaggedHandle>) {
-            return other.v;
-        } else {
-            return static_cast<ValueType>(other);
-        }
-    }
-    constexpr auto operator<=>(const TaggedHandle&) const noexcept = default;
-    constexpr auto operator<=>(std::integral auto other) const noexcept {
-        return v <=> visitor(other);
-    }
-    constexpr bool operator==(std::integral auto other) const noexcept {
-        return std::is_eq(v <=> visitor(other));
-    }
-};
-
-// Core domain handle tags
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
-// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
-struct SlotTag {};
-
-// Strongly-typed domain handles
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
-// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
-struct DeviceTag {};
-
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
-// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
-struct SurfaceTag {};
-
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
-// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
-struct StreamTag {};
-
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 强类型句柄哨兵标签类型（Tag Type）：用于 TaggedHandle 强类型辨析，std 聚合无法替代编译期标签特化。
-// Invariant: 零尺寸空类型，仅作为模板幻影参数承载类型安全语义。
-struct EventTag {};
-
-using SlotHandle    = TaggedHandle<SlotTag, std::uint32_t, std::numeric_limits<std::uint32_t>::max()>;
-using DeviceHandle  = TaggedHandle<DeviceTag, std::int32_t, -1>;
-using SurfaceHandle = TaggedHandle<SurfaceTag, std::uint64_t, 0ull>;
-using StreamHandle  = TaggedHandle<StreamTag, std::uint64_t, 0ull>;
-using EventHandle   = TaggedHandle<EventTag, std::uint64_t, 0ull>;
-
+// Phase 12 (Wave 12.2-D): dead TaggedHandle template & unused aliases removed.
 // Phase 8 (Task 8-B1): broadcast codecs NVDEC cannot decode; the engine
 // routes them through the FFmpeg software decoder (broadcast tier).
-static_assert(sizeof(SlotHandle) == 4);
-static_assert(std::is_trivially_copyable_v<SlotHandle>);
-static_assert(std::is_standard_layout_v<SlotHandle>);
 
 using DevicePtr = uint64_t;
 inline constexpr DevicePtr kInvalidDevicePtr = 0;
@@ -341,47 +252,22 @@ enum class ColorRange : int32_t {
     Full = 1,
 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct ColorDescription {
-    ColorPrimaries primaries = ColorPrimaries::BT709;
-    TransferFunction transfer = TransferFunction::BT709;
-    MatrixCoefficients matrix = MatrixCoefficients::BT709;
-    ColorRange range = ColorRange::Limited;
-};
+// Phase 12 (Wave 12.2-C): tuple alias (primaries, transfer, matrix, range).
+using ColorDescription = std::tuple<ColorPrimaries, TransferFunction, MatrixCoefficients, ColorRange>;
+
+// Phase 12 (Wave 12.2-C): tuple alias (red_x, red_y, green_x, green_y, blue_x, blue_y,
+//   white_x, white_y, max_luminance, min_luminance).
+using MasteringDisplay = std::tuple<uint16_t, uint16_t, uint16_t, uint16_t,
+                                    uint16_t, uint16_t, uint16_t, uint16_t,
+                                    uint32_t, uint32_t>;
+
+// Phase 12 (Wave 12.2-C): standard pair (max_cll, max_fall).
+using ContentLightLevel = std::pair<uint16_t, uint16_t>;
 
 // @rtx-type-justification
 // Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct MasteringDisplay {
-    uint16_t red_x = 0;
-    uint16_t red_y = 0;
-    uint16_t green_x = 0;
-    uint16_t green_y = 0;
-    uint16_t blue_x = 0;
-    uint16_t blue_y = 0;
-    uint16_t white_x = 0;
-    uint16_t white_y = 0;
-    uint32_t max_luminance = 0;
-    uint32_t min_luminance = 0;
-};
-
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct ContentLightLevel {
-    uint16_t max_cll = 0;
-    uint16_t max_fall = 0;
-};
-
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
+// Why-Std-Fails: HDR10 静态元数据领域聚合，组合主显示色度、内容亮度、色彩描述与目标峰值尼特数，贯穿 SEI/OBU 合成与编码器配置。
+// Invariant: enabled 为 true 时 color/mastering/cll 与 target_nits 共同定义合规 PQ/BT.2020 信号。
 struct Hdr10Metadata {
     bool enabled = false;
     MasteringDisplay mastering{};
@@ -391,81 +277,49 @@ struct Hdr10Metadata {
     uint32_t target_nits = 1000;
 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct DeviceInfo {
-    std::string name;
-    uint8_t luid[8] = {};
-    uint32_t node_mask = 0;
-    int compute_major = 0;
-    int compute_minor = 0;
-    uint64_t vram_bytes = 0;
-    uint32_t driver_version = 0;
-    uint32_t cuda_version = 0;
-    bool nvidia = false;
 
-    bool turingOrNewer() const {
-        return compute_major > 7 || (compute_major == 7 && compute_minor >= 5);
+// Phase 12 (Wave 12.2-C): tuple (bytes, alignment, logical_size, offset) + free helpers.
+using FrameBuffer = std::tuple<std::vector<uint8_t>, size_t, size_t, size_t>;
+
+[[nodiscard]] inline Result<void> allocateFrameBuffer(FrameBuffer& buf, size_t size,
+                                                      size_t align = 256) {
+    if (size == 0) return err(ErrorCode::InvalidArgument, "zero-sized frame buffer");
+    auto& [bytes, alignment, logical_size, offset] = buf;
+    alignment = std::max<size_t>(align, 64);
+    if (size > std::numeric_limits<size_t>::max() - alignment) {
+        return err(ErrorCode::InvalidArgument, "frame allocation size overflow");
     }
-    std::string toString() const {
-        std::string sm = (compute_major > 0)
-            ? std::format("sm_{}{}", compute_major, compute_minor)
-            : "cpu";
-        std::string luid_str;
-        for (int i = 0; i < 8; ++i) {
-            luid_str += std::format("{:x}", luid[i]);
-        }
-        return std::format("{} [{}, LUID={}, VRAM={} MiB]",
-                           name, sm, luid_str, vram_bytes / (1024ull * 1024ull));
+    try {
+        bytes.assign(size + alignment - 1, 0);
+    } catch (const std::bad_alloc&) {
+        return err(ErrorCode::OutOfMemory, "frame allocation failed", std::to_string(size));
     }
-};
-
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 包含对齐契约的宿主内存帧缓冲领域模型：内部封装对齐分配逻辑与有效字节缓冲，std::vector 自身无法表达 64/256 字节 GPU 传输对齐不变量。
-// Invariant: alignment >= 64；allocate 成功后 bytes 尺寸大于 0 且零溢出。
-struct FrameBuffer {
-    std::vector<uint8_t> bytes;
-    size_t alignment = 256;
-
-    Result<void> allocate(size_t size, size_t align = 256) {
-        if (size == 0) {
-            return err(ErrorCode::InvalidArgument, "zero-sized frame buffer");
-        }
-        alignment = std::max<size_t>(align, 64);
-        if (size > std::numeric_limits<size_t>::max() - alignment) {
-            return err(ErrorCode::InvalidArgument, "frame allocation size overflow");
-        }
-        try {
-            bytes.assign(size + alignment - 1, 0);
-        } catch (const std::bad_alloc&) {
-            return err(ErrorCode::OutOfMemory, "frame allocation failed",
-                       std::to_string(size));
-        }
-        const uintptr_t raw = reinterpret_cast<uintptr_t>(bytes.data());
-        const size_t remainder = raw % alignment;
-        offset_ = remainder == 0 ? 0 : alignment - remainder;
-        size_ = size;
-        return {};
-    }
-    uint8_t* data() { return bytes.data() + offset_; }
-    const uint8_t* data() const { return bytes.data() + offset_; }
-    size_t size() const noexcept { return size_; }
-
-    std::span<uint8_t> span() noexcept { return {data(), size_}; }
-    std::span<const uint8_t> span() const noexcept { return {data(), size_}; }
-
-private:
-    size_t size_ = 0;
-    size_t offset_ = 0;
-};
+    const uintptr_t raw = reinterpret_cast<uintptr_t>(bytes.data());
+    const size_t remainder = raw % alignment;
+    offset = remainder == 0 ? 0 : alignment - remainder;
+    logical_size = size;
+    return {};
+}
+[[nodiscard]] inline uint8_t* frameBufferData(FrameBuffer& buf) noexcept {
+    auto& [bytes, alignment, logical_size, offset] = buf;
+    (void)alignment; (void)logical_size;
+    return bytes.data() + offset;
+}
+[[nodiscard]] inline const uint8_t* frameBufferData(const FrameBuffer& buf) noexcept {
+    const auto& [bytes, alignment, logical_size, offset] = buf;
+    (void)alignment; (void)logical_size;
+    return bytes.data() + offset;
+}
+[[nodiscard]] inline size_t frameBufferSize(const FrameBuffer& buf) noexcept {
+    const auto& [bytes, alignment, logical_size, offset] = buf;
+    (void)bytes; (void)alignment; (void)offset;
+    return logical_size;
+}
 
 // @rtx-type-justification
 // Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
+// Why-Std-Fails: 跨解码/滤镜/编码管线的视频帧描述聚合，封装像素格式、平面步长、设备/主机存储句柄、Flicks 时间戳与 HDR10 附带信息。
+// Invariant: 有效帧满足 width > 0 && height > 0，plane_count 不超过 kMaxPlanes 且主平面指针非空。
 struct Frame {
     int width = 0;
     int height = 0;
@@ -487,12 +341,12 @@ struct Frame {
     int64_t duration = 0;
     uint64_t fence_value = 0;
     bool keyframe = false;
-    ColorDescription color{};
+    ColorDescription color{ColorPrimaries::BT709, TransferFunction::BT709, MatrixCoefficients::BT709, ColorRange::Limited};
     Hdr10Metadata hdr{};
 
     bool valid() const noexcept { return width > 0 && height > 0 && format != PixelFormat::Unknown; }
     bool isDeviceResident() const noexcept { return device_planes[0] != kInvalidDevicePtr; }
-    size_t hostSize() const noexcept { return storage ? storage->size() : 0; }
+    size_t hostSize() const noexcept { return storage ? frameBufferSize(*storage) : 0; }
 
     std::span<uint8_t> planeSpan(int plane) noexcept {
         if (plane < 0 || plane >= 3 || !planes[plane]) {
@@ -535,45 +389,14 @@ struct Frame {
     }
 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct PlaneRect {
-    int x = 0;
-    int y = 0;
-    int width = 0;
-    int height = 0;
-};
+
+// Phase 12 (Wave 12.2-C): tuple alias (stream_index, sample_rate, channels, opaque_codecpar).
+using AudioTrackInfo = std::tuple<int, int, int, std::shared_ptr<void>>;
 
 // @rtx-type-justification
 // Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct AudioTrackInfo {
-    int stream_index = -1;
-    int codec_id = 0;
-    std::string codec_name;
-    int sample_rate = 0;
-    int channels = 0;
-    uint64_t channel_layout = 0;
-    int bitrate = 0;
-    Rational time_base{1, 48000};
-    std::vector<uint8_t> extradata;
-    uint32_t codec_tag = 0;
-    int profile = 0;
-    int frame_size = 0;
-    int initial_padding = 0;
-    int trailing_padding = 0;
-    int bits_per_coded_sample = 0;
-    int format = 0;
-    std::shared_ptr<void> opaque_codecpar;
-};
-
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
+// Why-Std-Fails: 解复用/封装层压缩码流包聚合，承载原始字节载荷、PTS/DTS/Duration、关键帧标志与 Flicks 重标定时间戳。
+// Invariant: flicks_valid 为 true 时 pts_flicks 与 (pts, time_base) 严格对齐。
 struct Packet {
     std::vector<uint8_t> data;
     int64_t pts = 0;

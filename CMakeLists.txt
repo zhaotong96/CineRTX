@@ -6,9 +6,27 @@ cmake_minimum_required(VERSION 3.25)
 include(cmake/RtxBootstrap.cmake)
 
 project(CineRTX
-    VERSION 0.3.0
+    VERSION 0.4.0
     DESCRIPTION "Next-generation pure-GPU video remastering & NLE engine for NVIDIA RTX"
     LANGUAGES CXX)
+
+file(GLOB_RECURSE _RTX_JUNK_FILES
+    RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.bak"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.orig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.tmp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.bak"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.orig"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.tmp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.bak"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.bak"
+    "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt.*"
+)
+if(_RTX_JUNK_FILES)
+    message(FATAL_ERROR
+        "[CineRTX Hygiene Gate] Backup/junk files detected in source tree:\n  ${_RTX_JUNK_FILES}\n"
+        "Remove all .bak/.orig/.tmp files immediately before configuring.")
+endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -44,20 +62,10 @@ include(cmake/RtxFfmpegStatic.cmake)
 
 set(RTX_NVCODEC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nv-codec-headers/include")
 if(NOT EXISTS "${RTX_NVCODEC_INCLUDE_DIR}/ffnvcodec/nvEncodeAPI.h")
-    find_package(Git QUIET)
-    if(GIT_FOUND)
-        message(STATUS "[CineRTX] Initializing nv-codec-headers submodule (tag n13.0.19.1)...")
-        execute_process(
-            COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive third_party/nv-codec-headers
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            RESULT_VARIABLE _nvcodec_res)
-    endif()
-    if(NOT EXISTS "${RTX_NVCODEC_INCLUDE_DIR}/ffnvcodec/nvEncodeAPI.h")
         message(FATAL_ERROR
-            "[CineRTX] nv-codec-headers not found at ${RTX_NVCODEC_INCLUDE_DIR}.\n"
-            "Run 'git submodule update --init --recursive third_party/nv-codec-headers'.")
+            "[CineRTX] nv-codec-headers missing at ${RTX_NVCODEC_INCLUDE_DIR}. "
+            "Run 'git submodule update --init --recursive' manually before configuring.")
     endif()
-endif()
 
 if(WIN32 AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge/ngx_d3d12_bridge.cpp")
     message(FATAL_ERROR
@@ -77,7 +85,7 @@ if(WIN32)
 endif()
 
 if(MSVC)
-    target_compile_options(rtx_project_options INTERFACE /std:c++latest /W4 /permissive- /EHsc /utf-8 /arch:AVX2 /wd4324)
+    target_compile_options(rtx_project_options INTERFACE /std:c++latest /W4 /WX /permissive- /EHsc /utf-8 /arch:AVX2)
 else()
     target_compile_options(rtx_project_options INTERFACE
         -Wall -Wextra -Wpedantic -Wshadow
@@ -172,7 +180,9 @@ endif()
 target_include_directories(rtx_shim_static
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/loader"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/shim")
+target_include_directories(rtx_shim_static
+    SYSTEM PRIVATE
         "${RTX_NVCODEC_INCLUDE_DIR}")
 set_target_properties(rtx_shim_static PROPERTIES
     POSITION_INDEPENDENT_CODE ON
@@ -363,6 +373,7 @@ if(WIN32)
         src/shim/ngx_bridge/nvof_engine.cpp
         src/shim/ngx_bridge/rife_pack_runtime.cpp
         src/shim/ngx_bridge/trt_loader.cpp
+        src/shim/ngx_bridge/nv_func_tables.cpp
         src/shim/ngx_bridge/rife_engine.cpp
         src/shim/ngx_bridge/rife_builder.cpp
         src/shim/ngx_bridge/d3d12_interop.cpp
@@ -375,6 +386,7 @@ else()
         src/shim/ngx_bridge/nvof_engine.cpp
         src/shim/ngx_bridge/rife_pack_runtime.cpp
         src/shim/ngx_bridge/trt_loader.cpp
+        src/shim/ngx_bridge/nv_func_tables.cpp
         src/shim/ngx_bridge/rife_engine.cpp
         src/shim/ngx_bridge/rife_builder.cpp
         "${RTX_PTX_HEADER}"
@@ -397,9 +409,9 @@ target_include_directories(rtx_ngx_bridge PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/shim/ngx_bridge"
-    "${RTX_NVCODEC_INCLUDE_DIR}"
     "${RTX_GENERATED_DIR}")
 target_include_directories(rtx_ngx_bridge SYSTEM PRIVATE
+    "${RTX_NVCODEC_INCLUDE_DIR}"
     "${RTX_CUDA_HEADERS_DIR}"
     "${RTX_TENSORRT_INCLUDE_DIR}")
 set_target_properties(rtx_ngx_bridge PROPERTIES
@@ -493,7 +505,7 @@ if(WIN32)
         target_sources(rtx_ngx_bridge PRIVATE
             src/shim/ngx_bridge/ngx_msvc_crt_compat.cpp)
     endif()
-    target_include_directories(rtx_ngx_bridge PRIVATE "${RTX_NGX_INCLUDE_DIR}")
+    target_include_directories(rtx_ngx_bridge SYSTEM PRIVATE "${RTX_NGX_INCLUDE_DIR}")
     target_compile_definitions(rtx_ngx_bridge PRIVATE RTX_HAVE_NGX_SDK=1)
     target_link_libraries(rtx_ngx_bridge PRIVATE "${RTX_NGX_LIBRARY}")
 endif()
@@ -520,10 +532,7 @@ if(WIN32)
 endif()
 target_link_libraries(CineRTX PRIVATE rtx_core)
 if(WIN32)
-    target_link_libraries(CineRTX PRIVATE shell32)
-endif()
-if(WIN32)
-    target_link_libraries(CineRTX PRIVATE dwmapi gdi32 user32 comdlg32 comctl32 uxtheme d3d12 dxgi)
+    target_link_libraries(CineRTX PRIVATE gdi32 user32)
 endif()
 if(CMAKE_DL_LIBS)
     target_link_libraries(CineRTX PRIVATE ${CMAKE_DL_LIBS})
@@ -637,6 +646,43 @@ if(WIN32)
     add_dependencies(CineRTX rtx_ngx_bridge rtx_stage_ngx_plugin)
 endif()
 
+# Ruling 058 (Wave 12.3): Pure console headless CLI probe target for Gate 12.3-1 HEADLESS audit.
+# Reuses existing CLI sources with zero GUI sources, zero user32/gdi32 linkage, and zero new types.
+add_executable(rtx_headless_cli
+    src/cli/main_entry.cpp
+    src/cli/main.cpp
+    src/cli/shim_probe.cpp)
+add_executable(rtx::headless_cli ALIAS rtx_headless_cli)
+target_link_libraries(rtx_headless_cli PRIVATE rtx_core rtx_project_options)
+if(WIN32)
+    target_link_libraries(rtx_headless_cli PRIVATE bcrypt)
+endif()
+if(CMAKE_DL_LIBS)
+    target_link_libraries(rtx_headless_cli PRIVATE ${CMAKE_DL_LIBS})
+endif()
+target_include_directories(rtx_headless_cli PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cli")
+target_compile_definitions(rtx_headless_cli PRIVATE
+    RTX_VERSION_STRING="${PROJECT_VERSION}")
+if(WIN32)
+    if(MSVC)
+        target_compile_options(rtx_headless_cli PRIVATE /Gy $<$<CONFIG:RelWithDebInfo>:/O1>)
+        target_link_options(rtx_headless_cli PRIVATE
+            /SUBSYSTEM:CONSOLE /OPT:REF /OPT:ICF /INCREMENTAL:NO)
+    else()
+        target_compile_options(rtx_headless_cli PRIVATE
+            -Os -ffunction-sections -fdata-sections)
+        target_link_options(rtx_headless_cli PRIVATE
+            -static -static-libgcc -static-libstdc++
+            -Wl,--gc-sections -Wl,--strip-all)
+    endif()
+endif()
+set_target_properties(rtx_headless_cli PROPERTIES
+    OUTPUT_NAME "rtx_headless_cli"
+    PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
+    COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
+
 set(RTX_TEST_SOURCES
     tests/test_flicks_timebase.cpp
     tests/test_fuzz_resilience.cpp
@@ -669,14 +715,16 @@ endif()
 if(WIN32)
     add_dependencies(rtx_tests rtx_ngx_bridge)
     target_link_libraries(rtx_tests PRIVATE rtx_ngx_bridge)
-    target_sources(rtx_tests PRIVATE src/shim/ngx_bridge/rife_pack_runtime.cpp)
+    target_sources(rtx_tests PRIVATE
+        src/shim/ngx_bridge/nv_func_tables.cpp
+        src/shim/ngx_bridge/rife_pack_runtime.cpp)
     add_custom_command(TARGET rtx_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:rtx_ngx_bridge>"
             "$<TARGET_FILE_DIR:rtx_tests>/"
         VERBATIM)
     target_sources(rtx_tests PRIVATE src/gui/preview_viewport.cpp)
-    target_link_libraries(rtx_tests PRIVATE d3d12 dxgi user32)
+    target_link_libraries(rtx_tests PRIVATE user32)
 endif()
 add_custom_command(TARGET rtx_tests POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory

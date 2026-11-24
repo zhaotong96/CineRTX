@@ -1,7 +1,7 @@
 # 16_CineRTX Phase 10 WebUI v3 样式重构领域专家专项验收与精修规范
 
 - **文档编号**：`DOC-P10-16`
-- **审计标的**：`Google Drive\work\CineRTX\webui\` 下的 WebUI v3 样式重构产物（[`webui/index.html`](../../webui/index.html)、[`webui/app.css`](../../webui/app.css)、[`webui/app.js`](../../webui/app.js)、[`webui/server.py`](../../webui/server.py)、[`webui/state.json`](../../webui/state.json)、[`webui/README.md`](../../webui/README.md)）
+- **审计标的**：`workspace\work\CineRTX\webui\` 下的 WebUI v3 样式重构产物（[`webui/index.html`](../../webui/index.html)、[`webui/app.css`](../../webui/app.css)、[`webui/app.js`](../../webui/app.js)、[`webui/server.py`](../../webui/server.py)、[`webui/state.json`](../../webui/state.json)、[`webui/README.md`](../../webui/README.md)）
 - **关联主干契约**：[`include/rtx/param_schema.h`](../../include/rtx/param_schema.h)（`9,264 B`，20 参数 SSOT 契约）、[`08_CineRTX_Phase10_WebUI_v2重构评审与三端对齐SuperPower规范.md`](08_CineRTX_Phase10_WebUI_v2重构评审与三端对齐SuperPower规范.md)、[`15_CineRTX_Phase10_全栈收官终审驳回裁决暨C++主干合龙SuperPower返工规范.md`](15_CineRTX_Phase10_全栈收官终审驳回裁决暨C++主干合龙SuperPower返工规范.md)
 - **签发角色**：多媒体系统工程与 GPU 异构计算首席领域专家（Chief Domain Expert）
 - **审计日期**：2026-11-18

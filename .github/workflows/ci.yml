@@ -34,6 +34,15 @@ jobs:
       - name: Audit SPDX headers and GPL/MIT boundary
         run: cmake -P cmake/AuditSpdx.cmake
 
+      - name: Audit named types (Std-First <= 35)
+        run: cmake -P cmake/AuditTypes.cmake
+
+      - name: Audit Core Engine Pure SLOC (<= 23,000)
+        run: cmake -P cmake/AuditSloc.cmake
+
+      - name: Audit repository privacy and host path hygiene
+        run: cmake -P cmake/AuditPrivacy.cmake
+
   linux-gcc:
     name: Linux GCC (${{ matrix.build_type }})
     needs: compliance
@@ -46,6 +55,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Ninja and FFmpeg development packages
         # The media container layer is unconditional, and on Linux it is
@@ -69,8 +80,10 @@ jobs:
         # dependent failure must be caught here rather than on a user machine.
         run: ctest --preset linux-release --output-on-failure --repeat until-fail:10
 
-      - name: Audit import tables
-        run: cmake -DBUILD_DIR=.vs/build/cmake/linux-release -P cmake/AuditImports.cmake
+      - name: Audit ELF dynamic dependencies
+        run: |
+          ldd .vs/build/cmake/linux-release/CineRTX
+          ! ldd .vs/build/cmake/linux-release/CineRTX | grep -iE "libcuda|libnvcuvid|libnvidia-encode|libnvinfer"
 
       - name: Probe and CLI smoke test
         run: |
@@ -82,7 +95,7 @@ jobs:
           import json
           schema = json.load(open(".vs/build/schema.json", encoding="utf-8"))
           assert schema.get("defaults", {}).get("codec") == "av1", "Missing default codec=av1"
-          assert isinstance(schema.get("params"), list) and len(schema["params"]) == 19, "Expected 19 SSOT params"
+          assert isinstance(schema.get("params"), list) and len(schema["params"]) == 20, "Expected 20 SSOT params"
           assert any(p.get("key") == "codec" for p in schema["params"]), "Missing codec key in params array"
           assert "i18n" in schema and "en" in schema["i18n"] and "zh" in schema["i18n"], "Missing i18n dictionary"
           print("schema JSON verification passed, param count:", len(schema["params"]))
@@ -104,6 +117,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Configure
         run: cmake --preset windows-msvc-ninja
@@ -114,8 +129,10 @@ jobs:
       - name: Test
         run: ctest --preset windows-msvc-ninja --output-on-failure --repeat until-fail:10
 
-      - name: Audit import tables
-        run: cmake -DBUILD_DIR=.vs/build/cmake/windows-msvc-ninja -P cmake/AuditImports.cmake
+      - name: Audit PE static import tables (GUI + Headless)
+        run: |
+          cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/CineRTX.exe -DMODE=GUI -P cmake/AuditImports.cmake
+          cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/rtx_headless_cli.exe -DMODE=HEADLESS -P cmake/AuditImports.cmake
 
       - name: Probe and CLI smoke test
         shell: pwsh
@@ -129,7 +146,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$exe`" --probe --json > .vs\build\probe.json"
           if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 4 -and $LASTEXITCODE -ne 5) { exit $LASTEXITCODE }
-          python -c "import json; s=json.load(open('.vs/build/schema.json', encoding='utf-8')); assert s.get('defaults',{}).get('codec')=='av1' and len(s.get('params',[]))==19 and any(p.get('key')=='codec' for p in s['params']) and 'i18n' in s; print('schema JSON ok, params:', len(s['params']))"
+          python -c "import json; s=json.load(open('.vs/build/schema.json', encoding='utf-8')); assert s.get('defaults',{}).get('codec')=='av1' and len(s.get('params',[]))==20 and any(p.get('key')=='codec' for p in s['params']) and 'i18n' in s; print('schema JSON ok, params:', len(s['params']))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -c "import json; p=json.load(open('.vs/build/probe.json', encoding='utf-8')); assert p.get('abi_version') in (2, 4); print('probe JSON ok:', p.get('result_name', 'UNKNOWN'))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -142,6 +159,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Zig 0.13.0
         shell: pwsh
@@ -164,8 +183,10 @@ jobs:
       - name: Test
         run: ctest --preset zig-windows --output-on-failure --repeat until-fail:10
 
-      - name: Audit import tables
-        run: cmake -DBUILD_DIR=.vs/build/cmake/zig-windows -P cmake/AuditImports.cmake
+      - name: Audit PE static import tables (GUI + Headless)
+        run: |
+          cmake -DTARGET_BIN=.vs/build/cmake/zig-windows/CineRTX.exe -DMODE=GUI -P cmake/AuditImports.cmake
+          cmake -DTARGET_BIN=.vs/build/cmake/zig-windows/rtx_headless_cli.exe -DMODE=HEADLESS -P cmake/AuditImports.cmake
 
       - name: Probe and CLI smoke test
         shell: pwsh
@@ -179,7 +200,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$exe`" --probe --json > .vs\build\probe.json"
           if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 4 -and $LASTEXITCODE -ne 5) { exit $LASTEXITCODE }
-          python -c "import json; s=json.load(open('.vs/build/schema.json', encoding='utf-8')); assert s.get('defaults',{}).get('codec')=='av1' and len(s.get('params',[]))==19 and any(p.get('key')=='codec' for p in s['params']) and 'i18n' in s; print('schema JSON ok, params:', len(s['params']))"
+          python -c "import json; s=json.load(open('.vs/build/schema.json', encoding='utf-8')); assert s.get('defaults',{}).get('codec')=='av1' and len(s.get('params',[]))==20 and any(p.get('key')=='codec' for p in s['params']) and 'i18n' in s; print('schema JSON ok, params:', len(s['params']))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -c "import json; p=json.load(open('.vs/build/probe.json', encoding='utf-8')); assert p.get('abi_version') in (2, 4); print('probe JSON ok:', p.get('result_name', 'UNKNOWN'))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -191,6 +212,7 @@ jobs:
           if-no-files-found: error
           path: |
             .vs/build/cmake/zig-windows/CineRTX.exe
+            .vs/build/cmake/zig-windows/rtx_headless_cli.exe
 
   package:
     name: Package release archive

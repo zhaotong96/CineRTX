@@ -1,7 +1,7 @@
 # 17_CineRTX Phase 10 WebUI v3 样式与几何精修终审验收通过报告
 
 - **文档编号**：`DOC-P10-17`
-- **审计标的**：`Google Drive\work\CineRTX\webui\` 下的 WebUI v3 精修产物（[`webui/index.html`](../../webui/index.html)、[`webui/app.css`](../../webui/app.css)、[`webui/app.js`](../../webui/app.js)、[`webui/README.md`](../../webui/README.md)、[`webui/server.py`](../../webui/server.py)、[`webui/state.json`](../../webui/state.json)）
+- **审计标的**：`workspace\work\CineRTX\webui\` 下的 WebUI v3 精修产物（[`webui/index.html`](../../webui/index.html)、[`webui/app.css`](../../webui/app.css)、[`webui/app.js`](../../webui/app.js)、[`webui/README.md`](../../webui/README.md)、[`webui/server.py`](../../webui/server.py)、[`webui/state.json`](../../webui/state.json)）
 - **前置基准规范**：[`16_CineRTX_Phase10_WebUI_v3样式重构领域专家专项验收与精修规范.md`](16_CineRTX_Phase10_WebUI_v3样式重构领域专家专项验收与精修规范.md)（`WUI-S3-01 ~ WUI-S3-05`）
 - **签发角色**：多媒体系统工程与 GPU 异构计算首席领域专家（Chief Domain Expert）
 - **审计日期**：2026-11-18
@@ -29,6 +29,6 @@
 
 ## 3. 非阻断性工程卫生加固建议（Non-Blocking Hygiene Note）
 
-在 `2026-11-18T09:03:15Z` 启动本地测试时，Python 解释器在 `webui/` 目录下自动生成了字节码缓存目录 `webui/__pycache__/server.cpython-314.pyc`（目录 ID：`1PgPEyai1gsAkXUAlaOrLaD6vr_89GD83`），并被 Google Drive 客户端同步上云。
+在 `2026-11-18T09:03:15Z` 启动本地测试时，Python 解释器在 `webui/` 目录下自动生成了字节码缓存目录 `webui/__pycache__/server.cpython-314.pyc`（目录 ID：`[REDACTED_ID]`），并被 workspace 客户端同步上云。
 
-- **根治建议**：在 [`webui/server.py`](../../webui/server.py) 顶部 `import sys` 后插入一行 `sys.dont_write_bytecode = True`，并随手删除 `webui/__pycache__` 文件夹，即可永久阻止 Python 在 Google Drive 同步工作区下生成 `.pyc` 缓存文件。
+- **根治建议**：在 [`webui/server.py`](../../webui/server.py) 顶部 `import sys` 后插入一行 `sys.dont_write_bytecode = True`，并随手删除 `webui/__pycache__` 文件夹，即可永久阻止 Python 在 workspace 同步工作区下生成 `.pyc` 缓存文件。

@@ -7,7 +7,6 @@
 #include "rtx/ngx_remaster.h"
 
 #include <cstring>
-#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <utility>
@@ -62,9 +61,6 @@ void* openSharedLibrary(const std::string& path, bool absolute_path) {
         ? (LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
         : LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
     HMODULE mod = LoadLibraryExW(wide.c_str(), nullptr, flags);
-    if (mod == nullptr) {
-        mod = LoadLibraryW(wide.c_str());
-    }
     return reinterpret_cast<void*>(mod);
 }
 void* resolveSymbol(void* handle, const char* name) {
@@ -110,139 +106,100 @@ std::atomic<NgxRemasterBridge*>& activePreviewMonitor() noexcept {
     static std::atomic<NgxRemasterBridge*> monitor{nullptr};
     return monitor;
 }
-// @rtx-type-justification
-// Category: Polymorphic-Boundary
-// Why-Std-Fails: IVideoFrameSink 跨层虚接口的播放桥实现：通过动态加载的 NgxRemasterBridge 调用 pack/borrow 并协调 3 槽共享标志生命周期，std::function 无法替代。
-// Invariant: 槽位空闲标志（shared_ptr 共享所有权）由视口 Fence 退役回调归还；pack 失败立即归还标志；析构先释放 RtxNgxBridge 再卸载动态库句柄。
-class HeadlessPlaybackSink final : public IVideoFrameSink {
-public:
-    static std::unique_ptr<IVideoFrameSink> create(const MediaInfo& info,
-                                                   std::function<void()> on_frame,
-                                                   BorrowCallback& out_borrow) {
-        NvidiaShim shim;
-        std::string shim_error;
-        if (!shim.open(&shim_error)) {
-            logError("headless preview sink: rtx_shim unavailable: " + shim_error);
-            return nullptr;
-        }
-        RtxDiagnostics diagnostics{};
-        if (shim.probe(&diagnostics) != RTX_OK) {
-            logError("headless preview sink: rtx_shim probe failed");
-            return nullptr;
-        }
-        auto loader = std::make_unique<NgxRemasterBridge>();
-        std::string bridge_err;
-        if (!loader->open(&bridge_err) || !loader->hasPlaybackPackApi()) {
-            logError("headless preview sink: rtx_ngx_bridge.dll unavailable: " + bridge_err);
-            return nullptr;
-        }
-        RtxNgxBridgeConfig config{};
-        std::memcpy(config.luid, diagnostics.device.luid, sizeof(config.luid));
-        config.luid_node_mask = diagnostics.device.luid_node_mask;
-        config.input_width = info.width;
-        config.input_height = info.height;
-        config.output_width = config.input_width;
-        config.output_height = config.input_height;
-        config.vsr_quality = 0;
-        config.enable_truehdr = 0;
-        config.reserved[0] = 1u;
+}  // namespace
 
-        RtxNgxBridge* bridge = nullptr;
-        if (loader->create(&config, &bridge) != RTX_OK || bridge == nullptr) {
-            logError("headless preview sink: headless bridge create failed");
-            return nullptr;
-        }
-        const int32_t full_range = info.color.range == ColorRange::Full ? 1 : 0;
-        const int32_t matrix = info.color.matrix == MatrixCoefficients::BT2020NC ? 1 : 0;
-        auto sink = std::unique_ptr<HeadlessPlaybackSink>(
-            new HeadlessPlaybackSink(std::move(loader), bridge, full_range, matrix, std::move(on_frame)));
-        out_borrow = [raw = sink.get()](std::uint32_t& slot, PreviewSlotBorrow& borrow) {
-            return raw != nullptr && raw->borrowLatest(slot, borrow);
-        };
-        return sink;
+std::optional<VideoFrameSink> createHeadlessPreviewSink(const MediaInfo& info,
+                                                        std::function<void()> on_frame,
+                                                        BorrowCallback& out_borrow) {
+    NvidiaShim shim;
+    std::string shim_error;
+    if (!shim.open(&shim_error)) {
+        logError("headless preview sink: rtx_shim unavailable: " + shim_error);
+        return std::nullopt;
     }
-    ~HeadlessPlaybackSink() override {
-        if (bridge_ != nullptr && loader_) {
-            loader_->releaseBridge(bridge_);
-            bridge_ = nullptr;
-        }
+    RtxDiagnostics diagnostics{};
+    if (shim.probe(&diagnostics) != RTX_OK) {
+        logError("headless preview sink: rtx_shim probe failed");
+        return std::nullopt;
     }
-    Result<void> present(const RtxFrameDesc& frame, int64_t /*deadline_flicks*/,
-                         uint64_t /*retire_fence*/) override {
+    auto loader = std::make_shared<NgxRemasterBridge>();
+    std::string bridge_err;
+    if (!loader->open(&bridge_err) || !loader->hasPlaybackPackApi()) {
+        logError("headless preview sink: rtx_ngx_bridge.dll unavailable: " + bridge_err);
+        return std::nullopt;
+    }
+    RtxNgxBridgeConfig config{};
+    std::memcpy(config.luid, diagnostics.device.luid, sizeof(config.luid));
+    config.luid_node_mask = diagnostics.device.luid_node_mask;
+    config.input_width = info.width;
+    config.input_height = info.height;
+    config.output_width = config.input_width;
+    config.output_height = config.input_height;
+    config.vsr_quality = 0;
+    config.enable_truehdr = 0;
+    config.reserved[0] = 1u;
+
+    RtxNgxBridge* raw_bridge = nullptr;
+    if (loader->create(&config, &raw_bridge) != RTX_OK || raw_bridge == nullptr) {
+        logError("headless preview sink: headless bridge create failed");
+        return std::nullopt;
+    }
+    std::shared_ptr<RtxNgxBridge> bridge(raw_bridge, [loader](RtxNgxBridge* b) {
+        if (b != nullptr) loader->releaseBridge(b);
+    });
+    const auto [cp, ct, cm, cr] = info.color;
+    (void)cp; (void)ct;
+    const int32_t full_range = cr == ColorRange::Full ? 1 : 0;
+    const int32_t matrix = cm == MatrixCoefficients::BT2020NC ? 1 : 0;
+    auto slot_flags = std::make_shared<std::array<std::atomic<std::uint32_t>, 3>>();
+    auto latest_slot = std::make_shared<std::atomic<std::uint32_t>>(0);
+    auto published = std::make_shared<std::atomic<bool>>(false);
+
+    out_borrow = [loader, bridge, slot_flags, latest_slot, published](
+                     std::uint32_t& slot, PreviewSlotBorrow& borrow) -> bool {
+        if (!published->load(std::memory_order_acquire) || !loader->hasBorrowPreviewApi()) return false;
+        const std::uint32_t latest = latest_slot->load(std::memory_order_acquire);
+        if (latest == slot) return false;
+        void* device = nullptr;
+        void* resource = nullptr;
+        std::uint32_t pitch = 0;
+        if (loader->borrowPreview(bridge.get(), latest, &device, &resource, &pitch) != RTX_OK ||
+            resource == nullptr) {
+            return false;
+        }
+        slot = latest;
+        borrow = {device, resource, pitch, slot_flags};
+        return true;
+    };
+
+    auto present_fn = [loader, bridge, slot_flags, latest_slot, published, full_range, matrix,
+                       on_frame = std::move(on_frame)](const RtxFrameDesc& frame, int64_t,
+                                                       uint64_t) -> Result<void> {
         std::uint32_t slot = 0;
         bool acquired = false;
-        for (std::uint32_t i = 0; i < kSlotCount; ++i) {
+        for (std::uint32_t i = 0; i < 3u; ++i) {
             std::uint32_t expected = 0;
-            if ((*slot_flags_)[i].compare_exchange_strong(expected, 1u, std::memory_order_acq_rel)) {
+            if ((*slot_flags)[i].compare_exchange_strong(expected, 1u, std::memory_order_acq_rel)) {
                 slot = i;
                 acquired = true;
                 break;
             }
         }
-        if (!acquired) {
-            return {};  // 全忙：跳过本次预览，绝不阻塞解码线程
-        }
-        const int32_t packed = loader_->playbackPack(
-            bridge_, frame.planes[0], frame.planes[1], frame.pitches[0], frame.pitches[1],
+        if (!acquired) return {};
+        const int32_t packed = loader->playbackPack(
+            bridge.get(), frame.planes[0], frame.planes[1], frame.pitches[0], frame.pitches[1],
             static_cast<std::uint32_t>(frame.width), static_cast<std::uint32_t>(frame.height),
-            frame.format, full_range_, matrix_, slot);
+            frame.format, full_range, matrix, slot);
         if (packed != RTX_OK) {
-            (*slot_flags_)[slot].store(0, std::memory_order_release);
-            return err(ErrorCode::Internal, "playback pack failed",
-                       std::to_string(static_cast<int>(packed)));
+            (*slot_flags)[slot].store(0, std::memory_order_release);
+            return err(ErrorCode::Internal, "playback pack failed", std::to_string(static_cast<int>(packed)));
         }
-        latest_slot_.store(slot, std::memory_order_release);
-        published_.store(true, std::memory_order_release);
-        if (on_frame_) {
-            on_frame_();
-        }
+        latest_slot->store(slot, std::memory_order_release);
+        published->store(true, std::memory_order_release);
+        if (on_frame) on_frame();
         return {};
-    }
-    [[nodiscard]] uint64_t completedFence() const noexcept override { return UINT64_MAX; }
-
-    bool borrowLatest(std::uint32_t& slot, PreviewSlotBorrow& borrow) noexcept {
-        if (!published_.load(std::memory_order_acquire) || !loader_ || !loader_->hasBorrowPreviewApi()) {
-            return false;
-        }
-        const std::uint32_t latest = latest_slot_.load(std::memory_order_acquire);
-        if (latest == slot) {
-            return false;
-        }
-        void* device = nullptr;
-        void* resource = nullptr;
-        std::uint32_t pitch = 0;
-        if (loader_->borrowPreview(bridge_, latest, &device, &resource, &pitch) != RTX_OK ||
-            resource == nullptr) {
-            return false;
-        }
-        slot = latest;
-        borrow = {device, resource, pitch, slot_flags_};
-        return true;
-    }
-private:
-    static constexpr std::uint32_t kSlotCount = 3;
-
-    HeadlessPlaybackSink(std::unique_ptr<NgxRemasterBridge> loader, RtxNgxBridge* bridge,
-                         int32_t full_range, int32_t matrix, std::function<void()> on_frame)
-        : loader_(std::move(loader)), bridge_(bridge), full_range_(full_range),
-          matrix_(matrix), on_frame_(std::move(on_frame)) {}
-
-    std::unique_ptr<NgxRemasterBridge> loader_;
-    RtxNgxBridge* bridge_ = nullptr;
-    int32_t full_range_ = 0;
-    int32_t matrix_ = 0;
-    std::function<void()> on_frame_;
-    PreviewSlotFlags slot_flags_ = std::make_shared<std::array<std::atomic<std::uint32_t>, kSlotCount>>();
-    std::atomic<std::uint32_t> latest_slot_{0};
-    std::atomic<bool> published_{false};
-};
-
-}  // namespace
-
-std::unique_ptr<IVideoFrameSink> createHeadlessPreviewSink(const MediaInfo& info,
-                                                           std::function<void()> on_frame,
-                                                           BorrowCallback& out_borrow) {
-    return HeadlessPlaybackSink::create(info, std::move(on_frame), out_borrow);
+    };
+    return VideoFrameSink{std::move(present_fn), []() noexcept -> uint64_t { return UINT64_MAX; }};
 }
 void NgxRemasterBridge::publishActivePreviewBridge(NgxRemasterBridge& loader,
                                                    RtxNgxBridge* bridge) {
@@ -313,9 +270,6 @@ bool NgxRemasterBridge::open(std::string* error) {
     close();
 
     std::vector<std::pair<std::string, bool>> candidates;
-    if (const char* env_path = std::getenv("RTX_NGX_BRIDGE_PATH"); env_path != nullptr && env_path[0] != '\0') {
-        candidates.emplace_back(env_path, true);
-    }
     const std::string exe_dir = executableDirectory();
     const std::string fname = bridgeFileName();
     if (!exe_dir.empty()) {

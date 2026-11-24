@@ -3,7 +3,7 @@
 - **文档编号**：`CINERTX-P11-REPORT-031`
 - **依据施工单**：[`30_CineRTX Phase 11.2-R 施工单_注释无损回植与专家直通架构提纯.md`](30_CineRTX%20Phase%2011.2-R%20施工单_注释无损回植与专家直通架构提纯.md)
 - **指导基准**：[`29_CineRTX 11.2-R 专家裁决方案.md`](29_CineRTX%2011.2-R%20专家裁决方案.md)
-- **执行方式**：Google Drive 工作区重命名备份（`*.pre30.bak`）+ 原始格式全量替换；无 Git 访问。
+- **执行方式**：workspace 工作区重命名备份（`*.pre30.bak`）+ 原始格式全量替换；无 Git 访问。
 
 ---
 
@@ -64,13 +64,13 @@
 
 ## 三、 阻塞项与宿主机收口指令
 
-以下两项受限于当前无头 Linux 沙箱环境及 Google Drive 工具无文件物理删除 API，需在 Windows 宿主机同步 Drive 后一键执行闭环：
+以下两项受限于当前无头 Linux 沙箱环境及 workspace 工具无文件物理删除 API，需在 Windows 宿主机同步 Drive 后一键执行闭环：
 
 1. **剩余 88 个文件注释批量回植 & 物理销毁 `phase112r_governance_archive.md`**（Drive API 仅支持单文件更新且无删除接口，避免提前重命名导致账本丢失，保留原归档文件供脚本消费）：
    ```powershell
    python scripts/reimplant_phase112r_comments.py --apply --delete-archive
    ```
-   *(同步建议清理 Google Drive 中 `*.pre30.bak` 与根目录下 `CMakeLists_gdoc_unused.bak` 备份文件。)*
+   *(同步建议清理 workspace 中 `*.pre30.bak` 与根目录下 `CMakeLists_gdoc_unused.bak` 备份文件。)*
 
 2. **MSVC 零警告编译、CMake 三件套门禁与双目录 128/128 单测验证**（沙箱无 Windows SDK / MSVC / D3D12 / CUDA）：
    ```powershell

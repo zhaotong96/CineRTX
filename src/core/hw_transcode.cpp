@@ -72,39 +72,34 @@ std::string describe(const char* op, RtxResult res, const char* detail) {
 RtxHdrMetadata toShimHdr(const Hdr10Metadata& hdr) {
     RtxHdrMetadata out{};
     out.enabled = hdr.enabled ? 1 : 0;
-    out.red_x = hdr.mastering.red_x;
-    out.red_y = hdr.mastering.red_y;
-    out.green_x = hdr.mastering.green_x;
-    out.green_y = hdr.mastering.green_y;
-    out.blue_x = hdr.mastering.blue_x;
-    out.blue_y = hdr.mastering.blue_y;
-    out.white_x = hdr.mastering.white_x;
-    out.white_y = hdr.mastering.white_y;
-    out.max_luminance = hdr.mastering.max_luminance;
-    out.min_luminance = hdr.mastering.min_luminance;
-    out.max_cll = hdr.cll.max_cll;
-    out.max_fall = hdr.cll.max_fall;
-    out.primaries = static_cast<int32_t>(hdr.color.primaries);
-    out.transfer = static_cast<int32_t>(hdr.color.transfer);
-    out.matrix = static_cast<int32_t>(hdr.color.matrix);
-    out.range = static_cast<int32_t>(hdr.color.range);
+    const auto [rx, ry, gx, gy, bx, by, wx, wy, max_l, min_l] = hdr.mastering;
+    out.red_x = rx; out.red_y = ry; out.green_x = gx; out.green_y = gy;
+    out.blue_x = bx; out.blue_y = by; out.white_x = wx; out.white_y = wy;
+    out.max_luminance = max_l; out.min_luminance = min_l;
+    out.max_cll = hdr.cll.first;
+    out.max_fall = hdr.cll.second;
+    const auto [cp, ct, cm, cr] = hdr.color;
+    out.primaries = static_cast<int32_t>(cp);
+    out.transfer = static_cast<int32_t>(ct);
+    out.matrix = static_cast<int32_t>(cm);
+    out.range = static_cast<int32_t>(cr);
     out.target_nits = hdr.target_nits;
     return out;
 }
 void applyHdrDefaults(Hdr10Metadata& hdr) {
     if (!hdr.enabled) return;
-    const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(TrueHdrParameters{});
+    const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(defaultTrueHdrParameters());
     if (!canonical.has_value()) return;
     const Hdr10Metadata& d = canonical.value();
-    if (hdr.mastering.max_luminance == 0) hdr.mastering.max_luminance = d.mastering.max_luminance;
-    if (hdr.mastering.min_luminance == 0) hdr.mastering.min_luminance = d.mastering.min_luminance;
-    if (hdr.mastering.red_x == 0) {
-        hdr.mastering.red_x = d.mastering.red_x; hdr.mastering.red_y = d.mastering.red_y;
-        hdr.mastering.green_x = d.mastering.green_x; hdr.mastering.green_y = d.mastering.green_y;
-        hdr.mastering.blue_x = d.mastering.blue_x; hdr.mastering.blue_y = d.mastering.blue_y;
-        hdr.mastering.white_x = d.mastering.white_x; hdr.mastering.white_y = d.mastering.white_y;
+    auto& [rx, ry, gx, gy, bx, by, wx, wy, max_l, min_l] = hdr.mastering;
+    const auto [drx, dry, dgx, dgy, dbx, dby, dwx, dwy, dmax_l, dmin_l] = d.mastering;
+    if (max_l == 0) max_l = dmax_l;
+    if (min_l == 0) min_l = dmin_l;
+    if (rx == 0) {
+        rx = drx; ry = dry; gx = dgx; gy = dgy;
+        bx = dbx; by = dby; wx = dwx; wy = dwy;
     }
-    if (hdr.cll.max_cll == 0) { hdr.cll.max_cll = d.cll.max_cll; hdr.cll.max_fall = d.cll.max_fall; }
+    if (hdr.cll.first == 0) { hdr.cll.first = d.cll.first; hdr.cll.second = d.cll.second; }
     if (hdr.target_nits == 0) hdr.target_nits = d.target_nits;
 }
 Rational chooseFrameRate(const HwTranscodeOptions& options, const MediaInfo& info) {
@@ -124,7 +119,7 @@ std::string jsonEscape(const std::string& value) {
         else if (c == '\n') output += "\\n";
         else if (c == '\r') output += "\\r";
         else if (c == '\t') output += "\\t";
-        else if (c < 0x20 || c >= 0x80) { char b[8] = {}; std::snprintf(b, sizeof(b), "\\u%04x", c); output += b; }
+        else if (c < 0x20 || c >= 0x80) { output += std::format("\\u{:04x}", static_cast<unsigned int>(c)); }
         else output += static_cast<char>(c);
     }
     return output;
@@ -204,11 +199,11 @@ Result<void> NvidiaTranscodeSession::configure(
     }
     report.device = diagnostics_.device.name;
     {
-        const VramScheduler budget_probe(kDefaultDxgiVramBudgetBytes, kVramMinDwellFrames);
+        const VramScheduler budget_probe = makeVramScheduler(kDefaultDxgiVramBudgetBytes, kVramMinDwellFrames);
         logInfo(std::format("VRAM hysteresis policy armed: budget={} MiB, high82={} MiB, low68={} MiB, dwell={}f",
-                            budget_probe.dxgiBudgetBytes() / (1024ull * 1024ull),
-                            budget_probe.highWatermarkBytes() / (1024ull * 1024ull),
-                            budget_probe.lowWatermarkBytes() / (1024ull * 1024ull),
+                            vramDxgiBudgetBytes(budget_probe) / (1024ull * 1024ull),
+                            vramHighWatermarkBytes(budget_probe) / (1024ull * 1024ull),
+                            vramLowWatermarkBytes(budget_probe) / (1024ull * 1024ull),
                             kVramMinDwellFrames));
     }
 
@@ -239,26 +234,30 @@ Result<void> NvidiaTranscodeSession::configure(
         report.output_width = target_width_;
         report.output_height = target_height_;
     } else if (is_remaster && is_portrait_input && geom_mode == GeometryTargetMode::Pillarbox) {
-        auto geom = calculateSmartGeometry(info_.width, info_.height, geom_mode, target_width_, target_height_);
-        if (info_.height > geom.canvas_height) {
+        const auto [cw, ch, sw, sh, ox, oy, pl, pr, is_p] =
+            calculateSmartGeometry(info_.width, info_.height, geom_mode, target_width_, target_height_);
+        (void)pl; (void)pr; (void)is_p;
+        if (info_.height > ch) {
             return err(ErrorCode::InvalidArgument,
                        std::format("pillarbox canvas height ({}) is smaller than portrait source height ({}); use AutoDirect or native mode",
-                                   geom.canvas_height, info_.height));
+                                   ch, info_.height));
         }
-        target_width_ = geom.canvas_width;
-        target_height_ = geom.canvas_height;
-        bridge_config_.output_offset_x = geom.offset_x;
-        bridge_config_.output_offset_y = geom.offset_y;
-        bridge_config_.scaled_width = geom.scaled_width;
-        bridge_config_.scaled_height = geom.scaled_height;
+        target_width_ = cw;
+        target_height_ = ch;
+        bridge_config_.output_offset_x = ox;
+        bridge_config_.output_offset_y = oy;
+        bridge_config_.scaled_width = sw;
+        bridge_config_.scaled_height = sh;
         report.output_width = target_width_;
         report.output_height = target_height_;
     } else if (is_remaster && (target_width_ <= 0 || target_height_ <= 0 ||
                                (is_portrait_input && geom_mode == GeometryTargetMode::AutoDirect &&
                                 target_width_ > target_height_))) {
-        auto geom = calculateSmartGeometry(info_.width, info_.height, geom_mode, target_width_, target_height_);
-        target_width_ = geom.canvas_width;
-        target_height_ = geom.canvas_height;
+        const auto [cw, ch, sw, sh, ox, oy, pl, pr, is_p] =
+            calculateSmartGeometry(info_.width, info_.height, geom_mode, target_width_, target_height_);
+        (void)sw; (void)sh; (void)ox; (void)oy; (void)pl; (void)pr; (void)is_p;
+        target_width_ = cw;
+        target_height_ = ch;
         report.output_width = target_width_;
         report.output_height = target_height_;
     }
@@ -274,7 +273,7 @@ Result<void> NvidiaTranscodeSession::configure(
         output_info_.primary_audio_index = -1;
         output_info_.audio_tracks.clear();
         std::erase_if(output_info_.passthrough_streams,
-                      [](const PassthroughStreamInfo& s) { return s.codec_type == 1; });
+                      [](const PassthroughStreamInfo& s) { const auto& [idx, ct, cid, cn, tb, op] = s; (void)idx; (void)cid; (void)cn; (void)tb; (void)op; return ct == 1; });
     }
     output_info_.time_base = Rational{1, 90000};
     output_info_.codec = options.codec;
@@ -289,8 +288,10 @@ Result<void> NvidiaTranscodeSession::configure(
 }
 Result<void> NvidiaTranscodeSession::configureHdrAndBridge(HwTranscodeReport& /*report*/, int clamped_nits) {
     if (is_remaster_) {
-        TrueHdrParameters hdr_params{};
-        hdr_params.max_luminance = clamped_nits;
+        TrueHdrParameters hdr_params = defaultTrueHdrParameters();
+        auto& [hc, hs, hmg, hmax, hmst, hfall] = hdr_params;
+        (void)hc; (void)hs; (void)hmg; (void)hmst; (void)hfall;
+        hmax = clamped_nits;
         const Result<Hdr10Metadata> canonical = SeiSynthesizer::makeMetadata(hdr_params);
         if (!canonical.has_value()) {
             return std::unexpected(canonical.error());
@@ -317,19 +318,19 @@ Result<void> NvidiaTranscodeSession::configureHdrAndBridge(HwTranscodeReport& /*
         if (b_res != RTX_OK || raw_bridge == nullptr) {
             return err(mapShimResult(b_res), describe("rtx_ngx_bridge_create", b_res, bridge_loader_.lastError(nullptr)));
         }
-        bridge_ = BridgeHandle(raw_bridge, BridgeDeleter{&bridge_loader_});
+        bridge_ = BridgeHandle(raw_bridge, [b = &bridge_loader_](RtxNgxBridge* ptr) { if (ptr) b->releaseBridge(ptr); });
 
         (void)bridge_loader_.previewBuffer(bridge_.get(), 0, &preview_ring_[0], &preview_pitch_);
         (void)bridge_loader_.previewBuffer(bridge_.get(), 1, &preview_ring_[1], &preview_pitch_);
         (void)bridge_loader_.previewBuffer(bridge_.get(), 2, &preview_ring_[2], &preview_pitch_);
 
         if (!options_.lut_path.empty()) {
-            const Result<Lut3D> lut = Lut3D::loadFromCubeFile(options_.lut_path);
+            const Result<Lut3D> lut = loadLut3dFromCubeFile(options_.lut_path);
             if (!lut.has_value()) return std::unexpected(lut.error());
             if (!bridge_loader_.hasPhase7Api()) {
                 return err(ErrorCode::Unsupported, "the loaded NGX bridge does not support 3D LUT (ABI < 3)");
             }
-            const RtxResult lut_res = bridge_loader_.setLut3d(bridge_.get(), lut.value().half4Data().data(), lut.value().gridSize());
+            const RtxResult lut_res = bridge_loader_.setLut3d(bridge_.get(), lut.value().second.data(), lut.value().first);
             if (lut_res != RTX_OK) {
                 return err(mapShimResult(lut_res), describe("rtx_ngx_bridge_set_lut3d", lut_res, nullptr),
                            bridge_loader_.lastError(bridge_.get()));
@@ -359,7 +360,7 @@ Result<void> NvidiaTranscodeSession::configureDecoder(int source_depth) {
         return err(mapShimResult(d_res), describe("rtx_shim_decoder_create", d_res, nullptr),
                    shim_.decoderLastError(nullptr));
     }
-    decoder_ = DecoderHandle(raw_decoder, DecoderDeleter{&shim_});
+    decoder_ = DecoderHandle(raw_decoder, [sh = &shim_](RtxDecoder* ptr) { if (ptr) sh->decoderDestroy(ptr); });
 
     if (options_.seek_start_ms >= 0) {
         const Rational tb = info_.time_base.valid() ? info_.time_base : Rational{1, 90000};
@@ -371,22 +372,19 @@ Result<void> NvidiaTranscodeSession::configureDecoder(int source_depth) {
 }
 Result<void> NvidiaTranscodeSession::createEncoder(const RtxFrameDesc& frame, HwTranscodeReport& report) {
     if (options_.use_cpu_encoder) {
-        CpuEncoderConfig cpu_cfg{};
-        cpu_cfg.codec = options_.codec;
-        cpu_cfg.width = is_remaster_ ? target_width_ : frame.width;
-        cpu_cfg.height = is_remaster_ ? target_height_ : frame.height;
-        cpu_cfg.frame_rate = frame_rate_;
-        cpu_cfg.crf = options_.qp > 0 ? options_.qp : 22;
-        cpu_cfg.preset = std::clamp(options_.preset, 1, 9);
-        cpu_cfg.hdr = hdr_;
-        auto cpu_enc = CpuVideoEncoder::create(cpu_cfg);
+        const int enc_w = is_remaster_ ? target_width_ : frame.width;
+        const int enc_h = is_remaster_ ? target_height_ : frame.height;
+        const int enc_crf = options_.qp > 0 ? options_.qp : 22;
+        const int enc_preset = std::clamp(options_.preset, 1, 9);
+        auto cpu_enc = CpuVideoEncoder::create(
+            options_.codec, enc_w, enc_h, frame_rate_, enc_crf, enc_preset, 0, hdr_);
         if (!cpu_enc.has_value()) {
             return std::unexpected(cpu_enc.error());
         }
         cpu_encoder_ = std::make_unique<CpuVideoEncoder>(std::move(cpu_enc.value()));
         output_info_.bit_depth = is_remaster_ ? 10 : frame.bit_depth;
-        output_info_.width = cpu_cfg.width;
-        output_info_.height = cpu_cfg.height;
+        output_info_.width = enc_w;
+        output_info_.height = enc_h;
         report.output_bit_depth = output_info_.bit_depth;
         return {};
     }
@@ -411,7 +409,7 @@ Result<void> NvidiaTranscodeSession::createEncoder(const RtxFrameDesc& frame, Hw
     if (created != RTX_OK || raw == nullptr) {
         return err(mapShimResult(created), describe("rtx_shim_encoder_create", created, nullptr));
     }
-    encoder_ = EncoderHandle(raw, EncoderDeleter{&shim_});
+    encoder_ = EncoderHandle(raw, [sh = &shim_](RtxEncoder* ptr) { if (ptr) sh->encoderDestroy(ptr); });
     output_info_.bit_depth = is_remaster_ ? 10 : frame.bit_depth;
     output_info_.width = config.width;
     output_info_.height = config.height;

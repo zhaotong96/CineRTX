@@ -108,7 +108,7 @@ R-06 是原调研稿中最为明显的数学硬伤。原稿在前一句论证了
 > 9. preview\_viewport.cpp [受控工程档案]  
 > 10. CineRTX 演进方向调研 [受控工程档案]  
 > 11. [https\://developer.nvidia.com/blog/nvidia-video-codec-sdk-13-1-zero-copy-transcode-av1-b-frames-and-frame-accurate-seek/](https://developer.nvidia.com/blog/nvidia-video-codec-sdk-13-1-zero-copy-transcode-av1-b-frames-and-frame-accurate-seek/)  
-> 12. [unknown\_url](http://docs.google.com/unknown_url)  
+> 12. [unknown\_url]([internal-reference])  
 > 13. param\_schema.cpp [受控工程档案]  
 > 14. CineRTX 代码与架构深度协查 [受控工程档案]  
 > 15. main.cpp [受控工程档案]  

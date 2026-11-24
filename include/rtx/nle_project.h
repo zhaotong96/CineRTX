@@ -40,38 +40,33 @@ inline constexpr std::size_t kNleUndoCapacity = 256;
     return NleTrackKind::Subtitle;
 }
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: NLE 媒体素材库领域模型，封装 UUID、相对/绝对路径、Flicks 整数时长、分辨率与离线状态，std::tuple 丢失全部具名语义与序列化契约。
-// Invariant: id > 0；duration_flicks >= 0；offline 为 true 时表示源媒体待 Relink。
-struct NleMediaAsset {
-    uint64_t id{0};
-    std::string uuid;
-    std::string name;
-    std::string path;
-    int64_t duration_flicks{0};
-    int width{0};
-    int height{0};
-    bool offline{false};
-};
+// Phase 12 (Wave 12.2-D): standard tuple aliases replace NleMediaAsset & TimelineClip wrappers.
+// NleMediaAsset: (id, uuid, name, path, duration_flicks, width, height, offline).
+using NleMediaAsset = std::tuple<uint64_t, std::string, std::string, std::string, int64_t, int, int, bool>;
+// TimelineClip: (id, asset_id, name, lane, start_flicks, in_flicks, out_flicks, gain).
+using TimelineClip = std::tuple<uint64_t, uint64_t, std::string, int, int64_t, int64_t, int64_t, float>;
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 时间轴非破坏性片段领域模型（命名为 TimelineClip 以彻底隔离旧版 NleClip），具名承载源入出点、轨道位置与音频增益。
-// Invariant: id > 0; 0 <= lane < kNleTrackCount; start_flicks >= 0; out_flicks >= in_flicks >= 0; gain >= 0.0f.
-struct TimelineClip {
-    uint64_t id{0};
-    uint64_t asset_id{0};
-    std::string name;
-    int lane{1};
-    int64_t start_flicks{0};
-    int64_t in_flicks{0};
-    int64_t out_flicks{0};
-    float gain{1.0f};
-};
+[[nodiscard]] inline NleMediaAsset makeNleAsset(
+    uint64_t id, std::string uuid, std::string name, std::string path,
+    int64_t duration_flicks = 0, int width = 0, int height = 0, bool offline = false) {
+    return {id, std::move(uuid), std::move(name), std::move(path), duration_flicks, width, height, offline};
+}
+[[nodiscard]] inline TimelineClip makeTimelineClip(
+    uint64_t id, uint64_t asset_id, std::string name, int lane = 1,
+    int64_t start_flicks = 0, int64_t in_flicks = 0, int64_t out_flicks = 0, float gain = 1.0f) {
+    return {id, asset_id, std::move(name), lane, start_flicks, in_flicks, out_flicks, gain};
+}
 
+[[nodiscard]] constexpr uint64_t nleAssetId(const NleMediaAsset& a) noexcept {
+    const auto& [id, u, n, p, d, w, h, o] = a; (void)u;(void)n;(void)p;(void)d;(void)w;(void)h;(void)o; return id;
+}
+[[nodiscard]] constexpr uint64_t nleClipId(const TimelineClip& c) noexcept {
+    const auto& [id, a, n, l, s, i, o, g] = c; (void)a;(void)n;(void)l;(void)s;(void)i;(void)o;(void)g; return id;
+}
 [[nodiscard]] constexpr int64_t nleClipDuration(const TimelineClip& clip) noexcept {
-    return clip.out_flicks > clip.in_flicks ? (clip.out_flicks - clip.in_flicks) : 0;
+    const auto& [id, a, n, l, s, in_f, out_f, g] = clip;
+    (void)id;(void)a;(void)n;(void)l;(void)s;(void)g;
+    return out_f > in_f ? (out_f - in_f) : 0;
 }
 
 // 6 支纯代数和类型：覆盖 Add/Delete、Trim、Split、Move、ReorderTracks、RelinkAsset 全部 7 类可逆编辑操作。
@@ -102,13 +97,13 @@ struct NleProject {
 
     template <typename Self>
     [[nodiscard]] auto* clip(this Self& self, uint64_t id) noexcept {
-        auto it = std::ranges::find(self.clips, id, &TimelineClip::id);
+        auto it = std::ranges::find(self.clips, id, nleClipId);
         return it == self.clips.end() ? nullptr : &*it;
     }
 
     template <typename Self>
     [[nodiscard]] auto* asset(this Self& self, uint64_t id) noexcept {
-        auto it = std::ranges::find(self.assets, id, &NleMediaAsset::id);
+        auto it = std::ranges::find(self.assets, id, nleAssetId);
         return it == self.assets.end() ? nullptr : &*it;
     }
 

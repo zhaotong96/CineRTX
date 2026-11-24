@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <ratio>
 #include <string>
+#include <tuple>
+#include <utility>
 
 #include "rtx/flicks.h"
 #include "rtx/rational.h"
@@ -37,14 +39,9 @@ inline const Rational kTimeBaseFlicks{1, static_cast<int64_t>(kFlicksPerSecond)}
 
 enum class TimecodeDropMode : uint8_t { NonDropFrame = 0, DropFrame = 1 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 帧率 Rational 与 drop-mode 的配对领域模型；std::pair 丢失字段语义，formatSmpteTimecode 的六类白名单时间码契约以具名字段表达。
-// Invariant: drop_mode 仅对 1000/1001 家族（标称 30/60）有意义，其他帧率一律渲染为 non-drop。
-struct TimecodeFormat {
-    Rational frame_rate{24, 1};
-    TimecodeDropMode drop_mode = TimecodeDropMode::NonDropFrame;
-};
+// Phase 12 (Wave 12.2-B2): standard pair alias replaces passive TimecodeFormat bag.
+using TimecodeFormat = std::pair<Rational, TimecodeDropMode>;
+inline const TimecodeFormat kDefaultTimecodeFormat{Rational{24, 1}, TimecodeDropMode::NonDropFrame};
 
 // Stateless absolute conversion.  Truncates toward zero, never carries state.
 // NOTE: toward-zero is deliberate (edit-list offsets and B-frame negative PTS
@@ -69,53 +66,46 @@ struct TimecodeFormat {
     const uint64_t value = whole * flicks_per_unit + (rest * flicks_per_unit) / den;
     return negative ? -static_cast<int64_t>(value) : static_cast<int64_t>(value);
 }
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 逐步除法的余数必须跨调用进位（Bresenham 载体），std::chrono 时钟与 std::accumulate 均无法表达「余数进位 + 饱和防回绕」的持续状态机。
-// Invariant: 每步推进的漂移永不越过 1 Flicks tick；非法步长为 no-op（不除零）。
-class IncrementalFlicksAccumulator {
-public:
-    explicit IncrementalFlicksAccumulator(Rational step_seconds) noexcept
-        : step_(step_seconds) {}
+// Phase 12 (Wave 12.2-C): tuple state (step_seconds, current_flicks, remainder) + free functions.
+using IncrementalFlicksAccumulator = std::tuple<Rational, int64_t, int64_t>;
 
-    void reset(int64_t base_flicks = 0) noexcept {
-        current_flicks_ = base_flicks;
-        remainder_ = 0;
-    }
+[[nodiscard]] inline IncrementalFlicksAccumulator makeFlicksAccumulator(Rational step_seconds,
+                                                                        int64_t base_flicks = 0) noexcept {
+    return {step_seconds, base_flicks, 0};
+}
 
-    // Consumes one step and returns the timeline position it lands on.
-    [[nodiscard]] int64_t advanceOneStep() noexcept {
-        if (!step_.valid() || step_.num <= 0 || step_.den <= 0) {
-            return current_flicks_;
-        }
-        const uint64_t step_ticks =
-            step_.num > (1LL << 33)
-// step_.num * kFlicksPerSecond stays far inside 64 bits for every real
-// step (audio sample periods, frame periods); saturate instead of
-// wrapping for pathological inputs.
-                ? ~0ULL
-                : static_cast<uint64_t>(step_.num) * kFlicksPerSecond;
-        const uint64_t total = step_ticks + static_cast<uint64_t>(remainder_);
-        const uint64_t quotient = total / static_cast<uint64_t>(step_.den);
-        remainder_ = static_cast<int64_t>(total % static_cast<uint64_t>(step_.den));
-        current_flicks_ += static_cast<int64_t>(quotient);
-        return current_flicks_;
-    }
-    [[nodiscard]] int64_t current() const noexcept { return current_flicks_; }
-    [[nodiscard]] int64_t remainder() const noexcept { return remainder_; }
+inline void resetFlicksAccumulator(IncrementalFlicksAccumulator& acc, int64_t base_flicks = 0) noexcept {
+    auto& [step, current_flicks, remainder] = acc;
+    (void)step;
+    current_flicks = base_flicks;
+    remainder = 0;
+}
 
-private:
-    Rational step_;
-    int64_t current_flicks_ = 0;
-    int64_t remainder_ = 0;
-};
+[[nodiscard]] inline int64_t advanceFlicksStep(IncrementalFlicksAccumulator& acc) noexcept {
+    auto& [step, current_flicks, remainder] = acc;
+    if (!step.valid() || step.num <= 0 || step.den <= 0) return current_flicks;
+    const uint64_t step_ticks = step.num > (1LL << 33)
+        ? ~0ULL
+        : static_cast<uint64_t>(step.num) * kFlicksPerSecond;
+    const uint64_t total = step_ticks + static_cast<uint64_t>(remainder);
+    const uint64_t quotient = total / static_cast<uint64_t>(step.den);
+    remainder = static_cast<int64_t>(total % static_cast<uint64_t>(step.den));
+    current_flicks += static_cast<int64_t>(quotient);
+    return current_flicks;
+}
+
+[[nodiscard]] inline int64_t flicksAccumulatorRemainder(const IncrementalFlicksAccumulator& acc) noexcept {
+    const auto& [step, cur, rem] = acc;
+    (void)step; (void)cur;
+    return rem;
+}
 
 // SMPTE ST 12-1 timecode for 23.976 / 24 / 25 / 29.97 DF&NDF / 30 / 48 / 50 /
 // 59.94 DF&NDF / 60 / 120 fps.  Drop-frame is only defined for the 1000/1001
 // families at 30 and 60 nominal; any other rate renders non-drop.
 // Negative positions clamp to 00:00:00:00.
 [[nodiscard]] inline std::string formatSmpteTimecode(int64_t flicks, const TimecodeFormat& fmt) {
-    const Rational& rate = fmt.frame_rate;
+    const auto& [rate, drop_mode] = fmt;
     if (rate.num <= 0 || rate.den <= 0) {
         return "00:00:00:00";
     }
@@ -129,7 +119,7 @@ private:
 // at the highest supported rate; clamp instead of wrapping beyond that.
     }
     int64_t drop = 0;
-    if (fmt.drop_mode == TimecodeDropMode::DropFrame) {
+    if (drop_mode == TimecodeDropMode::DropFrame) {
         if (rate == kFps29_97) drop = 2;
         else if (rate == kFps59_94) drop = 4;
     }

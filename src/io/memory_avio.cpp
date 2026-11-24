@@ -15,154 +15,158 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
 }
+
 namespace rtx::io {
 namespace {
 
 constexpr int kSeekMask = 0xFF;
-// AVSEEK_SIZE is a bit flag in the high bits of `whence`; libavformat may
-// additionally pass AVSEEK_FORCE, which is irrelevant for a memory sink.  The
-// flag must be tested before masking, otherwise a size probe is mistaken for
-// SEEK_SET(0) and avio_size() silently reports zero.
 
-}  // namespace
+void releaseAvioState(MemoryAvioState* state) noexcept {
+    if (state == nullptr) return;
+    auto& [rv, wv, pos, wr, avio] = *state;
+    (void)rv; (void)wv; (void)pos; (void)wr;
+    if (avio != nullptr) {
+        av_freep(&avio->buffer);
+        avio_context_free(&avio);
+        avio = nullptr;
+    }
+    delete state;
+}
 
-MemoryAvioContext::MemoryAvioContext(std::span<const uint8_t> read_only_buf)
-    : read_view_(read_only_buf), is_writable_(false) {
-    initAvio(0);
+size_t stateSize(const MemoryAvioState& state) noexcept {
+    const auto& [rv, wv, pos, wr, avio] = state;
+    (void)pos; (void)avio;
+    return wr ? (wv != nullptr ? wv->size() : 0) : rv.size();
 }
-MemoryAvioContext::MemoryAvioContext(std::span<const std::byte> read_only_buf)
-    : read_view_(reinterpret_cast<const uint8_t*>(read_only_buf.data()), read_only_buf.size()),
-      is_writable_(false) {
-    initAvio(0);
-}
-MemoryAvioContext::MemoryAvioContext(std::vector<uint8_t>* write_buf)
-    : write_vec_(write_buf), is_writable_(true) {
-    initAvio(1);
-}
-MemoryAvioContext::~MemoryAvioContext() { releaseAvio(); }
 
-size_t MemoryAvioContext::size() const noexcept {
-    if (is_writable_) {
-        return write_vec_ != nullptr ? write_vec_->size() : 0;
-    }
-    return read_view_.size();
-}
-void MemoryAvioContext::setSeekable(bool seekable) noexcept {
-    if (avio_ctx_ != nullptr) {
-        avio_ctx_->seekable = seekable ? AVIO_SEEKABLE_NORMAL : 0;
-    }
-}
-void MemoryAvioContext::initAvio(int write_flag) {
-    auto* io_buf = static_cast<uint8_t*>(av_malloc(kPageSize));
-    if (io_buf == nullptr) {
-        return;
-    }
-    auto io_buf_deleter = [](uint8_t* p) noexcept { av_free(p); };
-    std::unique_ptr<uint8_t, decltype(io_buf_deleter)> io_buf_guard(io_buf, io_buf_deleter);
-    std::memset(io_buf, 0, kPageSize);
-    avio_ctx_ = avio_alloc_context(
-        io_buf, static_cast<int>(kPageSize), write_flag, this,
-        &MemoryAvioContext::readPacketCallback,
-        write_flag != 0 ? &MemoryAvioContext::writePacketCallback : nullptr,
-        &MemoryAvioContext::seekCallback);
-    if (avio_ctx_ == nullptr) {
-        return;
-    }
-    io_buf_guard.release();
-    avio_ctx_->seekable = AVIO_SEEKABLE_NORMAL;
-    avio_ctx_->direct = 0;
-}
-void MemoryAvioContext::releaseAvio() noexcept {
-    if (avio_ctx_ != nullptr) {
-        av_freep(&avio_ctx_->buffer);
-// libavformat defaults to non-seekable for caller-supplied contexts.  Both
-// the mov and the matroska muxers need a seekable target to rewrite their
-// index, and a memory sink always is one.
-        avio_context_free(&avio_ctx_);
-        avio_ctx_ = nullptr;
-    }
-}
-int MemoryAvioContext::readPacketCallback(void* opaque, uint8_t* buf, int buf_size) noexcept {
-    auto* self = static_cast<MemoryAvioContext*>(opaque);
-// avio_context_free() releases the AVIOContext but not the caller's
-// buffer; both must be released here, in this order.
-    if (self == nullptr || buf == nullptr || buf_size <= 0) {
-        return AVERROR(EINVAL);
-    }
-    const std::span<const uint8_t> source = self->is_writable_
-                                                ? std::span<const uint8_t>(
-                                                      self->write_vec_ != nullptr
-                                                          ? self->write_vec_->data()
-                                                          : nullptr,
-                                                      self->write_vec_ != nullptr
-                                                          ? self->write_vec_->size()
-                                                          : 0)
-                                                : self->read_view_;
-    if (self->pos_ >= source.size()) {
-        return AVERROR_EOF;
-    }
-    const size_t to_copy =
-        std::min(source.size() - self->pos_, static_cast<size_t>(buf_size));
-    std::memcpy(buf, source.data() + self->pos_, to_copy);
-    self->pos_ += to_copy;
+int readPacketCallback(void* opaque, uint8_t* buf, int buf_size) noexcept {
+    auto* state = static_cast<MemoryAvioState*>(opaque);
+    if (state == nullptr || buf == nullptr || buf_size <= 0) return AVERROR(EINVAL);
+    auto& [rv, wv, pos, wr, avio] = *state;
+    (void)avio;
+    const std::span<const uint8_t> source = wr
+        ? std::span<const uint8_t>(wv != nullptr ? wv->data() : nullptr, wv != nullptr ? wv->size() : 0)
+        : rv;
+    if (pos >= source.size()) return AVERROR_EOF;
+    const size_t to_copy = std::min(source.size() - pos, static_cast<size_t>(buf_size));
+    std::memcpy(buf, source.data() + pos, to_copy);
+    pos += to_copy;
     return static_cast<int>(to_copy);
 }
-int MemoryAvioContext::writePacketCallback(void* opaque, const uint8_t* buf, int buf_size) noexcept {
-    auto* self = static_cast<MemoryAvioContext*>(opaque);
-    if (self == nullptr || !self->is_writable_ || self->write_vec_ == nullptr ||
-        buf_size <= 0 || buf == nullptr) {
-        return AVERROR(EIO);
-    }
-    const size_t end_pos = self->pos_ + static_cast<size_t>(buf_size);
+
+int writePacketCallback(void* opaque, const uint8_t* buf, int buf_size) noexcept {
+    auto* state = static_cast<MemoryAvioState*>(opaque);
+    if (state == nullptr || buf_size <= 0 || buf == nullptr) return AVERROR(EIO);
+    auto& [rv, wv, pos, wr, avio] = *state;
+    (void)rv; (void)avio;
+    if (!wr || wv == nullptr) return AVERROR(EIO);
+    const size_t end_pos = pos + static_cast<size_t>(buf_size);
     try {
-        if (end_pos > self->write_vec_->size()) {
-            self->write_vec_->resize(end_pos);
-        }
+        if (end_pos > wv->size()) wv->resize(end_pos);
     } catch (...) {
         return AVERROR(ENOMEM);
     }
-    std::memcpy(self->write_vec_->data() + self->pos_, buf, static_cast<size_t>(buf_size));
-    self->pos_ = end_pos;
+    std::memcpy(wv->data() + pos, buf, static_cast<size_t>(buf_size));
+    pos = end_pos;
     return buf_size;
 }
-int64_t MemoryAvioContext::seekCallback(void* opaque, int64_t offset, int whence) noexcept {
-    auto* self = static_cast<MemoryAvioContext*>(opaque);
-    if (self == nullptr) {
-        return AVERROR(EINVAL);
-    }
-    const size_t total_size = self->size();
+
+int64_t seekCallback(void* opaque, int64_t offset, int whence) noexcept {
+    auto* state = static_cast<MemoryAvioState*>(opaque);
+    if (state == nullptr) return AVERROR(EINVAL);
+    auto& [rv, wv, pos, wr, avio] = *state;
+    (void)rv; (void)avio;
+    const size_t total_size = stateSize(*state);
     if ((static_cast<uint64_t>(whence) & static_cast<uint64_t>(AVSEEK_SIZE)) != 0) {
         return static_cast<int64_t>(total_size);
     }
-    const int mode = static_cast<int>(whence) & kSeekMask;
     int64_t target = 0;
-    switch (mode) {
-        case SEEK_SET:
-            target = offset;
-            break;
-        case SEEK_CUR:
-            target = static_cast<int64_t>(self->pos_) + offset;
-            break;
-        case SEEK_END:
-            target = static_cast<int64_t>(total_size) + offset;
-            break;
-        default:
-            return AVERROR(EINVAL);
+    switch (static_cast<int>(whence) & kSeekMask) {
+        case SEEK_SET: target = offset; break;
+        case SEEK_CUR: target = static_cast<int64_t>(pos) + offset; break;
+        case SEEK_END: target = static_cast<int64_t>(total_size) + offset; break;
+        default: return AVERROR(EINVAL);
     }
-    if (target < 0) {
-        return AVERROR(EINVAL);
-    }
-    if (self->is_writable_ && self->write_vec_ != nullptr &&
-        static_cast<size_t>(target) > total_size) {
+    if (target < 0) return AVERROR(EINVAL);
+    if (wr && wv != nullptr && static_cast<size_t>(target) > total_size) {
         try {
-            self->write_vec_->resize(static_cast<size_t>(target), 0);
+            wv->resize(static_cast<size_t>(target), 0);
         } catch (...) {
             return AVERROR(ENOMEM);
         }
     }
-    self->pos_ = static_cast<size_t>(target);
+    pos = static_cast<size_t>(target);
     return target;
 }
+
+MemoryAvioContext createAvio(MemoryAvioState* raw_state, int write_flag) {
+    MemoryAvioContext ctx(raw_state, &releaseAvioState);
+    auto* io_buf = static_cast<uint8_t*>(av_malloc(kMemoryAvioPageSize));
+    if (io_buf == nullptr) return ctx;
+    auto io_buf_deleter = [](uint8_t* p) noexcept { av_free(p); };
+    std::unique_ptr<uint8_t, decltype(io_buf_deleter)> io_buf_guard(io_buf, io_buf_deleter);
+    std::memset(io_buf, 0, kMemoryAvioPageSize);
+    struct AVIOContext* avio = avio_alloc_context(
+        io_buf, static_cast<int>(kMemoryAvioPageSize), write_flag, raw_state,
+        &readPacketCallback, write_flag != 0 ? &writePacketCallback : nullptr, &seekCallback);
+    if (avio == nullptr) return ctx;
+    io_buf_guard.release();
+    avio->seekable = AVIO_SEEKABLE_NORMAL;
+    avio->direct = 0;
+    auto& [rv, wv, pos, wr, slot] = *raw_state;
+    (void)rv; (void)wv; (void)pos; (void)wr;
+    slot = avio;
+    return ctx;
+}
+
+}  // namespace
+
+MemoryAvioContext makeMemoryAvioRead(std::span<const uint8_t> read_only_buf) {
+    return createAvio(new MemoryAvioState{read_only_buf, nullptr, 0, false, nullptr}, 0);
+}
+
+MemoryAvioContext makeMemoryAvioRead(std::span<const std::byte> read_only_buf) {
+    return makeMemoryAvioRead(std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>(read_only_buf.data()), read_only_buf.size()));
+}
+
+MemoryAvioContext makeMemoryAvioWrite(std::vector<uint8_t>* write_buf) {
+    return createAvio(new MemoryAvioState{{}, write_buf, 0, true, nullptr}, 1);
+}
+
+struct AVIOContext* memoryAvioRaw(const MemoryAvioContext& ctx) noexcept {
+    if (!ctx) return nullptr;
+    const auto& [rv, wv, pos, wr, avio] = *ctx;
+    (void)rv; (void)wv; (void)pos; (void)wr;
+    return avio;
+}
+
+bool memoryAvioValid(const MemoryAvioContext& ctx) noexcept {
+    return memoryAvioRaw(ctx) != nullptr;
+}
+
+bool memoryAvioWritable(const MemoryAvioContext& ctx) noexcept {
+    if (!ctx) return false;
+    const auto& [rv, wv, pos, wr, avio] = *ctx;
+    (void)rv; (void)wv; (void)pos; (void)avio;
+    return wr;
+}
+
+size_t memoryAvioPosition(const MemoryAvioContext& ctx) noexcept {
+    if (!ctx) return 0;
+    const auto& [rv, wv, pos, wr, avio] = *ctx;
+    (void)rv; (void)wv; (void)wr; (void)avio;
+    return pos;
+}
+
+size_t memoryAvioSize(const MemoryAvioContext& ctx) noexcept {
+    return ctx ? stateSize(*ctx) : 0;
+}
+
+void memoryAvioSetSeekable(const MemoryAvioContext& ctx, bool seekable) noexcept {
+    if (auto* avio = memoryAvioRaw(ctx); avio != nullptr) {
+        avio->seekable = seekable ? AVIO_SEEKABLE_NORMAL : 0;
+    }
+}
+
 }  // namespace rtx::io
-// Sparse extension: a muxer may seek past the current tail before the
-// next write (moov/mdat back-patching), and the gap must read as zero.

@@ -131,43 +131,44 @@ const char* fixtureName(VideoCodec codec) {
     }
     return buffer;
 }
-class FakeAudioClock final : public IAudioMasterClock {
-public:
+struct FakeAudioClock {
     int64_t value = 0;
     bool active = false;
-    [[nodiscard]] int64_t masterFlicks() const noexcept override { return value; }
-    [[nodiscard]] bool running() const noexcept override { return active; }
-};
-
-class FakeDemuxer final : public IDemuxer {
-public:
-    int64_t last_seek_pts = -1;
-    int seek_calls = 0;
-    bool fail_seek = false;
-
-    Result<MediaInfo> open(const std::filesystem::path&) override { return MediaInfo{}; }
-    Result<Packet> readPacket() override { return err(ErrorCode::NotFound, "eof"); }
-    Result<void> seekToKeyframeBefore(int64_t video_stream_pts) override {
-        ++seek_calls;
-        if (fail_seek) {
-            return err(ErrorCode::Io, "fake demuxer seek failure");
-        }
-        last_seek_pts = video_stream_pts;
-        return {};
+    AudioMasterClockFn asClock() noexcept {
+        return [this]() noexcept -> std::optional<int64_t> {
+            return active ? std::optional<int64_t>(value) : std::nullopt;
+        };
     }
 };
 
-class CountingSink final : public IVideoFrameSink {
-public:
-    Result<void> present(const RtxFrameDesc& frame, int64_t deadline_flicks,
-                         uint64_t retire_fence) override {
-        std::lock_guard<std::mutex> lock(mutex);
-        ++presented;
-        last_deadline = deadline_flicks;
-        last_pts = frame.pts;
-        last_fence = retire_fence;
-        deadlines.push_back(deadline_flicks);
-        return {};
+struct FakeDemuxer {
+    int64_t last_seek_pts = -1;
+    int seek_calls = 0;
+    bool fail_seek = false;
+    std::function<Result<void>(int64_t)> asSeekFn() noexcept {
+        return [this](int64_t video_stream_pts) -> Result<void> {
+            ++seek_calls;
+            if (fail_seek) return err(ErrorCode::Io, "fake demuxer seek failure");
+            last_seek_pts = video_stream_pts;
+            return {};
+        };
+    }
+};
+
+struct CountingSink {
+    VideoFrameSink asSink() noexcept {
+        return {
+            [this](const RtxFrameDesc& frame, int64_t deadline_flicks, uint64_t retire_fence) -> Result<void> {
+                std::lock_guard<std::mutex> lock(mutex);
+                ++presented;
+                last_deadline = deadline_flicks;
+                last_pts = frame.pts;
+                last_fence = retire_fence;
+                deadlines.push_back(deadline_flicks);
+                return {};
+            },
+            []() noexcept -> uint64_t { return UINT64_MAX; }
+        };
     }
     std::mutex mutex;
     uint64_t presented = 0;
@@ -177,16 +178,17 @@ public:
     std::vector<int64_t> deadlines;
 };
 
-class GatedFenceSink final : public IVideoFrameSink {
-public:
-    Result<void> present(const RtxFrameDesc&, int64_t, uint64_t retire_fence) override {
-        std::lock_guard<std::mutex> lock(mutex);
-        issued = retire_fence;
-        ++presented;
-        return {};
-    }
-    [[nodiscard]] uint64_t completedFence() const noexcept override {
-        return released.load(std::memory_order_acquire);
+struct GatedFenceSink {
+    VideoFrameSink asSink() noexcept {
+        return {
+            [this](const RtxFrameDesc&, int64_t, uint64_t retire_fence) -> Result<void> {
+                std::lock_guard<std::mutex> lock(mutex);
+                issued = retire_fence;
+                ++presented;
+                return {};
+            },
+            [this]() noexcept -> uint64_t { return released.load(std::memory_order_acquire); }
+        };
     }
     void release(uint64_t token) noexcept { released.store(token, std::memory_order_release); }
 
@@ -209,7 +211,7 @@ bool waitFor(const std::function<bool()>& predicate, int timeout_ms) {
 }  // namespace
 
 RTX_TEST(playback_clock_software_master) {
-    PlaybackClockState clock{nullptr, std::nullopt, Flicks{0}, 1.0};
+    PlaybackClockState clock{AudioMasterClockFn{}, std::nullopt, Flicks{0}, 1.0};
     RTX_CHECK_EQ(clockNow(clock).count(), 0LL);
     clockAnchor(clock, Flicks{5 * kSecond}, 1.0);
     RTX_CHECK(clockNow(clock).count() >= (5 * kSecond));
@@ -238,7 +240,7 @@ RTX_TEST(playback_clock_software_master) {
 }
 RTX_TEST(playback_clock_audio_master_override) {
     FakeAudioClock audio;
-    PlaybackClockState clock{&audio, std::nullopt, Flicks{0}, 1.0};
+    PlaybackClockState clock{audio.asClock(), std::nullopt, Flicks{0}, 1.0};
     clockAnchor(clock, Flicks{0}, 1.0);
 
     audio.active = false;
@@ -311,11 +313,12 @@ RTX_TEST(playback_decode_ahead_queue_bounded_deque) {
 
     for (uint32_t i = 0; i < 4; ++i) {
         RTX_REQUIRE(!queue.empty());
-        RTX_CHECK_EQ(std::get<0>(queue.front()).pts, static_cast<int64_t>(i) * 3750);
-        RTX_CHECK_EQ(std::get<0>(queue.front()).slot_index, static_cast<uint64_t>(i));
-        RTX_CHECK_EQ(std::get<1>(queue.front()), static_cast<int64_t>(i) * (kSecond / 24));
-        RTX_CHECK_EQ(std::get<2>(queue.front()), 0ULL);
-        std::get<2>(queue.front()) = 100 + i;
+        auto& [q_desc, q_pts, q_gen] = queue.front();
+        RTX_CHECK_EQ(q_desc.pts, static_cast<int64_t>(i) * 3750);
+        RTX_CHECK_EQ(q_desc.slot_index, static_cast<uint64_t>(i));
+        RTX_CHECK_EQ(q_pts, static_cast<int64_t>(i) * (kSecond / 24));
+        RTX_CHECK_EQ(q_gen, 0ULL);
+        q_gen = 100 + i;
         queue.pop_front();
     }
     RTX_CHECK(queue.empty());
@@ -329,7 +332,7 @@ RTX_TEST(playback_decode_ahead_queue_bounded_deque) {
         }
         RTX_CHECK_EQ(queue.size(), wide);
         for (uint32_t i = 0; i < wide; ++i) {
-            RTX_CHECK_EQ(std::get<0>(queue.front()).pts, static_cast<int64_t>(round) * 100 + i);
+            { const auto& [q_desc, q_pts, q_gen] = queue.front(); (void)q_pts;(void)q_gen; RTX_CHECK_EQ(q_desc.pts, static_cast<int64_t>(round) * 100 + i); }
             queue.pop_front();
         }
     }
@@ -345,106 +348,107 @@ RTX_TEST(playback_decode_ahead_queue_bounded_deque) {
 }
 RTX_TEST(playback_gop_seek_preroll) {
     FakeDemuxer demuxer;
-    GopSeekScheduler scheduler(demuxer, Rational{1, 90000});
-    RTX_CHECK(!scheduler.active());
-    RTX_CHECK(scheduler.accepting(0));
-    RTX_CHECK(scheduler.accepting(-kSecond));
+    GopSeekScheduler scheduler = makeGopSeekScheduler(demuxer.asSeekFn(), Rational{1, 90000});
+    RTX_CHECK(!gopSeekActive(scheduler));
+    RTX_CHECK(gopSeekAccepting(scheduler, 0));
+    RTX_CHECK(gopSeekAccepting(scheduler, -kSecond));
 
     const int64_t target = kSecond + kSecond / 2;
-    RTX_REQUIRE(scheduler.seekTo(target).has_value());
-    RTX_CHECK(scheduler.active());
-    RTX_CHECK_EQ(scheduler.target(), target);
+    RTX_REQUIRE(gopSeekTo(scheduler, target).has_value());
+    RTX_CHECK(gopSeekActive(scheduler));
+    RTX_CHECK_EQ(gopSeekTarget(scheduler), target);
     RTX_CHECK_EQ(demuxer.seek_calls, 1);
     RTX_CHECK_EQ(demuxer.last_seek_pts, 135000LL);
 
     FakeDemuxer ms_demuxer;
-    GopSeekScheduler ms_scheduler(ms_demuxer, Rational{1, 1000});
-    RTX_REQUIRE(ms_scheduler.seekTo(target).has_value());
+    GopSeekScheduler ms_scheduler = makeGopSeekScheduler(ms_demuxer.asSeekFn(), Rational{1, 1000});
+    RTX_REQUIRE(gopSeekTo(ms_scheduler, target).has_value());
     RTX_CHECK_EQ(ms_demuxer.last_seek_pts, 1500LL);
 
     FakeDemuxer odd_demuxer;
-    GopSeekScheduler odd_scheduler(odd_demuxer, Rational{1, 15360});
-    RTX_REQUIRE(odd_scheduler.seekTo(45938).has_value());
+    GopSeekScheduler odd_scheduler = makeGopSeekScheduler(odd_demuxer.asSeekFn(), Rational{1, 15360});
+    RTX_REQUIRE(gopSeekTo(odd_scheduler, 45938).has_value());
     RTX_CHECK_EQ(odd_demuxer.last_seek_pts, 1LL);
 
-    RTX_CHECK(!scheduler.accepting(0));
-    RTX_CHECK(!scheduler.accepting(kSecond / 2));
-    RTX_CHECK(!scheduler.accepting(target - 1));
-    RTX_CHECK_EQ(scheduler.prerollSkipped(), 3ULL);
-    RTX_CHECK(scheduler.accepting(target));
-    RTX_CHECK(!scheduler.active());
-    RTX_CHECK(scheduler.accepting(target + kSecond));
-    RTX_CHECK_EQ(scheduler.prerollSkipped(), 3ULL);
+    RTX_CHECK(!gopSeekAccepting(scheduler, 0));
+    RTX_CHECK(!gopSeekAccepting(scheduler, kSecond / 2));
+    RTX_CHECK(!gopSeekAccepting(scheduler, target - 1));
+    RTX_CHECK_EQ(gopSeekPrerollSkipped(scheduler), 3ULL);
+    RTX_CHECK(gopSeekAccepting(scheduler, target));
+    RTX_CHECK(!gopSeekActive(scheduler));
+    RTX_CHECK(gopSeekAccepting(scheduler, target + kSecond));
+    RTX_CHECK_EQ(gopSeekPrerollSkipped(scheduler), 3ULL);
 
-    RTX_REQUIRE(scheduler.seekTo(2 * kSecond).has_value());
-    RTX_CHECK(!scheduler.accepting(0));
-    scheduler.cancel();
-    RTX_CHECK(!scheduler.active());
-    RTX_CHECK_EQ(scheduler.prerollSkipped(), 0ULL);
-    RTX_CHECK(scheduler.accepting(0));
+    RTX_REQUIRE(gopSeekTo(scheduler, 2 * kSecond).has_value());
+    RTX_CHECK(!gopSeekAccepting(scheduler, 0));
+    gopSeekCancel(scheduler);
+    RTX_CHECK(!gopSeekActive(scheduler));
+    RTX_CHECK_EQ(gopSeekPrerollSkipped(scheduler), 0ULL);
+    RTX_CHECK(gopSeekAccepting(scheduler, 0));
 
     demuxer.fail_seek = true;
-    const Result<void> failed = scheduler.seekTo(3 * kSecond);
+    const Result<void> failed = gopSeekTo(scheduler, 3 * kSecond);
     RTX_CHECK(!failed.has_value());
     RTX_CHECK_EQ(failed.error().code, ErrorCode::Io);
-    RTX_CHECK(!scheduler.active());
+    RTX_CHECK(!gopSeekActive(scheduler));
 
-    GopSeekScheduler broken(demuxer, Rational{1, 0});
-    RTX_CHECK(!broken.seekTo(kSecond).has_value());
+    GopSeekScheduler broken = makeGopSeekScheduler(demuxer.asSeekFn(), Rational{1, 0});
+    RTX_CHECK(!gopSeekTo(broken, kSecond).has_value());
 }
 RTX_TEST(playback_telemetry_seqlock) {
-    AtomicTelemetryBus bus;
-    TelemetrySnapshot zero = bus.read();
-    RTX_CHECK_EQ(zero.frames_decoded, 0ULL);
-    RTX_CHECK_EQ(zero.playhead_flicks, 0LL);
-    RTX_CHECK_EQ(zero.current_fps_x100, 0u);
+    AtomicTelemetryBus bus{};
+    TelemetrySnapshot zero = telemetryRead(bus);
+    RTX_CHECK_EQ(telemetryU64(zero, TelemetrySlot::FramesDecoded), 0ULL);
+    RTX_CHECK_EQ(telemetryI64(zero, TelemetrySlot::PlayheadFlicks), 0LL);
+    RTX_CHECK_EQ(telemetryU32(zero, TelemetrySlot::CurrentFpsX100), 0u);
 
     TelemetrySnapshot value{};
-    value.frames_decoded = 1234;
-    value.frames_rendered = 1200;
-    value.frames_dropped = 34;
-    value.current_fps_x100 = 5994;
-    value.av_drift_us = -12345;
-    value.vram_used_bytes = 6ULL * 1024 * 1024 * 1024;
-    value.vram_budget_bytes = 8ULL * 1024 * 1024 * 1024;
-    value.playhead_flicks = 42 * kSecond;
-    value.sequence_epoch = 7;
-    bus.publish(value);
-    const TelemetrySnapshot back = bus.read();
-    RTX_CHECK_EQ(back.frames_decoded, 1234ULL);
-    RTX_CHECK_EQ(back.frames_rendered, 1200ULL);
-    RTX_CHECK_EQ(back.frames_dropped, 34ULL);
-    RTX_CHECK_EQ(back.current_fps_x100, 5994u);
-    RTX_CHECK_EQ(back.av_drift_us, -12345LL);
-    RTX_CHECK_EQ(back.vram_used_bytes, 6ULL * 1024 * 1024 * 1024);
-    RTX_CHECK_EQ(back.vram_budget_bytes, 8ULL * 1024 * 1024 * 1024);
-    RTX_CHECK_EQ(back.playhead_flicks, 42 * kSecond);
-    RTX_CHECK_EQ(back.sequence_epoch, 7ULL);
+    telemetrySetU64(value, TelemetrySlot::FramesDecoded, 1234);
+    telemetrySetU64(value, TelemetrySlot::FramesRendered, 1200);
+    telemetrySetU64(value, TelemetrySlot::FramesDropped, 34);
+    telemetrySetU32(value, TelemetrySlot::CurrentFpsX100, 5994);
+    telemetrySetI64(value, TelemetrySlot::AvDriftUs, -12345);
+    telemetrySetU64(value, TelemetrySlot::VramUsedBytes, 6ULL * 1024 * 1024 * 1024);
+    telemetrySetU64(value, TelemetrySlot::VramBudgetBytes, 8ULL * 1024 * 1024 * 1024);
+    telemetrySetI64(value, TelemetrySlot::PlayheadFlicks, 42 * kSecond);
+    telemetrySetU64(value, TelemetrySlot::SequenceEpoch, 7);
+    telemetryPublish(bus, value);
+    const TelemetrySnapshot back = telemetryRead(bus);
+    RTX_CHECK_EQ(telemetryU64(back, TelemetrySlot::FramesDecoded), 1234ULL);
+    RTX_CHECK_EQ(telemetryU64(back, TelemetrySlot::FramesRendered), 1200ULL);
+    RTX_CHECK_EQ(telemetryU64(back, TelemetrySlot::FramesDropped), 34ULL);
+    RTX_CHECK_EQ(telemetryU32(back, TelemetrySlot::CurrentFpsX100), 5994u);
+    RTX_CHECK_EQ(telemetryI64(back, TelemetrySlot::AvDriftUs), -12345LL);
+    RTX_CHECK_EQ(telemetryU64(back, TelemetrySlot::VramUsedBytes), 6ULL * 1024 * 1024 * 1024);
+    RTX_CHECK_EQ(telemetryU64(back, TelemetrySlot::VramBudgetBytes), 8ULL * 1024 * 1024 * 1024);
+    RTX_CHECK_EQ(telemetryI64(back, TelemetrySlot::PlayheadFlicks), 42 * kSecond);
+    RTX_CHECK_EQ(telemetryU64(back, TelemetrySlot::SequenceEpoch), 7ULL);
 
     TelemetrySnapshot consistent{};
-    bus.publish(consistent);
+    telemetryPublish(bus, consistent);
     std::atomic<bool> stop{false};
     std::atomic<uint64_t> reads{0};
     std::atomic<uint64_t> torn{0};
     std::thread writer([&] {
         for (uint64_t i = 1; !stop.load(std::memory_order_relaxed); ++i) {
             TelemetrySnapshot snapshot{};
-            snapshot.frames_decoded = i;
-            snapshot.frames_rendered = i;
-            snapshot.frames_dropped = 0;
-            snapshot.playhead_flicks = static_cast<int64_t>(i) * (kSecond / 24);
-            snapshot.sequence_epoch = i;
-            snapshot.current_fps_x100 = 2400;
-            bus.publish(snapshot);
+            telemetrySetU64(snapshot, TelemetrySlot::FramesDecoded, i);
+            telemetrySetU64(snapshot, TelemetrySlot::FramesRendered, i);
+            telemetrySetU64(snapshot, TelemetrySlot::FramesDropped, 0);
+            telemetrySetI64(snapshot, TelemetrySlot::PlayheadFlicks, static_cast<int64_t>(i) * (kSecond / 24));
+            telemetrySetU64(snapshot, TelemetrySlot::SequenceEpoch, i);
+            telemetrySetU32(snapshot, TelemetrySlot::CurrentFpsX100, 2400);
+            telemetryPublish(bus, snapshot);
         }
     });
     std::thread reader([&] {
         while (!stop.load(std::memory_order_relaxed)) {
-            const TelemetrySnapshot snapshot = bus.read();
-            if (snapshot.frames_decoded != snapshot.frames_rendered ||
-                snapshot.frames_decoded != snapshot.sequence_epoch ||
-                snapshot.playhead_flicks !=
-                    static_cast<int64_t>(snapshot.frames_decoded) * (kSecond / 24)) {
+            const TelemetrySnapshot snapshot = telemetryRead(bus);
+            const uint64_t dec = telemetryU64(snapshot, TelemetrySlot::FramesDecoded);
+            if (dec != telemetryU64(snapshot, TelemetrySlot::FramesRendered) ||
+                dec != telemetryU64(snapshot, TelemetrySlot::SequenceEpoch) ||
+                telemetryI64(snapshot, TelemetrySlot::PlayheadFlicks) !=
+                    static_cast<int64_t>(dec) * (kSecond / 24)) {
                 torn.fetch_add(1, std::memory_order_relaxed);
             }
             reads.fetch_add(1, std::memory_order_relaxed);
@@ -456,7 +460,7 @@ RTX_TEST(playback_telemetry_seqlock) {
     reader.join();
     RTX_CHECK(reads.load() > 100);
     RTX_CHECK_EQ(torn.load(), 0ULL);
-    RTX_CHECK(bus.read().frames_decoded > 0ULL);
+    RTX_CHECK(telemetryU64(telemetryRead(bus), TelemetrySlot::FramesDecoded) > 0ULL);
 }
 RTX_TEST(playback_wasapi_shared_mode_master_clock) {
 #if defined(_WIN32)
@@ -545,7 +549,7 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
     for (size_t index = 0; index < 3; ++index) {
         auto bytes = readFixture(fixtureName(codecs[index]));
         RTX_REQUIRE(bytes.has_value());
-        std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(std::move(*bytes));
+        std::unique_ptr<FfmpegDemuxer> demuxer = makeMemoryDemuxer(std::move(*bytes));
         RTX_REQUIRE(demuxer != nullptr);
         Result<MediaInfo> opened = demuxer->open("fixture.mkv");
         RTX_REQUIRE(opened.has_value());
@@ -556,12 +560,9 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
         RTX_CHECK(opened.value().primary_audio_index >= 0);
 
         CountingSink sink;
-        PlaybackOptions options{};
-        options.frame_rate = Rational{25, 1};
-        options.decode_ahead = 5;
-        options.enable_audio = true;
+        PlaybackOptions options{Rational{25, 1}, 1.0, 5u, 0ull, 0, true};
         Result<std::unique_ptr<MediaPlaybackSession>> created =
-            MediaPlaybackSession::create(std::move(demuxer), opened.value(), &sink, options);
+            MediaPlaybackSession::create(std::move(demuxer), opened.value(), sink.asSink(), options);
         if (!created.has_value()) {
             std::printf("[SKIP-GPU] %s: NVDEC session unavailable (%s)\n", names[index],
                         created.error().message.c_str());
@@ -575,27 +576,31 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
         RTX_REQUIRE(session->play().has_value());
         RTX_CHECK(waitFor([&] { return session->state() == PlaybackState::Ended; }, 15000));
         const TelemetrySnapshot done = session->telemetry();
+        const uint64_t dec = telemetryU64(done, TelemetrySlot::FramesDecoded);
+        const uint64_t ren = telemetryU64(done, TelemetrySlot::FramesRendered);
+        const uint64_t drp = telemetryU64(done, TelemetrySlot::FramesDropped);
+        const int64_t ph = telemetryI64(done, TelemetrySlot::PlayheadFlicks);
         std::printf("[PLAYBACK] %s decoded=%llu rendered=%llu dropped=%llu fps_x100=%u "
                     "playhead_flicks=%lld audio=%d\n",
-                    names[index], static_cast<unsigned long long>(done.frames_decoded),
-                    static_cast<unsigned long long>(done.frames_rendered),
-                    static_cast<unsigned long long>(done.frames_dropped), done.current_fps_x100,
-                    static_cast<long long>(done.playhead_flicks),
+                    names[index], static_cast<unsigned long long>(dec),
+                    static_cast<unsigned long long>(ren),
+                    static_cast<unsigned long long>(drp), telemetryU32(done, TelemetrySlot::CurrentFpsX100),
+                    static_cast<long long>(ph),
                     session->audioActive() ? 1 : 0);
-        RTX_CHECK(done.frames_decoded >= 25);
-        RTX_CHECK(done.frames_rendered > 0);
-        RTX_CHECK(done.frames_rendered + done.frames_dropped <= done.frames_decoded);
-        RTX_CHECK(done.playhead_flicks > 0);
+        RTX_CHECK(dec >= 25);
+        RTX_CHECK(ren > 0);
+        RTX_CHECK(ren + drp <= dec);
+        RTX_CHECK(ph > 0);
         {
             std::lock_guard<std::mutex> lock(sink.mutex);
-            RTX_CHECK(sink.presented == done.frames_rendered);
+            RTX_CHECK(sink.presented == ren);
             RTX_CHECK(sink.last_fence > 0);
             RTX_CHECK(std::is_sorted(sink.deadlines.begin(), sink.deadlines.end()));
         }
-        const uint64_t epoch_before_replay = session->telemetry().sequence_epoch;
+        const uint64_t epoch_before_replay = telemetryU64(session->telemetry(), TelemetrySlot::SequenceEpoch);
         RTX_REQUIRE(session->play().has_value());
         RTX_CHECK(waitFor([&] {
-            return session->telemetry().sequence_epoch > epoch_before_replay &&
+            return telemetryU64(session->telemetry(), TelemetrySlot::SequenceEpoch) > epoch_before_replay &&
                    session->playheadFlicks() > 0;
         }, 5000));
         session->pause();
@@ -613,11 +618,11 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
         RTX_CHECK_EQ(session->playheadFlicks(), held);
 
         const int64_t target = kSecond * 3 / 5;
-        const uint64_t decoded_before_seek = session->telemetry().frames_decoded;
+        const uint64_t decoded_before_seek = telemetryU64(session->telemetry(), TelemetrySlot::FramesDecoded);
         RTX_REQUIRE(session->seek(target).has_value());
         RTX_CHECK(session->playheadFlicks() >= target);
         RTX_CHECK(session->playheadFlicks() < target + kSecond / 25 + 1);
-        RTX_CHECK(session->telemetry().frames_decoded >= decoded_before_seek + 4);
+        RTX_CHECK(telemetryU64(session->telemetry(), TelemetrySlot::FramesDecoded) >= decoded_before_seek + 4);
         RTX_CHECK_EQ(session->playheadFlicks(), target);
 
         const int64_t frame_interval = kSecond / 25;
@@ -627,13 +632,13 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
         RTX_REQUIRE(session->stepFrame(-1).has_value());
         RTX_CHECK_EQ(session->playheadFlicks(), before_step);
 
-        const uint64_t epoch_before = session->telemetry().sequence_epoch;
+        const uint64_t epoch_before = telemetryU64(session->telemetry(), TelemetrySlot::SequenceEpoch);
         session->setSpeed(2.0);
         RTX_REQUIRE(session->play().has_value());
         RTX_CHECK(waitFor([&] { return session->playheadFlicks() > before_step; }, 5000));
         session->setSpeed(0.25);
         RTX_REQUIRE(session->seek(kSecond / 2).has_value());
-        RTX_CHECK(session->telemetry().sequence_epoch > epoch_before);
+        RTX_CHECK(telemetryU64(session->telemetry(), TelemetrySlot::SequenceEpoch) > epoch_before);
         session->pause();
 
         RTX_REQUIRE(session->seek(-5 * kSecond).has_value());
@@ -645,7 +650,7 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
     const size_t mid = corrupted->size() / 2;
     (*corrupted)[mid] = static_cast<uint8_t>((*corrupted)[mid] ^ 0xFF);
     (*corrupted)[mid + 7] = static_cast<uint8_t>((*corrupted)[mid + 7] ^ 0x5A);
-    std::unique_ptr<IDemuxer> corrupt_demuxer = makeMemoryDemuxer(std::move(*corrupted));
+    std::unique_ptr<FfmpegDemuxer> corrupt_demuxer = makeMemoryDemuxer(std::move(*corrupted));
     RTX_REQUIRE(corrupt_demuxer != nullptr);
     Result<MediaInfo> corrupt_opened = corrupt_demuxer->open("corrupt.mkv");
     if (!corrupt_opened.has_value()) {
@@ -653,11 +658,10 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
                     corrupt_opened.error().toString().c_str());
         return;
     }
-    PlaybackOptions corrupt_options{};
-    corrupt_options.enable_audio = false;
+    PlaybackOptions corrupt_options{Rational{24, 1}, 1.0, 5u, 0ull, 0, false};
     CountingSink corrupt_sink;
     Result<std::unique_ptr<MediaPlaybackSession>> corrupt_session = MediaPlaybackSession::create(
-        std::move(corrupt_demuxer), corrupt_opened.value(), &corrupt_sink, corrupt_options);
+        std::move(corrupt_demuxer), corrupt_opened.value(), corrupt_sink.asSink(), corrupt_options);
     if (!corrupt_session.has_value()) {
         std::printf("[SKIP-GPU] corruption injection: NVDEC session unavailable (%s)\n",
                     corrupt_session.error().message.c_str());
@@ -666,8 +670,8 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
     RTX_REQUIRE(corrupt_session.value()->play().has_value());
     RTX_CHECK(waitFor([&] { return corrupt_session.value()->state() == PlaybackState::Ended; }, 15000));
     std::printf("[PLAYBACK] corrupt-h264 decoded=%llu rendered=%llu ended=%d\n",
-                static_cast<unsigned long long>(corrupt_session.value()->telemetry().frames_decoded),
-                static_cast<unsigned long long>(corrupt_session.value()->telemetry().frames_rendered),
+                static_cast<unsigned long long>(telemetryU64(corrupt_session.value()->telemetry(), TelemetrySlot::FramesDecoded)),
+                static_cast<unsigned long long>(telemetryU64(corrupt_session.value()->telemetry(), TelemetrySlot::FramesRendered)),
                 corrupt_session.value()->state() == PlaybackState::Ended ? 1 : 0);
 
     if (!any_ran) {
@@ -677,17 +681,15 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
 RTX_TEST(playback_session_fence_gated_slot_retirement) {
     auto bytes = readFixture(fixtureName(VideoCodec::H264));
     RTX_REQUIRE(bytes.has_value());
-    std::unique_ptr<IDemuxer> demuxer = makeMemoryDemuxer(std::move(*bytes));
+    std::unique_ptr<FfmpegDemuxer> demuxer = makeMemoryDemuxer(std::move(*bytes));
     RTX_REQUIRE(demuxer != nullptr);
     Result<MediaInfo> opened = demuxer->open("fixture.mkv");
     RTX_REQUIRE(opened.has_value());
 
     GatedFenceSink sink;
-    PlaybackOptions options{};
-    options.enable_audio = false;  // 软件主时钟，隔离 GPU 退役变量
-    options.decode_ahead = 4;
+    PlaybackOptions options{Rational{24, 1}, 1.0, 4u, 0ull, 0, false};
     Result<std::unique_ptr<MediaPlaybackSession>> created =
-        MediaPlaybackSession::create(std::move(demuxer), opened.value(), &sink, options);
+        MediaPlaybackSession::create(std::move(demuxer), opened.value(), sink.asSink(), options);
     if (!created.has_value()) {
         std::printf("[SKIP-GPU] fence retirement: NVDEC session unavailable (%s)\n",
                     created.error().message.c_str());
@@ -707,7 +709,7 @@ RTX_TEST(playback_session_fence_gated_slot_retirement) {
         RTX_CHECK_EQ(sink.presented, 1ULL);
         RTX_CHECK_EQ(sink.issued, 1ULL);
     }
-    RTX_CHECK_EQ(session->telemetry().frames_rendered, 1ULL);
+    RTX_CHECK_EQ(telemetryU64(session->telemetry(), TelemetrySlot::FramesRendered), 1ULL);
 
     RTX_CHECK(waitFor([&] {
         sink.release(sink.issued);
@@ -722,5 +724,5 @@ RTX_TEST(playback_session_fence_gated_slot_retirement) {
         sink.release(sink.issued);
         return session->state() == PlaybackState::Ended;
     }, 20000));
-    RTX_CHECK(session->telemetry().frames_rendered >= 4);
+    RTX_CHECK(telemetryU64(session->telemetry(), TelemetrySlot::FramesRendered) >= 4);
 }

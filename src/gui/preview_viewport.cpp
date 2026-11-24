@@ -9,7 +9,11 @@
 #endif
 
 #include "preview_viewport.h"
+#include "rtx/sys_dynload.h"
 
+#include <array>
+#include <bit>
+#include <cstdint>
 #include <utility>
 
 #include "preview_tone_map_cs.h"
@@ -26,20 +30,7 @@ constexpr float kSdrReferenceNits = 100.0f;
 constexpr UINT kComputeGroup = 16;
 constexpr UINT kRootConstantDwords = 12;
 
-// @rtx-type-justification
-// Category: Hardware-Layout
-// Why-Std-Fails: DXBC cbuffer 的 DWORD 布局由着色器逐字段消费，std 聚合无法表达
-// Invariant: sizeof == 12 * 4；reserved[0] 携带 input_is_pq 传递函数语义。
-struct ViewportConstants {
-    std::uint32_t src_size[2];
-    std::uint32_t dst_size[2];
-    std::uint32_t pitch_words;
-    std::uint32_t hdr_mode;
-    float split;
-    float max_nits;
-    std::uint32_t split_on;
-    std::uint32_t reserved[3];
-};
+using ViewportConstants = std::array<std::uint32_t, kRootConstantDwords>;
 static_assert(sizeof(ViewportConstants) == kRootConstantDwords * 4);
 
 inline void resourceBarrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
@@ -124,7 +115,7 @@ bool buildComputePipeline(ID3D12Device* device, ComPtr<ID3D12RootSignature>& roo
     ComPtr<ID3DBlob> blob;
     ID3DBlob* raw_blob = nullptr;
     ID3DBlob* raw_errors = nullptr;
-    if (FAILED(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &raw_blob,
+    if (FAILED(rtx::sys::d3d12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &raw_blob,
                                            &raw_errors))) {
         return false;
     }
@@ -227,13 +218,13 @@ Result<void> PreviewViewport::waitForGpuIdle(std::uint32_t timeout_ms) noexcept 
     }
     const unsigned long long completed = cmd_fence_->GetCompletedValue();
     if (completed == UINT64_MAX) {
-        retirement_.releaseAll();
+        gpuReleaseAll(retirement_);
         return markDeviceLost("the preview D3D12 device was removed (fence saturated)");
     }
     if (fence_value_ == 0 || completed >= fence_value_) {
-        retirement_.collect();
-        if (retirement_.deviceLostSeen()) {
-            retirement_.resetDeviceLostSeen();
+        gpuCollect(retirement_);
+        if (gpuDeviceLostSeen(retirement_)) {
+            gpuResetDeviceLostSeen(retirement_);
             return markDeviceLost("the preview D3D12 device was removed");
         }
         return {};
@@ -245,9 +236,9 @@ Result<void> PreviewViewport::waitForGpuIdle(std::uint32_t timeout_ms) noexcept 
         return err(ErrorCode::Internal, "SetEventOnCompletion failed for the preview fence");
     }
     if (WaitForSingleObject(fence_event_.get(), timeout_ms) == WAIT_OBJECT_0) {
-        retirement_.collect();
-        if (retirement_.deviceLostSeen()) {
-            retirement_.resetDeviceLostSeen();
+        gpuCollect(retirement_);
+        if (gpuDeviceLostSeen(retirement_)) {
+            gpuResetDeviceLostSeen(retirement_);
             return markDeviceLost("the preview D3D12 device was removed");
         }
         return {};
@@ -256,22 +247,22 @@ Result<void> PreviewViewport::waitForGpuIdle(std::uint32_t timeout_ms) noexcept 
     if (reason == S_OK) {
         return err(ErrorCode::Timeout, "the GPU is still executing the submitted preview commands");
     }
-    retirement_.releaseAll();
+    gpuReleaseAll(retirement_);
     return markDeviceLost("the preview D3D12 device was removed while draining");
 }
 void PreviewViewport::retireAllGpuResources() noexcept {
     const std::uint64_t bound = fence_value_;
     for (auto& rt : render_targets_) {
-        retirement_.retire(bound, std::move(rt));
+        gpuRetire(retirement_, bound, std::move(rt));
     }
-    retirement_.retire(bound, std::move(view_heap_));
-    retirement_.retire(bound, std::move(swap_chain_));
-    retirement_.retire(bound, std::move(cmd_list_));
-    retirement_.retire(bound, std::move(cmd_allocator_));
-    retirement_.retire(bound, std::move(pipeline_));
-    retirement_.retire(bound, std::move(root_signature_));
-    retirement_.retire(bound, std::move(cmd_queue_));
-    retirement_.retire(bound, std::move(device_));
+    gpuRetire(retirement_, bound, std::move(view_heap_));
+    gpuRetire(retirement_, bound, std::move(swap_chain_));
+    gpuRetire(retirement_, bound, std::move(cmd_list_));
+    gpuRetire(retirement_, bound, std::move(cmd_allocator_));
+    gpuRetire(retirement_, bound, std::move(pipeline_));
+    gpuRetire(retirement_, bound, std::move(root_signature_));
+    gpuRetire(retirement_, bound, std::move(cmd_queue_));
+    gpuRetire(retirement_, bound, std::move(device_));
 }
 void PreviewViewport::release() noexcept { releaseGpu(true); }
 
@@ -285,11 +276,11 @@ void PreviewViewport::releaseGpu(bool viewport_dying) noexcept {
     }
     retireAllGpuResources();
     ID3D12Fence* fence = cmd_fence_.get();
-    retirement_.setProbe([fence] { return fence->GetCompletedValue(); });
-    retirement_.setKeepalive(ComPtr<IUnknown>(cmd_fence_.release()));
-    retirement_.setEventKeepalive(std::move(fence_event_));
+    gpuSetProbe(retirement_, [fence] { return fence->GetCompletedValue(); });
+    gpuSetKeepalive(retirement_, ComPtr<IUnknown>(cmd_fence_.release()));
+    gpuSetEventKeepalive(retirement_, std::move(fence_event_));
     if (viewport_dying) {
-        retirement_.setWindowKeepalive(std::move(child_hwnd_));
+        gpuSetWindowKeepalive(retirement_, std::move(child_hwnd_));
     }
     deferRetirement(std::move(retirement_));
 }
@@ -406,7 +397,7 @@ bool PreviewViewport::adoptDevice(void* borrowed_device) noexcept {
     fence_value_ = 0;
     device_lost_ = false;
     ID3D12Fence* fence = cmd_fence_.get();
-    retirement_.setProbe([fence] { return fence->GetCompletedValue(); });
+    gpuSetProbe(retirement_, [fence] { return fence->GetCompletedValue(); });
 
     if (!buildComputePipeline(device_.get(), root_signature_, pipeline_)) {
         return false;
@@ -415,7 +406,7 @@ bool PreviewViewport::adoptDevice(void* borrowed_device) noexcept {
         return false;
     }
     IDXGIFactory2* raw_factory = nullptr;
-    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory2),
+    if (FAILED(rtx::sys::createDxgiFactory1(__uuidof(IDXGIFactory2),
                                   reinterpret_cast<void**>(&raw_factory)))) {
         return false;
     }
@@ -557,18 +548,21 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
     cmd_list_->SetComputeRootDescriptorTable(0, view_heap_->GetGPUDescriptorHandleForHeapStart());
 
     const bool split_on = split_ratio_ > 0.0f && split_ratio_ < 1.0f;
-    ViewportConstants constants{};
-    constants.src_size[0] = src_width;
-    constants.src_size[1] = src_height;
-    constants.dst_size[0] = static_cast<std::uint32_t>(width_);
-    constants.dst_size[1] = static_cast<std::uint32_t>(height_);
-    constants.pitch_words = pitch / 4u;
-    constants.hdr_mode = hdr_output_ ? 1u : 0u;
-    constants.split = split_ratio_;
-    constants.max_nits = max_nits > 0.0f ? max_nits : kSdrReferenceNits;
-    constants.split_on = split_on ? 1u : 0u;
-    constants.reserved[0] = input_is_pq ? 1u : 0u;
-    cmd_list_->SetComputeRoot32BitConstants(1, kRootConstantDwords, &constants, 0);
+    const ViewportConstants constants{
+        src_width,
+        src_height,
+        static_cast<std::uint32_t>(width_),
+        static_cast<std::uint32_t>(height_),
+        pitch / 4u,
+        hdr_output_ ? 1u : 0u,
+        std::bit_cast<std::uint32_t>(split_ratio_),
+        std::bit_cast<std::uint32_t>(max_nits > 0.0f ? max_nits : kSdrReferenceNits),
+        split_on ? 1u : 0u,
+        input_is_pq ? 1u : 0u,
+        0u,
+        0u,
+    };
+    cmd_list_->SetComputeRoot32BitConstants(1, kRootConstantDwords, constants.data(), 0);
 
     resourceBarrier(cmd_list_.get(), back_buffer, D3D12_RESOURCE_STATE_PRESENT,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -588,14 +582,14 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
     ++fence_value_;
     if (FAILED(cmd_queue_->Signal(cmd_fence_.get(), fence_value_))) {
         device_lost_ = true;
-        retirement_.releaseAll();
+        gpuReleaseAll(retirement_);
         return;
     }
     auto* res = static_cast<IUnknown*>(shared_resource);
     res->AddRef();
     auto flags = ticket.first;
     const std::uint32_t slot_index = ticket.second;
-    retirement_.retire(fence_value_, res, [flags = std::move(flags), slot_index] {
+    gpuRetire(retirement_, fence_value_, res, [flags = std::move(flags), slot_index] {
         if (flags != nullptr && slot_index < flags->size()) {
             (*flags)[slot_index].store(0, std::memory_order_release);
         }

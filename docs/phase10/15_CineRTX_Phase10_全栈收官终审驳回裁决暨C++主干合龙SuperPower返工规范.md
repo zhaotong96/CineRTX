@@ -1,7 +1,7 @@
 # 15_CineRTX Phase 10 全栈收官终审驳回裁决暨 C++ 主干合龙 SuperPower 返工规范
 
 - **文档编号**：`DOC-P10-15`
-- **审计标的**：[`14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md`](14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md) 及 `Google Drive\work\CineRTX\` 全仓源码与预编译产物
+- **审计标的**：[`14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md`](14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md) 及 `workspace\work\CineRTX\` 全仓源码与预编译产物
 - **前置基准规范**：
   - `01_CineRTX_Phase10_架构演进与技术选型深度调研报告.md` ~ `05_CineRTX_Phase10_Track10D_GUI工作站队列化与20参数SSOT契约升级规范.md`
   - [`07_CineRTX_Phase10_专家驳回裁决暨全链路接线闭环SuperPower返工规范.md`](07_CineRTX_Phase10_专家驳回裁决暨全链路接线闭环SuperPower返工规范.md)（C++ 主干四轨返工令：`RW-P10-01 ~ RW-P10-04`）
@@ -15,7 +15,7 @@
 
 ## 0. 首席专家终审裁决摘要（Executive Audit Verdict）
 
-针对项目负责人提交的 [`14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md`](14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md) 中的四项核心审视诉求，本首席领域专家对 `Google Drive\work\CineRTX\` 下的 `include/`、`src/`、`tests/`、`webui/` 及 `docs/phase10/` 进行了逐字节、逐行号、逐时间戳的法医级（Forensic）穿透核验，得出如下不可推翻的实证结论：
+针对项目负责人提交的 [`14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md`](14_CineRTX_Phase10_全栈工程收官综合验收与战略封板委托书.md) 中的四项核心审视诉求，本首席领域专家对 `workspace\work\CineRTX\` 下的 `include/`、`src/`、`tests/`、`webui/` 及 `docs/phase10/` 进行了逐字节、逐行号、逐时间戳的法医级（Forensic）穿透核验，得出如下不可推翻的实证结论：
 
 1. **WebUI v2 重构（`08~12` 号施工单）专项核验结论：CONDITIONAL PASS（前端与 `server.py` 达标，仅余 3 项 P2 卫生与竞态瑕疵）**
    - 前端团队在 `2026-11-17T01:17Z` 提交的 [`webui/index.html`](../../webui/index.html)（`18,741 B`）、[`webui/app.js`](../../webui/app.js)（`36,272 B`）、[`webui/app.css`](../../webui/app.css)（`17,452 B`）、[`webui/server.py`](../../webui/server.py)（`44,063 B`）及 [`webui/state.json`](../../webui/state.json)（`5,686 B`），已完整落实 `08 号规范`要求的：
@@ -37,7 +37,7 @@
 
 ## 1. 全栈五轨（Track 10A/10B/10C/10D + WebUI v2）实证穿透核验总表
 
-以下为 `14 号委托书`与 `13 号报告`声称状态与 Google Drive 仓库真实物理状态的逐项对比：
+以下为 `14 号委托书`与 `13 号报告`声称状态与 workspace 仓库真实物理状态的逐项对比：
 
 | 审计轨道与模块 | 仓库真实物理文件（含哈希/字节数/最后修改时间） | 委托书/13号报告声称状态 | 真实代码与产物核验实证 | 终审判定 |
 | :--- | :--- | :--- | :--- | :--- |

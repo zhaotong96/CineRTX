@@ -17,7 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
-#include <sstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -97,7 +97,7 @@ bool parseFloatToken(const std::string& token, float& value) {
 }
 }  // namespace
 
-Result<Lut3D> Lut3D::parse(const std::string& text) {
+Result<Lut3D> parseLut3d(const std::string& text) {
     int grid_size = 0;
     std::vector<float> table;  // RGB rows in .cube order
     bool header_done = false;
@@ -176,18 +176,16 @@ Result<Lut3D> Lut3D::parse(const std::string& text) {
                        std::to_string(expected) + ", got " +
                        std::to_string(table.size() / 3u));
     }
-    Lut3D lut;
-    lut.grid_size_ = grid_size;
-    lut.half4_table_.resize(expected * 4u);
+    std::vector<std::uint16_t> half4(expected * 4u);
     for (size_t i = 0; i < expected; ++i) {
-        lut.half4_table_[i * 4u + 0u] = floatToHalf(table[i * 3u + 0u]);
-        lut.half4_table_[i * 4u + 1u] = floatToHalf(table[i * 3u + 1u]);
-        lut.half4_table_[i * 4u + 2u] = floatToHalf(table[i * 3u + 2u]);
-        lut.half4_table_[i * 4u + 3u] = floatToHalf(1.0f);
+        half4[i * 4u + 0u] = floatToHalf(table[i * 3u + 0u]);
+        half4[i * 4u + 1u] = floatToHalf(table[i * 3u + 1u]);
+        half4[i * 4u + 2u] = floatToHalf(table[i * 3u + 2u]);
+        half4[i * 4u + 3u] = floatToHalf(1.0f);
     }
-    return lut;
+    return Lut3D{grid_size, std::move(half4)};
 }
-Result<Lut3D> Lut3D::loadFromCubeFile(const std::filesystem::path& path) {
+Result<Lut3D> loadLut3dFromCubeFile(const std::filesystem::path& path) {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec) || ec) {
         return err(ErrorCode::NotFound, "3D LUT file does not exist: " + path.string());
@@ -196,8 +194,7 @@ Result<Lut3D> Lut3D::loadFromCubeFile(const std::filesystem::path& path) {
     if (!file) {
         return err(ErrorCode::Io, "cannot open 3D LUT file: " + path.string());
     }
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    return parse(buffer.str());
+    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return parseLut3d(content);
 }
 }  // namespace rtx

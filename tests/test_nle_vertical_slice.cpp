@@ -43,16 +43,14 @@ RTX_TEST(nle_seven_edit_ops_and_undo_redo) {
     NleProject project{};
     EditStacks history{};
 
-    auto a1_res = nleRegisterAsset(project, NleMediaAsset{
-        .uuid = "uuid-a1", .name = "clip_a.mp4", .path = "media/clip_a.mp4",
-        .duration_flicks = 20 * kSec, .width = 1920, .height = 1080, .offline = false});
+    auto a1_res = nleRegisterAsset(project, makeNleAsset(
+        0, "uuid-a1", "clip_a.mp4", "media/clip_a.mp4", 20 * kSec, 1920, 1080, false));
     RTX_REQUIRE(a1_res.has_value());
     const uint64_t a1 = *a1_res;
 
     // 1. AddClip
-    auto c1_res = nleAddClip(project, history, TimelineClip{
-        .asset_id = a1, .name = "Intro", .lane = 1,
-        .start_flicks = 0, .in_flicks = 0, .out_flicks = 10 * kSec, .gain = 1.0f});
+    auto c1_res = nleAddClip(project, history, makeTimelineClip(
+        0, a1, "Intro", 1, 0, 0, 10 * kSec, 1.0f));
     RTX_REQUIRE(c1_res.has_value());
     const uint64_t c1 = *c1_res;
     RTX_REQUIRE(project.clip(c1) != nullptr);
@@ -65,8 +63,7 @@ RTX_TEST(nle_seven_edit_ops_and_undo_redo) {
 
     // 2. TrimClip
     RTX_REQUIRE(nleTrimClip(project, history, c1, 1 * kSec, 9 * kSec).has_value());
-    RTX_CHECK_EQ(project.clip(c1)->in_flicks, 1 * kSec);
-    RTX_CHECK_EQ(project.clip(c1)->out_flicks, 9 * kSec);
+    { const auto& [id, a, n, l, s, inf, outf, g] = *project.clip(c1); (void)id;(void)a;(void)n;(void)l;(void)s;(void)g; RTX_CHECK_EQ(inf, 1 * kSec); RTX_CHECK_EQ(outf, 9 * kSec); }
 
     // 3. SplitClip at 4s (inside [0, 8s))
     auto c2_res = nleSplitClip(project, history, c1, 4 * kSec);
@@ -74,14 +71,11 @@ RTX_TEST(nle_seven_edit_ops_and_undo_redo) {
     const uint64_t c2 = *c2_res;
     RTX_REQUIRE_EQ(project.clips.size(), 2u);
     RTX_CHECK_EQ(nleClipDuration(*project.clip(c1)), 4 * kSec);
-    RTX_CHECK_EQ(project.clip(c2)->start_flicks, 4 * kSec);
-    RTX_CHECK_EQ(project.clip(c2)->in_flicks, 5 * kSec);
-    RTX_CHECK_EQ(project.clip(c2)->out_flicks, 9 * kSec);
+    { const auto& [id, a, n, l, st, inf, outf, g] = *project.clip(c2); (void)id;(void)a;(void)n;(void)l;(void)g; RTX_CHECK_EQ(st, 4 * kSec); RTX_CHECK_EQ(inf, 5 * kSec); RTX_CHECK_EQ(outf, 9 * kSec); }
 
     // 4. MoveClip
     RTX_REQUIRE(nleMoveClip(project, history, c2, 0, 2 * kSec).has_value());
-    RTX_CHECK_EQ(project.clip(c2)->lane, 0);
-    RTX_CHECK_EQ(project.clip(c2)->start_flicks, 2 * kSec);
+    { const auto& [id, a, n, ln, st, inf, outf, g] = *project.clip(c2); (void)id;(void)a;(void)n;(void)inf;(void)outf;(void)g; RTX_CHECK_EQ(ln, 0); RTX_CHECK_EQ(st, 2 * kSec); }
 
     // 5. ReorderTracks
     const std::array<int8_t, kNleTrackCount> swapped{1, 0, 2, 3};
@@ -90,12 +84,10 @@ RTX_TEST(nle_seven_edit_ops_and_undo_redo) {
     RTX_CHECK_EQ(static_cast<int>(project.lane_stack[1]), 0);
 
     // 6. RelinkAsset
-    project.asset(a1)->offline = true;
+    { auto& [id, u, n, p, d, w, h, off] = *project.asset(a1); (void)id;(void)u;(void)n;(void)p;(void)d;(void)w;(void)h; off = true; }
     RTX_REQUIRE(nleRelinkAsset(project, history, a1, "media/clip_a_relinked.mp4",
                                25 * kSec, 3840, 2160).has_value());
-    RTX_CHECK_EQ(project.asset(a1)->path, std::string("media/clip_a_relinked.mp4"));
-    RTX_CHECK_EQ(project.asset(a1)->offline, false);
-    RTX_CHECK_EQ(project.asset(a1)->width, 3840);
+    { const auto& [id, u, n, p, d, w, h, off] = *project.asset(a1); (void)id;(void)u;(void)n;(void)d;(void)h; RTX_CHECK_EQ(p, std::string("media/clip_a_relinked.mp4")); RTX_CHECK_EQ(off, false); RTX_CHECK_EQ(w, 3840); }
 
     // 7. DeleteClip
     RTX_REQUIRE(nleDeleteClip(project, history, c2).has_value());
@@ -107,7 +99,7 @@ RTX_TEST(nle_seven_edit_ops_and_undo_redo) {
         RTX_REQUIRE(nleUndo(project, history).has_value());
     }
     RTX_CHECK(project.clips.empty());
-    RTX_CHECK_EQ(project.asset(a1)->path, std::string("media/clip_a.mp4"));
+    { const auto& [id, u, n, p, d, w, h, off] = *project.asset(a1); (void)id;(void)u;(void)n;(void)d;(void)w;(void)h;(void)off; RTX_CHECK_EQ(p, std::string("media/clip_a.mp4")); }
     RTX_CHECK_EQ(static_cast<int>(project.lane_stack[0]), 0);
     RTX_CHECK(!nleUndo(project, history).has_value());
 
@@ -116,7 +108,7 @@ RTX_TEST(nle_seven_edit_ops_and_undo_redo) {
         RTX_REQUIRE(nleRedo(project, history).has_value());
     }
     RTX_CHECK_EQ(project.clips.size(), 1u);
-    RTX_CHECK_EQ(project.asset(a1)->path, std::string("media/clip_a_relinked.mp4"));
+    { const auto& [id, u, n, p, d, w, h, off] = *project.asset(a1); (void)id;(void)u;(void)n;(void)d;(void)w;(void)h;(void)off; RTX_CHECK_EQ(p, std::string("media/clip_a_relinked.mp4")); }
     RTX_CHECK(!nleRedo(project, history).has_value());
 }
 
@@ -124,20 +116,12 @@ RTX_TEST(nle_json_rfc8259_strict_round_trip) {
     NleProject project{};
     EditStacks history{};
 
-    auto a1 = nleRegisterAsset(project, NleMediaAsset{
-        .uuid = "u-1", .name = "a\"quote.mp4", .path = "C:\\media\\a.mp4",
-        .duration_flicks = 12 * kSec, .width = 3840, .height = 2160, .offline = false});
-    auto a2 = nleRegisterAsset(project, NleMediaAsset{
-        .uuid = "u-2", .name = "b.mp4", .path = "C:\\media\\b.mp4",
-        .duration_flicks = 8 * kSec, .width = 1920, .height = 1080, .offline = false});
+    auto a1 = nleRegisterAsset(project, makeNleAsset(0, "u-1", "a\"quote.mp4", "C:\\media\\a.mp4", 12 * kSec, 3840, 2160, false));
+    auto a2 = nleRegisterAsset(project, makeNleAsset(0, "u-2", "b.mp4", "C:\\media\\b.mp4", 8 * kSec, 1920, 1080, false));
     RTX_REQUIRE(a1.has_value() && a2.has_value());
 
-    RTX_REQUIRE(nleAddClip(project, history, TimelineClip{
-        .asset_id = *a1, .name = "Clip 1", .lane = 1,
-        .start_flicks = 0, .in_flicks = 0, .out_flicks = 6 * kSec, .gain = 1.0f}).has_value());
-    RTX_REQUIRE(nleAddClip(project, history, TimelineClip{
-        .asset_id = *a2, .name = "Clip 2", .lane = 0,
-        .start_flicks = 3 * kSec, .in_flicks = 1 * kSec, .out_flicks = 5 * kSec, .gain = 0.5f}).has_value());
+    RTX_REQUIRE(nleAddClip(project, history, makeTimelineClip(0, *a1, "Clip 1", 1, 0, 0, 6 * kSec, 1.0f)).has_value());
+    RTX_REQUIRE(nleAddClip(project, history, makeTimelineClip(0, *a2, "Clip 2", 0, 3 * kSec, 1 * kSec, 5 * kSec, 0.5f)).has_value());
     project.playhead_flicks = 2 * kSec;
 
     const std::string json = project.toJson();
@@ -148,7 +132,7 @@ RTX_TEST(nle_json_rfc8259_strict_round_trip) {
     RTX_CHECK_EQ(parsed->assets.size(), 2u);
     RTX_CHECK_EQ(parsed->clips.size(), 2u);
     RTX_CHECK_EQ(parsed->playhead_flicks, 2 * kSec);
-    RTX_CHECK_EQ(parsed->assets[0].name, std::string("a\"quote.mp4"));
+    { const auto& [id, u, nm, p, d, w, h, off] = parsed->assets[0]; (void)id;(void)u;(void)p;(void)d;(void)w;(void)h;(void)off; RTX_CHECK_EQ(nm, std::string("a\"quote.mp4")); }
     RTX_CHECK_EQ(parsed->toJson(), json);
 
     // Malformed payloads must return Result error without throwing exceptions
@@ -174,86 +158,84 @@ RTX_TEST(nle_json_out_of_order_keys_and_duplicate_id_guard) {
     RTX_REQUIRE(parsed.has_value());
     RTX_REQUIRE_EQ(parsed->assets.size(), 1u);
     RTX_REQUIRE_EQ(parsed->clips.size(), 1u);
-    RTX_CHECK_EQ(parsed->clips[0].asset_id, 7ULL);
+    { const auto& [id, aid, nm, l, s, inf, outf, g] = parsed->clips[0]; (void)id;(void)nm;(void)l;(void)s;(void)inf;(void)outf;(void)g; RTX_CHECK_EQ(aid, 7ULL); }
 
     // S-1.5 / S-2.2: Duplicate explicit non-zero IDs must be rejected
     EditStacks history{};
-    auto dup_asset = nleRegisterAsset(*parsed, NleMediaAsset{
-        .id = 7, .uuid = "u-dup", .name = "dup.mp4", .path = "media/dup.mp4",
-        .duration_flicks = kSec});
+    auto dup_asset = nleRegisterAsset(*parsed, makeNleAsset(7, "u-dup", "dup.mp4", "media/dup.mp4", kSec));
     RTX_CHECK(!dup_asset.has_value());
 
-    auto dup_clip = nleAddClip(*parsed, history, TimelineClip{
-        .id = 10, .asset_id = 7, .name = "DupClip", .lane = 1,
-        .start_flicks = 0, .in_flicks = 0, .out_flicks = kSec});
+    auto dup_clip = nleAddClip(*parsed, history, makeTimelineClip(10, 7, "DupClip", 1, 0, 0, kSec));
     RTX_CHECK(!dup_clip.has_value());
     RTX_CHECK(history.first.empty());  // Failed add must not pollute undo stack
 
     // S-1.5: Relink with shorter duration must clamp referencing clip out_flicks
     RTX_REQUIRE(nleRelinkAsset(*parsed, history, 7, "media/shorter.mp4", kSec / 2, 1920, 1080).has_value());
-    RTX_CHECK_EQ(parsed->clip(10)->out_flicks, kSec / 2);
+    { const auto& [id, aid, nm, l, s, inf, outf, g] = *parsed->clip(10); (void)id;(void)aid;(void)nm;(void)l;(void)s;(void)inf;(void)g; RTX_CHECK_EQ(outf, kSec / 2); }
 }
 
 RTX_TEST(nle_render_graph_sweep_line_hard_cut_idr_and_audio_slices) {
     NleProject project{};
     EditStacks history{};
 
-    auto a1 = nleRegisterAsset(project, NleMediaAsset{
-        .uuid = "u-base", .name = "base.mp4", .path = "media/base.mp4",
-        .duration_flicks = 10 * kSec, .width = 1920, .height = 1080, .offline = false});
-    auto a2 = nleRegisterAsset(project, NleMediaAsset{
-        .uuid = "u-cut", .name = "cutaway.mp4", .path = "media/cutaway.mp4",
-        .duration_flicks = 4 * kSec, .width = 1920, .height = 1080, .offline = false});
+    auto a1 = nleRegisterAsset(project, makeNleAsset(0, "u-base", "base.mp4", "media/base.mp4", 10 * kSec, 1920, 1080, false));
+    auto a2 = nleRegisterAsset(project, makeNleAsset(0, "u-cut", "cutaway.mp4", "media/cutaway.mp4", 4 * kSec, 1920, 1080, false));
     RTX_REQUIRE(a1.has_value() && a2.has_value());
 
     // V1 base [0s, 10s), V2 cutaway [3s, 6s), A1 audio [0s, 10s)
-    RTX_REQUIRE(nleAddClip(project, history, TimelineClip{
-        .asset_id = *a1, .name = "Base", .lane = 1,
-        .start_flicks = 0, .in_flicks = 0, .out_flicks = 10 * kSec}).has_value());
-    RTX_REQUIRE(nleAddClip(project, history, TimelineClip{
-        .asset_id = *a2, .name = "Cutaway", .lane = 0,
-        .start_flicks = 3 * kSec, .in_flicks = 0, .out_flicks = 3 * kSec}).has_value());
-    RTX_REQUIRE(nleAddClip(project, history, TimelineClip{
-        .asset_id = *a1, .name = "Base A1", .lane = 2,
-        .start_flicks = 0, .in_flicks = 0, .out_flicks = 10 * kSec, .gain = 0.75f}).has_value());
+    RTX_REQUIRE(nleAddClip(project, history, makeTimelineClip(0, *a1, "Base", 1, 0, 0, 10 * kSec)).has_value());
+    RTX_REQUIRE(nleAddClip(project, history, makeTimelineClip(0, *a2, "Cutaway", 0, 3 * kSec, 0, 3 * kSec)).has_value());
+    RTX_REQUIRE(nleAddClip(project, history, makeTimelineClip(0, *a1, "Base A1", 2, 0, 0, 10 * kSec, 0.75f)).has_value());
 
     auto compiled = compileRenderGraph(project);
     RTX_REQUIRE(compiled.has_value());
     const auto& segs = *compiled;
     RTX_REQUIRE_EQ(segs.size(), 3u);
 
-    RTX_CHECK_EQ(segs[0].source_path, std::string("media/base.mp4"));
-    RTX_CHECK_EQ(segs[0].timeline_in_flicks, 0LL);
-    RTX_CHECK_EQ(segs[0].timeline_out_flicks, 3 * kSec);
-    RTX_CHECK(!segs[0].hard_cut);
-    RTX_CHECK(!segs[0].force_keyframe);
-
-    RTX_CHECK_EQ(segs[1].source_path, std::string("media/cutaway.mp4"));
-    RTX_CHECK_EQ(segs[1].timeline_in_flicks, 3 * kSec);
-    RTX_CHECK_EQ(segs[1].timeline_out_flicks, 6 * kSec);
-    RTX_CHECK_EQ(segs[1].source_in_flicks, 0LL);
-    RTX_CHECK_EQ(segs[1].source_out_flicks, 3 * kSec);
-    RTX_CHECK(segs[1].hard_cut);
-    RTX_CHECK(segs[1].force_keyframe);
-
-    RTX_CHECK_EQ(segs[2].source_path, std::string("media/base.mp4"));
-    RTX_CHECK_EQ(segs[2].timeline_in_flicks, 6 * kSec);
-    RTX_CHECK_EQ(segs[2].timeline_out_flicks, 10 * kSec);
-    RTX_CHECK_EQ(segs[2].source_in_flicks, 6 * kSec);
-    RTX_CHECK_EQ(segs[2].source_out_flicks, 10 * kSec);
-    RTX_CHECK(segs[2].hard_cut);
-    RTX_CHECK(segs[2].force_keyframe);
+    {
+        const auto& [sp, si, so, ti, to, hc, fk] = segs[0];
+        (void)si; (void)so;
+        RTX_CHECK_EQ(sp, std::string("media/base.mp4"));
+        RTX_CHECK_EQ(ti, 0LL);
+        RTX_CHECK_EQ(to, 3 * kSec);
+        RTX_CHECK(!hc);
+        RTX_CHECK(!fk);
+    }
+    {
+        const auto& [sp, si, so, ti, to, hc, fk] = segs[1];
+        RTX_CHECK_EQ(sp, std::string("media/cutaway.mp4"));
+        RTX_CHECK_EQ(ti, 3 * kSec);
+        RTX_CHECK_EQ(to, 6 * kSec);
+        RTX_CHECK_EQ(si, 0LL);
+        RTX_CHECK_EQ(so, 3 * kSec);
+        RTX_CHECK(hc);
+        RTX_CHECK(fk);
+    }
+    {
+        const auto& [sp, si, so, ti, to, hc, fk] = segs[2];
+        RTX_CHECK_EQ(sp, std::string("media/base.mp4"));
+        RTX_CHECK_EQ(ti, 6 * kSec);
+        RTX_CHECK_EQ(to, 10 * kSec);
+        RTX_CHECK_EQ(si, 6 * kSec);
+        RTX_CHECK_EQ(so, 10 * kSec);
+        RTX_CHECK(hc);
+        RTX_CHECK(fk);
+    }
 
     // S-1.2: A1 audio render graph slice extraction
     auto audio_segs = compileAudioRenderGraph(project);
     RTX_REQUIRE(audio_segs.has_value());
     RTX_REQUIRE_EQ(audio_segs->size(), 1u);
-    RTX_CHECK_EQ((*audio_segs)[0].source_path, std::string("media/base.mp4"));
-    RTX_CHECK_EQ((*audio_segs)[0].timeline_out_flicks, 10 * kSec);
-    RTX_CHECK_NEAR((*audio_segs)[0].gain, 0.75f, 1e-6f);
+    {
+        const auto& [ap, asi, aso, ati, ato, again] = (*audio_segs)[0];
+        (void)asi; (void)aso; (void)ati;
+        RTX_CHECK_EQ(ap, std::string("media/base.mp4"));
+        RTX_CHECK_EQ(ato, 10 * kSec);
+        RTX_CHECK_NEAR(again, 0.75f, 1e-6f);
+    }
 
     // S-1.2: Offline asset must return ErrorCode::NotFound instead of silent black frames
-    project.asset(*a2)->offline = true;
+    { auto& [id, u, n, p, d, w, h, off] = *project.asset(*a2); (void)id;(void)u;(void)n;(void)p;(void)d;(void)w;(void)h; off = true; }
     auto offline_err = compileRenderGraph(project);
     RTX_REQUIRE(!offline_err.has_value());
     RTX_CHECK_EQ(offline_err.error().code, ErrorCode::NotFound);

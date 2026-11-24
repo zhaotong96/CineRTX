@@ -283,7 +283,7 @@ if __name__ == "__main__":
   2. 更新 [`docs/README.md`](../README.md)，新增“Phase 9 权威定稿文档 (`docs/phase9/`)”章节索引，并将单测数量更新为最新实测值（`75 tests`）；
   3. 对全仓 `docs/` 执行正则扫描：
      ```powershell
-     Select-String -Path "docs\**\*.md","README*.md" -Pattern "C:\\PUBLIC|C:\\Users\\|192\.168\."
+     cmake -P cmake/AuditPrivacy.cmake
      ```
      确保命中数严格为 **`0`**（将 `CineRTX_Phase9_终审验收报告_RIFE120fps全链路根治.md` 第 22、30、76、87 行的 `[REDACTED_HOST]` 全部替换为仓库相对路径 `.vs\build\cmake\windows-msvc-ninja` 与 `.vs\gemini_generated_video_6eaef4a7.mp4`）。
 

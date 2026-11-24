@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -38,23 +39,21 @@ enum class ParamKind : uint8_t {
     Enum = 3,
 };
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct ParamMeta {
-    std::string_view json_key;
-    std::string_view cli_flag;
-    ParamKind kind = ParamKind::String;
-    StrId label_id = StrId::AppTitle;
-    int min_val = 0;
-    int max_val = 0;
-    int default_int = 0;
-    bool default_bool = false;
-    std::string_view default_str{};
-    std::string_view enum_csv{};  // comma-separated allowed tokens for Enum kind
-    bool normalized_lower = false;  // ASCII-lowercase this string field during normalization
-};
+// Phase 12 (Wave 12.2-D): standard tuple alias replaces ParamMeta descriptor wrapper.
+// Layout: (json_key, cli_flag, kind, label_id, min_val, max_val, default_int, default_bool,
+//          default_str, enum_csv, normalized_lower).
+using ParamMeta = std::tuple<
+    std::string_view, std::string_view, ParamKind, StrId,
+    int, int, int, bool, std::string_view, std::string_view, bool>;
+
+[[nodiscard]] constexpr ParamMeta makeParamMeta(
+    std::string_view json_key, std::string_view cli_flag, ParamKind kind, StrId label_id,
+    int min_val = 0, int max_val = 0, int default_int = 0, bool default_bool = false,
+    std::string_view default_str = {}, std::string_view enum_csv = {},
+    bool normalized_lower = false) noexcept {
+    return {json_key, cli_flag, kind, label_id, min_val, max_val,
+            default_int, default_bool, default_str, enum_csv, normalized_lower};
+}
 
 // Canonical transcode profile shared 1:1 across CLI, Win32 GUI and WebUI.
 // The default member initializers define the single out-of-the-box best
@@ -95,80 +94,46 @@ using ProfileMemberPtr = std::variant<std::string TranscodeProfile::*,
                                       bool TranscodeProfile::*>;
 
 inline constexpr std::array<std::pair<ParamMeta, ProfileMemberPtr>, 20> kParamDescriptors{{
-    {{.json_key = "input",         .cli_flag = "--input",          .kind = ParamKind::String, .label_id = StrId::ParamInput},
-     &TranscodeProfile::input},
-    {{.json_key = "output",        .cli_flag = "--output",         .kind = ParamKind::String, .label_id = StrId::ParamOutput},
-     &TranscodeProfile::output},
-    {{.json_key = "codec",         .cli_flag = "--codec",          .kind = ParamKind::Enum,   .label_id = StrId::ParamCodec,
-      .default_str = "av1", .enum_csv = "av1,hevc", .normalized_lower = true},
-     &TranscodeProfile::codec},
-    {{.json_key = "preset",        .cli_flag = "--preset",         .kind = ParamKind::Int,    .label_id = StrId::ParamPreset,
-      .min_val = 1, .max_val = 7, .default_int = 5},
-     &TranscodeProfile::preset},
-    {{.json_key = "rateControl",   .cli_flag = "--rate-control",   .kind = ParamKind::Enum,   .label_id = StrId::ParamRateControl,
-      .default_str = "cq", .enum_csv = "cq,vbr,cbr,qp", .normalized_lower = true},
-     &TranscodeProfile::rate_control},
-    {{.json_key = "bitrateKbps",   .cli_flag = "--bitrate",        .kind = ParamKind::Int,    .label_id = StrId::ParamBitrate,
-      .min_val = 0, .max_val = 200000, .default_int = 0},
-     &TranscodeProfile::bitrate_kbps},
-    {{.json_key = "qp",            .cli_flag = "--qp",             .kind = ParamKind::Int,    .label_id = StrId::ParamCq,
-      .min_val = 0, .max_val = 51, .default_int = 22},
-     &TranscodeProfile::qp},
-    {{.json_key = "resolution",    .cli_flag = "--resolution",     .kind = ParamKind::Enum,   .label_id = StrId::ParamResolution,
-      .default_str = "4k", .enum_csv = "4k,2k,fhd,native", .normalized_lower = true},
-     &TranscodeProfile::resolution},
-    {{.json_key = "geometry",      .cli_flag = "--pillarbox",      .kind = ParamKind::Enum,   .label_id = StrId::ParamAspect,
-      .default_str = "auto", .enum_csv = "auto,pillarbox", .normalized_lower = true},
-     &TranscodeProfile::geometry},
-    {{.json_key = "vsrEnabled",    .cli_flag = "--no-vsr",         .kind = ParamKind::Bool,   .label_id = StrId::ParamVsr,
-      .default_bool = true},
-     &TranscodeProfile::vsr_enabled},
-    {{.json_key = "vsrQuality",    .cli_flag = "--vsr-quality",    .kind = ParamKind::Int,    .label_id = StrId::ParamVsrQuality,
-      .min_val = 1, .max_val = 4, .default_int = 4},
-     &TranscodeProfile::vsr_quality},
-    {{.json_key = "peakNits",      .cli_flag = "--peak-nits",      .kind = ParamKind::Int,    .label_id = StrId::ParamPeakNits,
-      .min_val = 400, .max_val = 4000, .default_int = 1000},
-     &TranscodeProfile::peak_nits},
-    {{.json_key = "fpsMode",       .cli_flag = "--target-fps",     .kind = ParamKind::Enum,   .label_id = StrId::WuiParamFps,
-      .default_str = "60-nvofa", .enum_csv = "original,60-nvofa,120-nvofa,60-rife,120-rife", .normalized_lower = true},
-     &TranscodeProfile::fps_mode},
-    {{.json_key = "pipelineOrder", .cli_flag = "--pipeline-order", .kind = ParamKind::Enum,   .label_id = StrId::ParamPipelineOrder,
-      .default_str = "vsr-first", .enum_csv = "vsr-first,fg-first", .normalized_lower = true},
-     &TranscodeProfile::pipeline_order},
-    {{.json_key = "rifeEngine",    .cli_flag = "--rife-engine",    .kind = ParamKind::String, .label_id = StrId::WuiParamRifeEngine},
-     &TranscodeProfile::rife_engine},
-    {{.json_key = "copyAudio",     .cli_flag = "--no-audio",       .kind = ParamKind::Bool,   .label_id = StrId::ParamAudioCopy,
-      .default_bool = true},
-     &TranscodeProfile::copy_audio},
-    {{.json_key = "hdr10plus",     .cli_flag = "--hdr10plus",      .kind = ParamKind::Bool,   .label_id = StrId::WuiParamHdr10plus,
-      .default_bool = false},
-     &TranscodeProfile::hdr10plus},
-    {{.json_key = "lut",           .cli_flag = "--lut",            .kind = ParamKind::String, .label_id = StrId::WuiParamLut},
-     &TranscodeProfile::lut},
-    {{.json_key = "gpu",           .cli_flag = "--gpu",            .kind = ParamKind::Int,    .label_id = StrId::WuiParamGpu,
-      .min_val = 0, .max_val = 15, .default_int = 0},
-     &TranscodeProfile::gpu},
-    {{.json_key = "frames",        .cli_flag = "--frames",         .kind = ParamKind::Int,    .label_id = StrId::WuiParamFrames,
-      .min_val = 0, .max_val = 100000000, .default_int = 0},
-     &TranscodeProfile::frames},
+    {makeParamMeta("input",         "--input",          ParamKind::String, StrId::ParamInput), &TranscodeProfile::input},
+    {makeParamMeta("output",        "--output",         ParamKind::String, StrId::ParamOutput), &TranscodeProfile::output},
+    {makeParamMeta("codec",         "--codec",          ParamKind::Enum,   StrId::ParamCodec, 0, 0, 0, false, "av1", "av1,hevc", true), &TranscodeProfile::codec},
+    {makeParamMeta("preset",        "--preset",         ParamKind::Int,    StrId::ParamPreset, 1, 7, 5), &TranscodeProfile::preset},
+    {makeParamMeta("rateControl",   "--rate-control",   ParamKind::Enum,   StrId::ParamRateControl, 0, 0, 0, false, "cq", "cq,vbr,cbr,qp", true), &TranscodeProfile::rate_control},
+    {makeParamMeta("bitrateKbps",   "--bitrate",        ParamKind::Int,    StrId::ParamBitrate, 0, 200000, 0), &TranscodeProfile::bitrate_kbps},
+    {makeParamMeta("qp",            "--qp",             ParamKind::Int,    StrId::ParamCq, 0, 51, 22), &TranscodeProfile::qp},
+    {makeParamMeta("resolution",    "--resolution",     ParamKind::Enum,   StrId::ParamResolution, 0, 0, 0, false, "4k", "4k,2k,fhd,native", true), &TranscodeProfile::resolution},
+    {makeParamMeta("geometry",      "--pillarbox",      ParamKind::Enum,   StrId::ParamAspect, 0, 0, 0, false, "auto", "auto,pillarbox", true), &TranscodeProfile::geometry},
+    {makeParamMeta("vsrEnabled",    "--no-vsr",         ParamKind::Bool,   StrId::ParamVsr, 0, 0, 0, true), &TranscodeProfile::vsr_enabled},
+    {makeParamMeta("vsrQuality",    "--vsr-quality",    ParamKind::Int,    StrId::ParamVsrQuality, 1, 4, 4), &TranscodeProfile::vsr_quality},
+    {makeParamMeta("peakNits",      "--peak-nits",      ParamKind::Int,    StrId::ParamPeakNits, 400, 4000, 1000), &TranscodeProfile::peak_nits},
+    {makeParamMeta("fpsMode",       "--target-fps",     ParamKind::Enum,   StrId::WuiParamFps, 0, 0, 0, false, "60-nvofa", "original,60-nvofa,120-nvofa,60-rife,120-rife", true), &TranscodeProfile::fps_mode},
+    {makeParamMeta("pipelineOrder", "--pipeline-order", ParamKind::Enum,   StrId::ParamPipelineOrder, 0, 0, 0, false, "vsr-first", "vsr-first,fg-first", true), &TranscodeProfile::pipeline_order},
+    {makeParamMeta("rifeEngine",    "--rife-engine",    ParamKind::String, StrId::WuiParamRifeEngine), &TranscodeProfile::rife_engine},
+    {makeParamMeta("copyAudio",     "--no-audio",       ParamKind::Bool,   StrId::ParamAudioCopy, 0, 0, 0, true), &TranscodeProfile::copy_audio},
+    {makeParamMeta("hdr10plus",     "--hdr10plus",      ParamKind::Bool,   StrId::WuiParamHdr10plus, 0, 0, 0, false), &TranscodeProfile::hdr10plus},
+    {makeParamMeta("lut",           "--lut",            ParamKind::String, StrId::WuiParamLut), &TranscodeProfile::lut},
+    {makeParamMeta("gpu",           "--gpu",            ParamKind::Int,    StrId::WuiParamGpu, 0, 15, 0), &TranscodeProfile::gpu},
+    {makeParamMeta("frames",        "--frames",         ParamKind::Int,    StrId::WuiParamFrames, 0, 100000000, 0), &TranscodeProfile::frames},
 }};
 
 consteval bool validateParamDescriptors() {
     for (std::size_t i = 0; i < kParamDescriptors.size(); ++i) {
-        const auto& a = kParamDescriptors[i].first;
-        if (a.json_key.empty()) return false;
-        if (a.kind == ParamKind::Int && (a.default_int < a.min_val || a.default_int > a.max_val)) {
+        const auto& [a_key, a_flag, a_kind, a_lbl, a_min, a_max, a_di, a_db, a_ds, a_csv, a_low] =
+            kParamDescriptors[i].first;
+        (void)a_lbl; (void)a_db; (void)a_low;
+        if (a_key.empty()) return false;
+        if (a_kind == ParamKind::Int && (a_di < a_min || a_di > a_max)) {
             return false;
         }
-        if (a.kind == ParamKind::Enum) {
-            if (a.enum_csv.empty() || a.default_str.empty()) return false;
+        if (a_kind == ParamKind::Enum) {
+            if (a_csv.empty() || a_ds.empty()) return false;
             bool found_default = false;
-            std::string_view csv = a.enum_csv;
+            std::string_view csv = a_csv;
             while (!csv.empty()) {
                 const std::size_t comma = csv.find(',');
                 const std::string_view tok =
                     (comma == std::string_view::npos) ? csv : csv.substr(0, comma);
-                if (tok == a.default_str) {
+                if (tok == a_ds) {
                     found_default = true;
                     break;
                 }
@@ -178,9 +143,11 @@ consteval bool validateParamDescriptors() {
             if (!found_default) return false;
         }
         for (std::size_t j = i + 1; j < kParamDescriptors.size(); ++j) {
-            const auto& b = kParamDescriptors[j].first;
-            if (a.json_key == b.json_key) return false;
-            if (!a.cli_flag.empty() && a.cli_flag == b.cli_flag) return false;
+            const auto& [b_key, b_flag, b_kind, b_lbl, b_min, b_max, b_di, b_db, b_ds, b_csv, b_low] =
+                kParamDescriptors[j].first;
+            (void)b_kind; (void)b_lbl; (void)b_min; (void)b_max; (void)b_di; (void)b_db; (void)b_ds; (void)b_csv; (void)b_low;
+            if (a_key == b_key) return false;
+            if (!a_flag.empty() && a_flag == b_flag) return false;
         }
     }
     return true;
@@ -219,26 +186,19 @@ inline constexpr std::array<std::pair<std::string_view, std::size_t>, 15> kCliFl
 consteval bool validateCliFlags() {
     for (const auto& [flag, idx] : kCliFlags) {
         if (idx >= kParamDescriptors.size()) return false;
-        if (kParamDescriptors[idx].first.cli_flag != flag) return false;
+        const auto& [k, f, kind, lbl, mn, mx, di, db, ds, csv, low] = kParamDescriptors[idx].first;
+        (void)k; (void)kind; (void)lbl; (void)mn; (void)mx; (void)di; (void)db; (void)ds; (void)csv; (void)low;
+        if (f != flag) return false;
     }
     return true;
 }
 static_assert(validateCliFlags(), "kCliFlags index/flag mismatch against kParamDescriptors");
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: CLI 解析层（src/cli/main.cpp）通过 binding->member 具名访问成员指针变体，直接别名 std::variant 会破坏既有 CLI 契约。
-// Invariant: 仅持有与 kParamDescriptors 同源的成员指针变体，编译期只读，零运行期状态。
 template <class Profile>
-struct FieldBinding {
-    std::variant<std::string Profile::*, int Profile::*, bool Profile::*> member;
-};
-
-template <class Profile>
-inline constexpr std::array<FieldBinding<Profile>, 20> kFieldBindings = []() consteval {
-    std::array<FieldBinding<Profile>, 20> out{};
+inline constexpr std::array<ProfileMemberPtr, 20> kFieldBindings = []() consteval {
+    std::array<ProfileMemberPtr, 20> out{};
     for (std::size_t i = 0; i < kParamDescriptors.size(); ++i) {
-        out[i].member = kParamDescriptors[i].second;
+        out[i] = kParamDescriptors[i].second;
     }
     return out;
 }();
@@ -251,7 +211,7 @@ constexpr void forEachProfileField(Profile& profile, Visitor&& visitor) {
 }
 
 template <class Profile>
-[[nodiscard]] constexpr const FieldBinding<std::remove_cv_t<Profile>>* findCliFieldBinding(
+[[nodiscard]] constexpr const ProfileMemberPtr* findCliFieldBinding(
     std::string_view flag) noexcept {
     constexpr auto& bindings = kFieldBindings<std::remove_cv_t<Profile>>;
     for (const auto& [cli_flag, schema_index] : kCliFlags) {
@@ -297,5 +257,9 @@ template <class Profile>
 // Exports the complete SSOT contract JSON (`schema` + `defaults` + `i18n`) for
 // `CineRTX.exe --schema-json`.
 [[nodiscard]] std::string exportSchemaJson();
+
+// Generates the CLI option help block directly from kParamDescriptors + i18n labels
+// so CLI help text never drifts from the SSOT schema contract (Wave 12.2-4).
+[[nodiscard]] std::string formatCliHelp();
 
 }  // namespace rtx

@@ -37,84 +37,89 @@ std::vector<uint8_t> removeEmulationPrevention(const std::vector<uint8_t>& escap
     return rbsp;
 }
 Hdr10Metadata sampleMetadata() {
-    TrueHdrParameters parameters;
-    const Result<Hdr10Metadata> metadata = SeiSynthesizer::makeMetadata(parameters);
+    const Result<Hdr10Metadata> metadata = SeiSynthesizer::makeMetadata(defaultTrueHdrParameters());
     return metadata.has_value() ? metadata.value() : Hdr10Metadata{};
 }
 }  // namespace
 
 RTX_TEST(hdr_truehdr_parameter_validation) {
-    TrueHdrParameters parameters;
-    RTX_CHECK(parameters.validate().has_value());
+    TrueHdrParameters parameters = defaultTrueHdrParameters();
+    auto& [contrast, saturation, middle_gray, max_luminance, mastering, max_fall] = parameters;
+    (void)mastering;
+    RTX_CHECK(SeiSynthesizer::validateTrueHdr(parameters).has_value());
 
-    parameters.contrast = 49;
-    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
-    parameters.contrast = 125;
-    parameters.saturation = 201;
-    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
-    parameters.saturation = 75;
-    parameters.middle_gray = 9;
-    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
-    parameters.middle_gray = 44;
-    parameters.max_luminance = 99;
-    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
-    parameters.max_luminance = 4001;
-    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
-    parameters.max_luminance = 1000;
-    parameters.max_fall = 65536;
-    RTX_CHECK_EQ(parameters.validate().error().code, ErrorCode::InvalidArgument);
-    parameters.max_fall = 300;
-    RTX_CHECK(parameters.validate().has_value());
+    contrast = 49;
+    RTX_CHECK_EQ(SeiSynthesizer::validateTrueHdr(parameters).error().code, ErrorCode::InvalidArgument);
+    contrast = 125;
+    saturation = 201;
+    RTX_CHECK_EQ(SeiSynthesizer::validateTrueHdr(parameters).error().code, ErrorCode::InvalidArgument);
+    saturation = 75;
+    middle_gray = 9;
+    RTX_CHECK_EQ(SeiSynthesizer::validateTrueHdr(parameters).error().code, ErrorCode::InvalidArgument);
+    middle_gray = 44;
+    max_luminance = 99;
+    RTX_CHECK_EQ(SeiSynthesizer::validateTrueHdr(parameters).error().code, ErrorCode::InvalidArgument);
+    max_luminance = 4001;
+    RTX_CHECK_EQ(SeiSynthesizer::validateTrueHdr(parameters).error().code, ErrorCode::InvalidArgument);
+    max_luminance = 1000;
+    max_fall = 65536;
+    RTX_CHECK_EQ(SeiSynthesizer::validateTrueHdr(parameters).error().code, ErrorCode::InvalidArgument);
+    max_fall = 300;
+    RTX_CHECK(SeiSynthesizer::validateTrueHdr(parameters).has_value());
 }
 RTX_TEST(hdr_make_metadata_and_mastering_presets) {
-    TrueHdrParameters parameters;
-    parameters.mastering = MasteringPreset::DciP3D65;
+    TrueHdrParameters parameters = defaultTrueHdrParameters();
     const Result<Hdr10Metadata> metadata = SeiSynthesizer::makeMetadata(parameters);
     RTX_REQUIRE(metadata.has_value());
     const Hdr10Metadata& hdr = metadata.value();
     RTX_CHECK(hdr.enabled);
-    RTX_CHECK_EQ(hdr.mastering.red_x, static_cast<uint16_t>(34000));
-    RTX_CHECK_EQ(hdr.mastering.green_y, static_cast<uint16_t>(34500));
-    RTX_CHECK_EQ(hdr.mastering.white_x, static_cast<uint16_t>(15635));
-    RTX_CHECK_EQ(hdr.mastering.max_luminance, static_cast<uint32_t>(10000000));
-    RTX_CHECK_EQ(hdr.mastering.min_luminance, static_cast<uint32_t>(1));
-    RTX_CHECK_EQ(hdr.cll.max_cll, static_cast<uint16_t>(1000));
-    RTX_CHECK_EQ(hdr.cll.max_fall, static_cast<uint16_t>(300));
+    const auto [hrx, hry, hgx, hgy, hbx, hby, hwx, hwy, hmax, hmin] = hdr.mastering;
+    (void)hry; (void)hgx; (void)hbx; (void)hby; (void)hwy;
+    RTX_CHECK_EQ(hrx, static_cast<uint16_t>(34000));
+    RTX_CHECK_EQ(hgy, static_cast<uint16_t>(34500));
+    RTX_CHECK_EQ(hwx, static_cast<uint16_t>(15635));
+    RTX_CHECK_EQ(hmax, static_cast<uint32_t>(10000000));
+    RTX_CHECK_EQ(hmin, static_cast<uint32_t>(1));
+    RTX_CHECK_EQ(hdr.cll.first, static_cast<uint16_t>(1000));
+    RTX_CHECK_EQ(hdr.cll.second, static_cast<uint16_t>(300));
     RTX_CHECK_EQ(hdr.target_nits, static_cast<uint32_t>(1000));
-    RTX_CHECK(hdr.color.primaries == ColorPrimaries::BT2020);
-    RTX_CHECK(hdr.color.transfer == TransferFunction::SMPTE2084);
-    RTX_CHECK(hdr.color.matrix == MatrixCoefficients::BT2020NC);
+    const auto [hc_p, hc_t, hc_m, hc_r] = hdr.color;
+    (void)hc_r;
+    RTX_CHECK(hc_p == ColorPrimaries::BT2020);
+    RTX_CHECK(hc_t == TransferFunction::SMPTE2084);
+    RTX_CHECK(hc_m == MatrixCoefficients::BT2020NC);
 
-    const MasteringDisplay bt2020 =
+    const auto [brx, bry, bgx, bgy, bbx, bby, bwx, bwy, bmax, bmin] =
         SeiSynthesizer::makeMasteringDisplay(MasteringPreset::Bt2020, 4000, 5);
-    RTX_CHECK_EQ(bt2020.red_x, static_cast<uint16_t>(35400));
-    RTX_CHECK_EQ(bt2020.green_y, static_cast<uint16_t>(39850));
-    RTX_CHECK_EQ(bt2020.blue_y, static_cast<uint16_t>(2300));
-    RTX_CHECK_EQ(bt2020.max_luminance, static_cast<uint32_t>(40000000));
-    RTX_CHECK_EQ(bt2020.min_luminance, static_cast<uint32_t>(5));
+    (void)bry; (void)bgx; (void)bbx; (void)bwx; (void)bwy;
+    RTX_CHECK_EQ(brx, static_cast<uint16_t>(35400));
+    RTX_CHECK_EQ(bgy, static_cast<uint16_t>(39850));
+    RTX_CHECK_EQ(bby, static_cast<uint16_t>(2300));
+    RTX_CHECK_EQ(bmax, static_cast<uint32_t>(40000000));
+    RTX_CHECK_EQ(bmin, static_cast<uint32_t>(5));
 
-    TrueHdrParameters invalid;
-    invalid.max_luminance = 10;
+    TrueHdrParameters invalid{125, 75, 44, 10, MasteringPreset::DciP3D65, 300};
     RTX_CHECK(!SeiSynthesizer::makeMetadata(invalid).has_value());
 }
 RTX_TEST(hdr_nvenc_vui_settings) {
     const Hdr10Metadata hdr = sampleMetadata();
-    const NvencHevcHdrSettings settings = SeiSynthesizer::makeNvencSettings(hdr);
-    RTX_CHECK_EQ(settings.pixel_bit_depth_minus8, static_cast<uint32_t>(2));
-    RTX_CHECK_EQ(settings.output_mastering_display, static_cast<uint32_t>(1));
-    RTX_CHECK_EQ(settings.output_max_cll, static_cast<uint32_t>(1));
-    RTX_CHECK_EQ(settings.vui.colour_description_present_flag, static_cast<uint8_t>(1));
-    RTX_CHECK_EQ(settings.vui.colour_primaries, static_cast<uint8_t>(9));
-    RTX_CHECK_EQ(settings.vui.transfer_characteristics, static_cast<uint8_t>(16));
-    RTX_CHECK_EQ(settings.vui.matrix_coefficients, static_cast<uint8_t>(9));
-    RTX_CHECK_EQ(settings.vui.chroma_sample_loc_type_top_field, static_cast<uint8_t>(2));
-    RTX_CHECK_EQ(settings.vui.chroma_sample_loc_type_bottom_field, static_cast<uint8_t>(2));
-    RTX_CHECK_EQ(settings.vui.video_full_range_flag, static_cast<uint8_t>(0));
+    const auto [bit_depth_m8, out_md, out_cll, vui] = SeiSynthesizer::makeNvencSettings(hdr);
+    RTX_CHECK_EQ(bit_depth_m8, static_cast<uint32_t>(2));
+    RTX_CHECK_EQ(out_md, static_cast<uint32_t>(1));
+    RTX_CHECK_EQ(out_cll, static_cast<uint32_t>(1));
+    RTX_CHECK_EQ(vui[1], static_cast<uint8_t>(1));
+    RTX_CHECK_EQ(vui[2], static_cast<uint8_t>(9));
+    RTX_CHECK_EQ(vui[3], static_cast<uint8_t>(16));
+    RTX_CHECK_EQ(vui[4], static_cast<uint8_t>(9));
+    RTX_CHECK_EQ(vui[6], static_cast<uint8_t>(2));
+    RTX_CHECK_EQ(vui[7], static_cast<uint8_t>(2));
+    RTX_CHECK_EQ(vui[8], static_cast<uint8_t>(0));
 
     Hdr10Metadata disabled = hdr;
     disabled.enabled = false;
-    RTX_CHECK_EQ(SeiSynthesizer::makeNvencSettings(disabled).output_mastering_display,
-                 static_cast<uint32_t>(0));
+    const auto [d_bd, d_md, d_cll, d_vui] = SeiSynthesizer::makeNvencSettings(disabled);
+    (void)d_bd; (void)d_cll; (void)d_vui;
+    RTX_CHECK_EQ(d_md, static_cast<uint32_t>(0));
 }
 RTX_TEST(hdr_mastering_and_cll_payload_layout) {
     Hdr10Metadata hdr{};
@@ -221,13 +226,8 @@ private:
 }  // namespace
 
 RTX_TEST(hdr10plus_itut_t35_obu_synthesis) {
-    Hdr10PlusFrameStats stats{};
-    stats.maxscl_r_nits = 950;
-    stats.maxscl_g_nits = 1005;
-    stats.maxscl_b_nits = 780;
-    stats.average_maxrgb_nits = 210;
-    stats.knee_point_x = 500;
-    stats.knee_point_y = 620;
+    const Hdr10PlusFrameStats stats{950u, 1005u, 780u, 210u, uint16_t{500}, uint16_t{620}};
+    const auto& [maxscl_r, maxscl_g, maxscl_b, avg_maxrgb, knee_x, knee_y] = stats;
 
     const std::vector<uint8_t> t35 = SeiSynthesizer::hdr10PlusItuT35Payload(stats);
     RTX_REQUIRE(t35.size() >= 6);
@@ -257,15 +257,15 @@ RTX_TEST(hdr10plus_itut_t35_obu_synthesis) {
     RTX_CHECK_EQ(reader.get(8), 0);           // reflectance
     RTX_CHECK_EQ(reader.get(1), 0);           // tone_mapping_mode_flag
     RTX_CHECK_EQ(reader.get(1), 0);           // sharpening_flag
-    RTX_CHECK_EQ(reader.get(17), stats.maxscl_r_nits * 10u);
-    RTX_CHECK_EQ(reader.get(17), stats.maxscl_g_nits * 10u);
-    RTX_CHECK_EQ(reader.get(17), stats.maxscl_b_nits * 10u);
-    RTX_CHECK_EQ(reader.get(17), stats.average_maxrgb_nits * 10u);
+    RTX_CHECK_EQ(reader.get(17), maxscl_r * 10u);
+    RTX_CHECK_EQ(reader.get(17), maxscl_g * 10u);
+    RTX_CHECK_EQ(reader.get(17), maxscl_b * 10u);
+    RTX_CHECK_EQ(reader.get(17), avg_maxrgb * 10u);
     RTX_CHECK_EQ(reader.get(1), 0);           // distribution percentiles
     RTX_CHECK_EQ(reader.get(1), 0);           // fraction_bright_pixels
     RTX_CHECK_EQ(reader.get(1), 1);           // tone_mapping_flag
-    RTX_CHECK_EQ(reader.get(16), stats.knee_point_x);
-    RTX_CHECK_EQ(reader.get(16), stats.knee_point_y);
+    RTX_CHECK_EQ(reader.get(16), knee_x);
+    RTX_CHECK_EQ(reader.get(16), knee_y);
     RTX_CHECK_EQ(reader.get(3), 0);           // bezier anchors
     RTX_CHECK_EQ(reader.get(10), 0);          // color_saturation_weight
 

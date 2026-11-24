@@ -15,33 +15,42 @@ bool NvidiaShim::open(std::string* error) {
         return true;
     }
     const EmbeddedShimApi* api = embeddedShimApi();
-    if (api == nullptr || api->abi_version == nullptr) {
+    if (api == nullptr) {
         error_ = "embedded rtx_shim API unavailable";
         if (error != nullptr) *error = error_;
         return false;
     }
-    if (api->abi_version() != RTX_SHIM_ABI_VERSION) {
+    const auto& [abi_ver, probe_fn, dec_create, dec_destroy, dec_submit, dec_recv, dec_flush,
+                 dec_reset, dec_rel, dec_dl, dec_stats, dec_err, enc_create, enc_destroy,
+                 enc_encode, enc_encode_host, enc_flush, enc_hdr, enc_stats, enc_err] = *api;
+    (void)dec_dl; (void)enc_encode_host;
+    if (abi_ver == nullptr) {
+        error_ = "embedded rtx_shim API unavailable";
+        if (error != nullptr) *error = error_;
+        return false;
+    }
+    if (abi_ver() != RTX_SHIM_ABI_VERSION) {
         error_ = "embedded rtx_shim ABI mismatch";
         if (error != nullptr) *error = error_;
         return false;
     }
-    probe_ = api->probe;
-    decoder_create_ = api->decoder_create;
-    decoder_destroy_ = api->decoder_destroy;
-    decoder_submit_ = api->decoder_submit;
-    decoder_receive_ = api->decoder_receive;
-    decoder_flush_ = api->decoder_flush;
-    decoder_reset_ = api->decoder_reset;
-    decoder_release_ = api->decoder_release_frame;
-    decoder_stats_ = api->decoder_get_stats;
-    decoder_last_error_ = api->decoder_last_error;
-    encoder_create_ = api->encoder_create;
-    encoder_destroy_ = api->encoder_destroy;
-    encoder_encode_ = api->encoder_encode;
-    encoder_flush_ = api->encoder_flush;
-    encoder_sequence_header_ = api->encoder_get_sequence_header;
-    encoder_stats_ = api->encoder_get_stats;
-    encoder_last_error_ = api->encoder_last_error;
+    probe_ = probe_fn;
+    decoder_create_ = dec_create;
+    decoder_destroy_ = dec_destroy;
+    decoder_submit_ = dec_submit;
+    decoder_receive_ = dec_recv;
+    decoder_flush_ = dec_flush;
+    decoder_reset_ = dec_reset;
+    decoder_release_ = dec_rel;
+    decoder_stats_ = dec_stats;
+    decoder_last_error_ = dec_err;
+    encoder_create_ = enc_create;
+    encoder_destroy_ = enc_destroy;
+    encoder_encode_ = enc_encode;
+    encoder_flush_ = enc_flush;
+    encoder_sequence_header_ = enc_hdr;
+    encoder_stats_ = enc_stats;
+    encoder_last_error_ = enc_err;
     embedded_ = true;
     path_ = "embedded:rtx_shim";
     error_.clear();

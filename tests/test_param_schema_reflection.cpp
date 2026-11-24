@@ -68,27 +68,28 @@ RTX_TEST(param_schema_generated_table_contract) {
 
     std::vector<std::string_view> keys;
     std::vector<std::string_view> flags;
-    for (const ParamMeta& meta : kParamSchema) {
-        RTX_CHECK(!meta.json_key.empty());
-        RTX_CHECK(meta.label_id != StrId::AppTitle);
-        RTX_CHECK(std::find(keys.begin(), keys.end(), meta.json_key) == keys.end());
-        keys.push_back(meta.json_key);
-        if (!meta.cli_flag.empty()) {
-            RTX_CHECK(std::find(flags.begin(), flags.end(), meta.cli_flag) == flags.end());
-            flags.push_back(meta.cli_flag);
+    for (const auto& [json_key, cli_flag, kind, label_id, min_val, max_val, default_int, default_bool, default_str, enum_csv, nl] : kParamSchema) {
+        (void)default_bool; (void)nl;
+        RTX_CHECK(!json_key.empty());
+        RTX_CHECK(label_id != StrId::AppTitle);
+        RTX_CHECK(std::find(keys.begin(), keys.end(), json_key) == keys.end());
+        keys.push_back(json_key);
+        if (!cli_flag.empty()) {
+            RTX_CHECK(std::find(flags.begin(), flags.end(), cli_flag) == flags.end());
+            flags.push_back(cli_flag);
         }
-        if (meta.kind == ParamKind::Int) {
-            RTX_CHECK(meta.min_val <= meta.default_int);
-            RTX_CHECK(meta.default_int <= meta.max_val);
+        if (kind == ParamKind::Int) {
+            RTX_CHECK(min_val <= default_int);
+            RTX_CHECK(default_int <= max_val);
         }
-        if (meta.kind == ParamKind::Enum) {
-            RTX_CHECK(!meta.enum_csv.empty());
-            RTX_CHECK(meta.enum_csv.find(meta.default_str) != std::string_view::npos);
+        if (kind == ParamKind::Enum) {
+            RTX_CHECK(!enum_csv.empty());
+            RTX_CHECK(enum_csv.find(default_str) != std::string_view::npos);
         }
     }
     std::vector<std::string_view> visited;
     TranscodeProfile probe{};
-    forEachProfileField(probe, [&](const ParamMeta& meta, auto&) { visited.push_back(meta.json_key); });
+    forEachProfileField(probe, [&](const ParamMeta& meta, auto&) { const auto& [jk, cf, kd, lb, mn, mx, di, db, ds, ec, nl] = meta; (void)cf;(void)kd;(void)lb;(void)mn;(void)mx;(void)di;(void)db;(void)ds;(void)ec;(void)nl; visited.push_back(jk); });
 // forEachProfileField must visit the members in kParamSchema order.
     RTX_REQUIRE_EQ(visited.size(), keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -97,7 +98,7 @@ RTX_TEST(param_schema_generated_table_contract) {
 }
 RTX_TEST(param_schema_cli_flag_map_binds_generated_members) {
     for (const auto& [flag, schema_index] : kCliFlags) {
-        const FieldBinding<TranscodeProfile>* binding = findCliFieldBinding<TranscodeProfile>(flag);
+        const ProfileMemberPtr* binding = findCliFieldBinding<TranscodeProfile>(flag);
         RTX_REQUIRE(binding != nullptr);
         RTX_REQUIRE(schema_index < kParamSchema.size());
         TranscodeProfile probe{};
@@ -106,7 +107,7 @@ RTX_TEST(param_schema_cli_flag_map_binds_generated_members) {
             using T = std::decay_t<decltype(field)>;
 // The bound member must be the one the schema row describes.
             if constexpr (std::is_same_v<T, std::string>) {
-                field = std::string(meta.json_key);
+                const auto& [jk, cf, kd, lb, mn, mx, di, db, ds, ec, nl] = meta; (void)cf;(void)kd;(void)lb;(void)mn;(void)mx;(void)di;(void)db;(void)ds;(void)ec;(void)nl; field = std::string(jk);
             } else if constexpr (std::is_same_v<T, int>) {
                 field = 1;
             } else {
@@ -122,11 +123,12 @@ RTX_TEST(param_schema_cli_flag_map_binds_generated_members) {
             } else {
                 touched = "bool";
             }
-        }, binding->member);
-        const ParamMeta& meta = kParamSchema[schema_index];
-        if (meta.kind == ParamKind::String || meta.kind == ParamKind::Enum) {
-            RTX_CHECK_EQ(touched, std::string(meta.json_key));
-        } else if (meta.kind == ParamKind::Int) {
+        }, *binding);
+        const auto& [json_key, cf, kind, lb, mn, mx, di, db, ds, ec, nl] = kParamSchema[schema_index];
+        (void)cf;(void)lb;(void)mn;(void)mx;(void)di;(void)db;(void)ds;(void)ec;(void)nl;
+        if (kind == ParamKind::String || kind == ParamKind::Enum) {
+            RTX_CHECK_EQ(touched, std::string(json_key));
+        } else if (kind == ParamKind::Int) {
             RTX_CHECK_EQ(touched, std::string("int"));
         } else {
             RTX_CHECK_EQ(touched, std::string("bool"));
@@ -141,8 +143,9 @@ RTX_TEST(param_schema_cli_flag_map_binds_generated_members) {
 RTX_TEST(param_schema_json_round_trip_all_twenty_fields) {
     const TranscodeProfile original = distinctProfile();
     const std::string json = profileToJson(original);
-    for (const ParamMeta& meta : kParamSchema) {
-        const std::string needle = std::string("\"") + std::string(meta.json_key) + "\":";
+    for (const auto& [json_key, cf, kd, lb, mn, mx, di, db, ds, ec, nl] : kParamSchema) {
+        (void)cf;(void)kd;(void)lb;(void)mn;(void)mx;(void)di;(void)db;(void)ds;(void)ec;(void)nl;
+        const std::string needle = std::string("\"") + std::string(json_key) + "\":";
         RTX_CHECK(json.find(needle) != std::string::npos);
     }
     auto parsed = parseProfileFromJson(json);
@@ -304,8 +307,9 @@ RTX_TEST(param_schema_normalization_is_table_driven) {
     RTX_CHECK_EQ(p.rife_engine, std::string(""));
 
     size_t lowered = 0;
-    for (const ParamMeta& meta : kParamSchema) {
-        if (meta.normalized_lower) ++lowered;
+    for (const auto& [jk, cf, kd, lb, mn, mx, di, db, ds, ec, normalized_lower] : kParamSchema) {
+        (void)jk;(void)cf;(void)kd;(void)lb;(void)mn;(void)mx;(void)di;(void)db;(void)ds;(void)ec;
+        if (normalized_lower) ++lowered;
     }
     RTX_CHECK_EQ(lowered, 6u);
 }
@@ -421,14 +425,15 @@ RTX_TEST(param_schema_export_schema_json_covers_table) {
     RTX_CHECK(json.find("\"defaults\"") != std::string::npos);
     RTX_CHECK(json.find("\"i18n\"") != std::string::npos);
     size_t entries = 0;
-    for (const ParamMeta& meta : kParamSchema) {
-        const std::string key = std::string("\"key\": \"") + std::string(meta.json_key) + "\"";
-        const std::string cli = std::string("\"cli\": \"") + std::string(meta.cli_flag) + "\"";
-        const std::string label = std::string("\"labelId\": \"") + std::string(strIdName(meta.label_id)) + "\"";
+    for (const auto& [json_key, cli_flag, kind, label_id, mn, mx, di, db, ds, ec, nl] : kParamSchema) {
+        (void)mn;(void)mx;(void)di;(void)db;(void)ds;(void)ec;(void)nl;
+        const std::string key = std::string("\"key\": \"") + std::string(json_key) + "\"";
+        const std::string cli = std::string("\"cli\": \"") + std::string(cli_flag) + "\"";
+        const std::string label = std::string("\"labelId\": \"") + std::string(strIdName(label_id)) + "\"";
         RTX_CHECK(json.find(key) != std::string::npos);
         RTX_CHECK(json.find(cli) != std::string::npos);
         RTX_CHECK(json.find(label) != std::string::npos);
-        if (meta.kind == ParamKind::Enum) {
+        if (kind == ParamKind::Enum) {
             RTX_CHECK(json.find(std::string("\"options\": [")) != std::string::npos);
         }
         ++entries;

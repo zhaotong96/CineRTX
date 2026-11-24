@@ -27,6 +27,7 @@
 
 #if defined(_WIN32)
 #include "d3d12_raii.h"
+#include "rtx/sys_dynload.h"
 #include "preview_viewport.h"
 // Phase 11.2 (C-01): fxc-generated into ${CMAKE_BINARY_DIR}/generated.
 #include "preview_tone_map_cs.h"
@@ -57,10 +58,10 @@ RTX_TEST(raii_cuda_device_buffer_releases_exactly_once) {
     FreeLedger ledger;
     active_ledger = &ledger;
     for (int i = 0; i < 100; ++i) {
-        rtx::CudaDeviceBuffer buffer(0x1000ull + static_cast<unsigned long long>(i), 4096,
-                                     &countDeviceFree);
-        RTX_CHECK(buffer);
-        RTX_CHECK_EQ(buffer.bytes(), 4096u);
+        auto buffer = rtx::wrapCudaDeviceBuffer(
+            0x1000ull + static_cast<unsigned long long>(i), 4096, &countDeviceFree);
+        RTX_CHECK(buffer.first != nullptr);
+        RTX_CHECK_EQ(buffer.second, 4096u);
     }
     active_ledger = nullptr;
     RTX_REQUIRE_EQ(ledger.device_freed.size(), 100u);
@@ -73,15 +74,14 @@ RTX_TEST(raii_cuda_device_buffer_move_transfers_ownership) {
     FreeLedger ledger;
     active_ledger = &ledger;
     {
-        rtx::CudaDeviceBuffer a(0x2000, 64, &countDeviceFree);
-        rtx::CudaDeviceBuffer b(std::move(a));
-        RTX_CHECK(!a);
-        RTX_CHECK_EQ(a.ptr(), 0ull);
-        RTX_CHECK(b);
+        auto a = rtx::wrapCudaDeviceBuffer(0x2000, 64, &countDeviceFree);
+        auto b = std::move(a);
+        RTX_CHECK(a.first == nullptr);
+        RTX_CHECK(b.first != nullptr);
         rtx::CudaDeviceBuffer c;
         c = std::move(b);
-        RTX_CHECK(!b);
-        RTX_CHECK(c);
+        RTX_CHECK(b.first == nullptr);
+        RTX_CHECK(c.first != nullptr);
         RTX_CHECK_EQ(ledger.device_freed.size(), 0u);
     }
     active_ledger = nullptr;
@@ -269,7 +269,7 @@ HeadlessGpu makeHeadlessGpu() {
     HeadlessGpu gpu;
 // COM 出参两段式（与生产 raii_owners.h 约定同构）：先交出空槽，API 回填后收养。
     if (!createAdopt(gpu.device, [&](REFIID riid, void** pp) {
-            return D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, riid, pp);
+            return rtx::sys::d3d12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, riid, pp);
         })) {
         return gpu;
     }
@@ -401,26 +401,26 @@ RTX_TEST(gpu_retirement_releases_only_after_fence_advances) {
     int released_a = 0, released_b = 0, released_c = 0;
     std::uint64_t completed = 0;
     {
-        rtx::gui::GpuRetirementQueue queue([&completed] { return completed; });
-        queue.retire(1, makeFake(&log, "a", &released_a));
-        queue.retire(2, makeFake(&log, "b", &released_b));
-        queue.retire(3, makeFake(&log, "c", &released_c));
-        RTX_CHECK_EQ(queue.pending(), 3u);
+        auto queue = rtx::gui::makeGpuRetirementQueue([&completed] { return completed; });
+        rtx::gui::gpuRetire(queue, 1, makeFake(&log, "a", &released_a));
+        rtx::gui::gpuRetire(queue, 2, makeFake(&log, "b", &released_b));
+        rtx::gui::gpuRetire(queue, 3, makeFake(&log, "c", &released_c));
+        RTX_CHECK_EQ(rtx::gui::gpuPending(queue), 3u);
 
-        RTX_CHECK_EQ(queue.collect(), 0u);
+        RTX_CHECK_EQ(rtx::gui::gpuCollect(queue), 0u);
         RTX_CHECK_EQ(released_a + released_b + released_c, 0);
 
         completed = 2;
-        RTX_CHECK_EQ(queue.collect(), 2u);
+        RTX_CHECK_EQ(rtx::gui::gpuCollect(queue), 2u);
         RTX_CHECK_EQ(released_a, 1);
         RTX_CHECK_EQ(released_b, 1);
         RTX_CHECK_EQ(released_c, 0);
-        RTX_CHECK_EQ(queue.pending(), 1u);
+        RTX_CHECK_EQ(rtx::gui::gpuPending(queue), 1u);
 
         completed = 3;
-        RTX_CHECK_EQ(queue.collect(), 1u);
+        RTX_CHECK_EQ(rtx::gui::gpuCollect(queue), 1u);
         RTX_CHECK_EQ(released_c, 1);
-        RTX_CHECK(queue.empty());
+        RTX_CHECK(rtx::gui::gpuEmpty(queue));
     }
     RTX_CHECK_EQ(released_a + released_b + released_c, 3);
     RTX_REQUIRE_EQ(log.size(), 3u);
@@ -433,11 +433,11 @@ RTX_TEST(gpu_retirement_unmap_hook_precedes_release) {
     int released = 0;
     {
         rtx::gui::GpuRetirementQueue queue;
-        queue.retire(7, makeFake(&log, "upload", &released),
+        rtx::gui::gpuRetire(queue, 7, makeFake(&log, "upload", &released),
                      [&log] { log.push_back("unmap:upload"); });
-        RTX_CHECK_EQ(queue.collect(6), 0u);
+        RTX_CHECK_EQ(rtx::gui::gpuCollect(queue, 6), 0u);
         RTX_CHECK(log.empty());
-        RTX_CHECK_EQ(queue.collect(7), 1u);
+        RTX_CHECK_EQ(rtx::gui::gpuCollect(queue, 7), 1u);
     }
     RTX_CHECK_EQ(released, 1);
     RTX_REQUIRE_EQ(log.size(), 2u);
@@ -450,9 +450,9 @@ RTX_TEST(gpu_retirement_timeout_defers_whole_pool_until_fence_completes) {
     std::uint64_t completed = 0;
     const std::size_t baseline = rtx::gui::deferredRetirementPending();
     {
-        rtx::gui::GpuRetirementQueue queue([&completed] { return completed; });
+        auto queue = rtx::gui::makeGpuRetirementQueue([&completed] { return completed; });
         for (int i = 0; i < 4; ++i) {
-            queue.retire(9, makeFake(&log, "rt", &released));
+            rtx::gui::gpuRetire(queue, 9, makeFake(&log, "rt", &released));
         }
         // 模拟 WAIT_TIMEOUT + 设备健康：整套资源移入延迟退役池，一个都不释放。
         rtx::gui::deferRetirement(std::move(queue));
@@ -472,12 +472,12 @@ RTX_TEST(gpu_retirement_device_lost_releases_immediately) {
     int released = 0;
     {
         rtx::gui::GpuRetirementQueue queue;
-        queue.retire(1000, makeFake(&log, "swapchain", &released),
+        rtx::gui::gpuRetire(queue, 1000, makeFake(&log, "swapchain", &released),
                      [&log] { log.push_back("unmap:swapchain"); });
-        queue.retire(1000, makeFake(&log, "backbuffer", &released));
+        rtx::gui::gpuRetire(queue, 1000, makeFake(&log, "backbuffer", &released));
         // DXGI_ERROR_DEVICE_REMOVED：飞行中命令作废，引用计数必须立刻归还。
-        queue.releaseAll();
-        RTX_CHECK(queue.empty());
+        rtx::gui::gpuReleaseAll(queue);
+        RTX_CHECK(rtx::gui::gpuEmpty(queue));
     }
     RTX_CHECK_EQ(released, 2);
     RTX_REQUIRE_EQ(log.size(), 3u);
@@ -487,12 +487,12 @@ RTX_TEST(gpu_retirement_device_lost_releases_immediately) {
 }
 RTX_TEST(gpu_retirement_null_and_moved_from_are_inert) {
     rtx::gui::GpuRetirementQueue queue;
-    queue.retire(1, static_cast<IUnknown*>(nullptr));
-    RTX_CHECK(queue.empty());
-    RTX_CHECK_EQ(queue.collect(), 0u);  // 无探针时不得臆造完成值
+    rtx::gui::gpuRetire(queue, 1, static_cast<IUnknown*>(nullptr));
+    RTX_CHECK(rtx::gui::gpuEmpty(queue));
+    RTX_CHECK_EQ(rtx::gui::gpuCollect(queue), 0u);  // 无探针时不得臆造完成值
     rtx::gui::GpuRetirementQueue moved(std::move(queue));
-    RTX_CHECK(moved.empty());
-    RTX_CHECK_EQ(moved.collect(100), 0u);
+    RTX_CHECK(rtx::gui::gpuEmpty(moved));
+    RTX_CHECK_EQ(rtx::gui::gpuCollect(moved, 100), 0u);
 }
 RTX_TEST(mapped_resource_failure_injection_releases_nothing_twice) {
     auto null_device = rtx::gui::createMappedUploadResource(nullptr, 4096);
@@ -502,7 +502,7 @@ RTX_TEST(mapped_resource_failure_injection_releases_nothing_twice) {
 
     rtx::gui::ComPtr<ID3D12Device> device;
     const bool created = createAdopt(device, [&](REFIID riid, void** pp) {
-        return D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, riid, pp);
+        return rtx::sys::d3d12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, riid, pp);
     });
     if (!created) {
         auto zero_bytes = rtx::gui::createMappedUploadResource(nullptr, 0);
@@ -691,7 +691,7 @@ RTX_TEST(preview_tone_map_compute_matches_reference_pixels) {
     rtx::gui::ComPtr<ID3DBlob> blob;
     ID3DBlob* raw_blob = nullptr;
     ID3DBlob* raw_errors = nullptr;
-    RTX_REQUIRE(SUCCEEDED(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1,
+    RTX_REQUIRE(SUCCEEDED(rtx::sys::d3d12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1,
                                                       &raw_blob, &raw_errors)));
     blob.reset(raw_blob);
     if (raw_errors != nullptr) {

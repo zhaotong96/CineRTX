@@ -46,19 +46,17 @@
 #include "rtx/flicks.h"
 #include "rtx/playback_session.h"
 #include "rtx/raii_owners.h"
+#include "rtx/sys_dynload.h"
 
 namespace rtx {
 namespace {
 
 // CoUninitialize 作用域哨兵：SUCCEEDED(CoInitializeEx(...)) 后 reset() 一次，
 // 作用域结束自动配平。FnDeleter 要求单参函数，此处以自由函数适配。
-inline void coUninitializeGuard(void*) noexcept {
-    CoUninitialize();
-}
-using ComApartment = std::unique_ptr<void, FnDeleter<&coUninitializeGuard>>;
+using ComApartment = std::unique_ptr<void, FnDeleter<&rtx::sys::coUninitializeGuard>>;
 // CoUninitialize 作用域哨兵别名（非拥有指针恒为非空哨兵值）。
 
-using MixFormatOwner = std::unique_ptr<WAVEFORMATEX, FnDeleter<&CoTaskMemFree>>;
+using MixFormatOwner = std::unique_ptr<WAVEFORMATEX, FnDeleter<&rtx::sys::coTaskMemFreeVoid>>;
 // GetMixFormat 结果所有权：CoTaskMemFree 收口。
 
 [[nodiscard]] std::string hresultText(HRESULT hr) {
@@ -71,11 +69,30 @@ using MixFormatOwner = std::unique_ptr<WAVEFORMATEX, FnDeleter<&CoTaskMemFree>>;
 }
 }  // namespace
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 // @rtx-type-justification
 // Category: NonTrivial-StateMachine
 // Why-Std-Fails: 管理 WASAPI 异步生命周期的复杂状态机：封装多 COM 接口、事件句柄、缓存行对齐无锁环形游标与专用渲染工作线程，std::tuple 无法表达拓扑依赖与析构逆序。
-// Invariant: 成员声明序即析构逆序（worker_ 居末先 join）；读写游标严格单写多读；无锁实时音频线程与控制线程互斥安全。
+// Invariant: 成员声明序即析构逆序（worker_ 居末先 join）；热原子游标居首并显式 64 字节补齐消除伪共享；无锁实时音频线程与控制线程互斥安全。
 struct WasapiAudioOutput::Impl {
+    alignas(64) std::atomic<uint64_t> write_cursor_{0};
+    uint8_t pad_write_cursor_[64 - sizeof(std::atomic<uint64_t>)]{};
+    alignas(64) std::atomic<uint64_t> read_cursor_{0};
+    uint8_t pad_read_cursor_[64 - sizeof(std::atomic<uint64_t>)]{};
+    alignas(64) std::atomic<int64_t> anchor_{0};
+    uint8_t pad_anchor_[64 - sizeof(std::atomic<int64_t>)]{};
+    alignas(64) std::atomic<int64_t> published_flicks_{0};
+    uint8_t pad_published_flicks_[64 - sizeof(std::atomic<int64_t>)]{};
+    alignas(64) std::atomic<int64_t> published_qpc_{0};
+    uint8_t pad_published_qpc_[64 - sizeof(std::atomic<int64_t>)]{};
+    alignas(64) std::atomic<uint64_t> written_frames_{0};
+    uint8_t pad_written_frames_[64 - sizeof(std::atomic<uint64_t>)]{};
+    alignas(64) std::atomic<uint64_t> reconnects_{0};
+    uint8_t pad_reconnects_[64 - sizeof(std::atomic<uint64_t>)]{};
+
     uint32_t sample_rate_ = 0;
     uint32_t channels_ = 0;
     uint32_t buffer_frames_ = 0;
@@ -84,13 +101,6 @@ struct WasapiAudioOutput::Impl {
     int64_t qpc_freq_ = 1;
 
     std::vector<float> ring_;
-    alignas(64) std::atomic<uint64_t> write_cursor_{0};
-    alignas(64) std::atomic<uint64_t> read_cursor_{0};
-    alignas(64) std::atomic<int64_t> anchor_{0};
-    alignas(64) std::atomic<int64_t> published_flicks_{0};
-    alignas(64) std::atomic<int64_t> published_qpc_{0};
-    alignas(64) std::atomic<uint64_t> written_frames_{0};
-    alignas(64) std::atomic<uint64_t> reconnects_{0};
     std::atomic<bool> started_{false};
     std::atomic<bool> invalidated_{false};
 
@@ -108,11 +118,11 @@ struct WasapiAudioOutput::Impl {
 
     Result<void> openDevice() {
         ComApartment com;
-        if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+        if (SUCCEEDED(rtx::sys::coInitializeEx(nullptr, COINIT_MULTITHREADED))) {
             com.reset(reinterpret_cast<void*>(1));
         }
         IMMDeviceEnumerator* raw_enumerator = nullptr;
-        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        HRESULT hr = rtx::sys::coCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       __uuidof(IMMDeviceEnumerator),
                                       reinterpret_cast<void**>(&raw_enumerator));
         if (FAILED(hr)) {
@@ -208,7 +218,7 @@ struct WasapiAudioOutput::Impl {
     }
     void callbackLoop(std::stop_token st) noexcept {
         ComApartment com;
-        if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+        if (SUCCEEDED(rtx::sys::coInitializeEx(nullptr, COINIT_MULTITHREADED))) {
             com.reset(reinterpret_cast<void*>(1));
         }
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -325,6 +335,9 @@ struct WasapiAudioOutput::Impl {
         return {};
     }
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 Result<std::unique_ptr<WasapiAudioOutput>> WasapiAudioOutput::create() {
     std::unique_ptr<WasapiAudioOutput> out{new WasapiAudioOutput()};

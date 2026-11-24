@@ -20,13 +20,12 @@
 #include "dyn_library.h"
 #include "nv_func_tables.h"
 
-namespace {
-
 // @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-struct ProbeState {
+// Category: C-ABI
+// Why-Std-Fails: rtx_shim_abi.h 导出的不透明后端句柄实体，跨 C ABI 边界保持探针状态与硬件诊断缓存。
+// Invariant: 仅通过 rtx_shim_create/rtx_shim_destroy 生命周期函数构造与销毁。
+struct RtxBackend {
+
     rtx_shim::NvidiaRuntime runtime;
     rtx_shim::cuda::DriverTable driver;
     RtxDeviceInfo device{};
@@ -36,7 +35,12 @@ struct ProbeState {
     bool has_device = false;
     bool interop_ready = false;
     std::string summary;
+    RtxBackendConfig config{};
+    std::string error;
+    bool probed = false;
 };
+
+namespace {
 
 template <size_t N>
 void copyText(char (&destination)[N], const std::string& source) {
@@ -58,52 +62,56 @@ std::string cudaVersionString(int version) {
     }
     return std::to_string(version / 1000) + "." + std::to_string((version / 10) % 100);
 }
-const rtx_shim::ComponentStatus* findComponent(const ProbeState& state, const char* name) {
-    for (const auto& component : state.runtime.components()) {
-        if (component.name == name) {
-            return &component;
-        }
+const std::tuple<std::string, std::string, bool, uint32_t, std::string>* findComponent(const RtxBackend& state, const char* name) {
+    for (const auto& component : rtx_shim::rtComponents(state.runtime)) {
+        const auto& [comp_name, comp_path, present, version, note] = component;
+        (void)comp_path; (void)present; (void)version; (void)note;
+        if (comp_name == name) return &component;
     }
     return nullptr;
 }
-bool componentPresent(const ProbeState& state, const char* name) {
+bool componentPresent(const RtxBackend& state, const char* name) {
     const auto* component = findComponent(state, name);
-    return component != nullptr && component->present;
+    if (component == nullptr) return false;
+    const auto& [comp_name, comp_path, present, version, note] = *component;
+    (void)comp_name; (void)comp_path; (void)version; (void)note;
+    return present;
 }
-void fillComponent(RtxComponentInfo& out, const rtx_shim::ComponentStatus& component) {
-    copyText(out.name, component.name);
-    copyText(out.path, component.path);
-    out.present = component.present ? 1 : 0;
-    out.version = static_cast<int32_t>(component.version);
-    copyText(out.note, component.note);
+void fillComponent(RtxComponentInfo& out, const auto& component) {
+    const auto& [comp_name, comp_path, present, version, note] = component;
+    copyText(out.name, comp_name);
+    copyText(out.path, comp_path);
+    out.present = present ? 1 : 0;
+    out.version = static_cast<int32_t>(version);
+    copyText(out.note, note);
 }
-void fillDiagnostics(const ProbeState& state, RtxDiagnostics* diagnostics) {
+void fillDiagnostics(const RtxBackend& state, RtxDiagnostics* diagnostics) {
     if (diagnostics == nullptr) {
         return;
     }
     std::memset(diagnostics, 0, sizeof(*diagnostics));
     diagnostics->device = state.device;
     const uint32_t count = static_cast<uint32_t>(std::min<size_t>(
-        state.runtime.components().size(), RTX_MAX_COMPONENTS));
+        rtx_shim::rtComponents(state.runtime).size(), RTX_MAX_COMPONENTS));
     diagnostics->component_count = count;
     for (uint32_t i = 0; i < count; ++i) {
-        fillComponent(diagnostics->components[i], state.runtime.components()[i]);
+        fillComponent(diagnostics->components[i], rtx_shim::rtComponents(state.runtime)[i]);
     }
     copyText(diagnostics->summary, state.summary);
 }
-ProbeState probeNvidia() {
-    ProbeState state;
+RtxBackend probeNvidia() {
+    RtxBackend state;
     std::string ignored;
-    state.cuda_loaded = state.runtime.loadCuda(&ignored);
-    state.runtime.loadNvenc(&ignored);
-    state.runtime.loadNvcuvid(&ignored);
-    state.runtime.loadNgx(&ignored);
+    state.cuda_loaded = rtx_shim::rtLoadCuda(state.runtime, &ignored);
+    rtx_shim::rtLoadNvenc(state.runtime, &ignored);
+    rtx_shim::rtLoadNvcuvid(state.runtime, &ignored);
+    rtx_shim::rtLoadNgx(state.runtime, &ignored);
 
     int cuda_version = 0;
     int device_count = 0;
     std::string detail;
     if (state.cuda_loaded) {
-        if (!state.driver.resolve(state.runtime.cuda(), &detail)) {
+        if (!state.driver.resolve(rtx_shim::rtCuda(state.runtime), &detail)) {
             state.summary = "nvcuda.dll loaded but the driver API is incomplete: " + detail;
         } else if (state.driver.cuInit(0) != rtx_shim::cuda::CUDA_SUCCESS) {
             state.summary = "cuInit failed; the NVIDIA kernel driver is not usable";
@@ -156,7 +164,7 @@ ProbeState probeNvidia() {
                 const bool vsr_present = componentPresent(state, "libnvngx_vsr.so");
                 const bool truehdr_present = componentPresent(state, "libnvngx_truehdr.so");
 #endif
-                uint32_t nvenc_version = state.runtime.nvencVersion();
+                uint32_t nvenc_version = rtx_shim::rtNvencVersion(state.runtime);
 
                 if (nvdec_present) {
                     state.capabilities |= RTX_CAP_NVDEC;
@@ -199,8 +207,10 @@ ProbeState probeNvidia() {
     if (state.summary.empty()) {
         std::string reason;
         const auto* cuda = findComponent(state, "CUDA driver");
-        if (cuda != nullptr && !cuda->note.empty()) {
-            reason = cuda->note;
+        if (cuda != nullptr) {
+            const auto& [cn, cp, cpres, cver, cnote] = *cuda;
+            (void)cn; (void)cp; (void)cpres; (void)cver;
+            if (!cnote.empty()) reason = cnote;
         }
         state.summary = "NVIDIA CUDA driver unavailable";
         if (!reason.empty()) {
@@ -211,17 +221,6 @@ ProbeState probeNvidia() {
     return state;
 }
 }  // namespace
-
-// @rtx-type-justification
-// Category: Polymorphic-Boundary
-// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
-// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
-struct RtxBackend {
-    RtxBackendConfig config{};
-    RtxDeviceInfo device{};
-    uint32_t capabilities = 0;
-    std::string error;
-};
 
 extern "C" {
 
@@ -261,7 +260,7 @@ RTX_SHIM_API const char* RTX_SHIM_CALL rtx_shim_result_name(RtxResult result) {
     return "RTX_ERR_UNKNOWN";
 }
 RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_probe(RtxDiagnostics* diagnostics) {
-    const ProbeState state = probeNvidia();
+    const RtxBackend state = probeNvidia();
     fillDiagnostics(state, diagnostics);
     return RTX_OK;
 }
@@ -270,7 +269,7 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_enumerate_devices(RtxGpuTopology* 
         return RTX_ERR_INVALID_ARGUMENT;
     }
     std::memset(topology, 0, sizeof(*topology));
-    ProbeState state = probeNvidia();
+    RtxBackend state = probeNvidia();
     if (!state.cuda_loaded || !state.cuda_initialized) {
         return RTX_ERR_DLL_MISSING;
     }
@@ -343,7 +342,7 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_shim_create_backend(const RtxBackendCon
     if (config->target_width < config->width || config->target_height < config->height) {
         return RTX_ERR_UNSUPPORTED;
     }
-    const ProbeState state = probeNvidia();
+    const RtxBackend state = probeNvidia();
     if (!state.cuda_loaded || !state.has_device) {
         return RTX_ERR_DLL_MISSING;
     }

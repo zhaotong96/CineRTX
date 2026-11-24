@@ -4,7 +4,7 @@
 
 #include <charconv>
 #include <cstdint>
-#include <cstdio>
+#include <format>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -51,9 +51,7 @@ namespace rtx::str {
             case '\t': out += "\\t"; break;
             default:
                 if (c < 0x20) {
-                    char buf[8]{};
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
+                    out += std::format("\\u{:04x}", static_cast<unsigned int>(c));
                 } else {
                     out.push_back(static_cast<char>(c));
                 }

@@ -68,19 +68,19 @@ bool openSdkLibrary(DynLibrary& library, const std::string& name, bool system_fa
     if (!application_directory.empty()) {
         const std::filesystem::path candidate =
             utf8ToPath(application_directory) / name;
-        if (library.openExplicitPath(pathToUtf8(candidate), error)) {
+        if (dynOpenExplicit(library, pathToUtf8(candidate), error)) {
             return true;
         }
     }
     if (system_fallback) {
-        return library.openSystemLibrary(name, error);
+        return dynOpenSystem(library, name, error);
     }
     if (error != nullptr && error->empty()) {
         *error = "not found in RTX_NVIDIA_DIR, the executable directory or System32";
     }
     return false;
 }
-std::string platformLibraryName(const char* windows_name, [[maybe_unused]] const char* posix_name) {
+std::string platformLibraryName([[maybe_unused]] const char* windows_name, [[maybe_unused]] const char* posix_name) {
 #if defined(_WIN32)
     return windows_name;
 #else
@@ -98,79 +98,78 @@ bool openNvidiaLibrary(DynLibrary& library, const char* windows_name,
     return openSdkLibrary(library, platformLibraryName(windows_name, posix_name),
                           system_fallback, error);
 }
-ComponentStatus& NvidiaRuntime::addComponent(const std::string& name) {
-    components_.push_back(ComponentStatus{});
-    ComponentStatus& component = components_.back();
-    component.name = name;
-    return component;
+static RuntimeComponent& rtAddComponent(NvidiaRuntime& rt, const std::string& name) {
+    auto& [cuda_, nvenc_, nvcuvid_, ngx_, components_, nvenc_version_] = rt;
+    (void)cuda_; (void)nvenc_; (void)nvcuvid_; (void)ngx_; (void)nvenc_version_;
+    components_.emplace_back(name, std::string{}, false, uint32_t{0}, std::string{});
+    return components_.back();
 }
-bool NvidiaRuntime::loadCuda(std::string* error) {
-    ComponentStatus& component = addComponent("CUDA driver");
+bool rtLoadCuda(NvidiaRuntime& rt, std::string* error) {
+    auto& [cuda_, nvenc_, nvcuvid_, ngx_, components_, nvenc_version_] = rt;
+    (void)nvenc_; (void)nvcuvid_; (void)ngx_; (void)components_; (void)nvenc_version_;
+    auto& [comp_name, comp_path, present, version, note] = rtAddComponent(rt, "CUDA driver");
+    (void)comp_name; (void)version;
     std::string message;
-    if (!cuda_.openSystemLibrary(platformLibraryName("nvcuda.dll", "libcuda.so.1"), &message)) {
-        component.note = errorOr(message, "nvcuda not found");
-        if (error != nullptr) {
-            *error = component.note;
-        }
+    if (!dynOpenSystem(cuda_, platformLibraryName("nvcuda.dll", "libcuda.so.1"), &message)) {
+        note = errorOr(message, "nvcuda not found");
+        if (error != nullptr) *error = note;
         return false;
     }
-    component.present = true;
-    component.path = cuda_.path();
-    if (error != nullptr) {
-        error->clear();
-    }
+    present = true;
+    comp_path = dynPath(cuda_);
+    if (error != nullptr) error->clear();
     return true;
 }
-bool NvidiaRuntime::loadNvenc(std::string* error) {
-    ComponentStatus& component = addComponent("NVENC");
+bool rtLoadNvenc(NvidiaRuntime& rt, std::string* error) {
+    auto& [cuda_, nvenc_, nvcuvid_, ngx_, components_, nvenc_version_] = rt;
+    (void)cuda_; (void)nvcuvid_; (void)ngx_; (void)components_;
+    auto& [comp_name, comp_path, present, comp_ver, note] = rtAddComponent(rt, "NVENC");
+    (void)comp_name;
     std::string message;
-    const std::string name =
-        platformLibraryName("nvEncodeAPI64.dll", "libnvidia-encode.so.1");
+    const std::string name = platformLibraryName("nvEncodeAPI64.dll", "libnvidia-encode.so.1");
     if (!openSdkLibrary(nvenc_, name, true, &message)) {
-        component.note = errorOr(message, "NVENC library not found");
-        if (error != nullptr) {
-            *error = component.note;
-        }
+        note = errorOr(message, "NVENC library not found");
+        if (error != nullptr) *error = note;
         return false;
     }
-    component.present = true;
-    component.path = nvenc_.path();
-    nvenc::Table table;
-    std::string resolve_error;
-    if (table.resolve(nvenc_, &resolve_error)) {
-        uint32_t version = 0;
-        if (table.getMaxSupportedVersion != nullptr &&
-            table.getMaxSupportedVersion(&version) == nvenc::NV_ENC_SUCCESS) {
-            nvenc_version_ = version;
-            component.version = static_cast<int32_t>(version);
-        }
-    } else {
-        component.note = resolve_error;
+    present = true;
+    comp_path = dynPath(nvenc_);
+    using PFN_NvEncGetMaxSupportedVersion = uint32_t (*)(uint32_t*);
+    auto* get_ver = dynSymbolAs<PFN_NvEncGetMaxSupportedVersion>(nvenc_, "NvEncodeAPIGetMaxSupportedVersion");
+    if (get_ver == nullptr || dynSymbol(nvenc_, "NvEncodeAPICreateInstance") == nullptr) {
+        note = "nvEncodeAPI is missing required exports";
+        if (error != nullptr) *error = note;
+        dynClose(nvenc_);
+        return false;
     }
-    if (error != nullptr) {
-        error->clear();
+    uint32_t version = 0;
+    if (get_ver(&version) == 0) {
+        nvenc_version_ = version;
+        comp_ver = version;
     }
+    present = true;
     return true;
 }
-bool NvidiaRuntime::loadNvcuvid(std::string* error) {
-    ComponentStatus& component = addComponent("NVDEC (cuvid)");
+bool rtLoadNvcuvid(NvidiaRuntime& rt, std::string* error) {
+    auto& [cuda_, nvenc_, nvcuvid_, ngx_, components_, nvenc_version_] = rt;
+    (void)cuda_; (void)nvenc_; (void)ngx_; (void)components_; (void)nvenc_version_;
+    auto& [comp_name, comp_path, present, version, note] = rtAddComponent(rt, "NVDEC (cuvid)");
+    (void)comp_name; (void)version;
     std::string message;
     const std::string name = platformLibraryName("nvcuvid.dll", "libnvcuvid.so.1");
     if (!openSdkLibrary(nvcuvid_, name, true, &message)) {
-        component.note = errorOr(message, "nvcuvid not found");
-        if (error != nullptr) {
-            *error = component.note;
-        }
+        note = errorOr(message, "nvcuvid not found");
+        if (error != nullptr) *error = note;
         return false;
     }
-    component.present = true;
-    component.path = nvcuvid_.path();
-    if (error != nullptr) {
-        error->clear();
-    }
+    present = true;
+    comp_path = dynPath(nvcuvid_);
+    if (error != nullptr) error->clear();
     return true;
 }
-bool NvidiaRuntime::loadNgx(std::string* error) {
+bool rtLoadNgx(NvidiaRuntime& rt, std::string* error) {
+    auto& [cuda_, nvenc_, nvcuvid_, ngx_, components_, nvenc_version_] = rt;
+    (void)cuda_; (void)nvenc_; (void)nvcuvid_; (void)components_; (void)nvenc_version_;
 #if defined(_WIN32)
     const char* primary = "nvsdk_ngx_d.dll";
     const char* fallback = "nvsdk_ngx.dll";
@@ -180,9 +179,7 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
     const char* fallback = "libnvsdk_ngx.so";
     const char* feature_names[] = {"libnvngx_vsr.so", "libnvngx_truehdr.so"};
 #endif
-
     std::vector<std::string> directories;
-
     const std::string application_directory = executableDirectory();
     if (!application_directory.empty()) {
         const std::filesystem::path root = utf8ToPath(application_directory);
@@ -194,9 +191,6 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
     for (const std::string& directory : directories) {
         bool complete = true;
         for (const char* feature : feature_names) {
-// The proprietary host stub is linked into rtx_ngx_bridge, not into this
-// shim, so nvsdk_ngx_d.dll is not a deliverable.  The feature DLLs are the
-// real signal that the plugin is deployed; look where the bridge looks.
             const std::filesystem::path candidate = utf8ToPath(directory) / feature;
             complete = complete && fileExists(pathToUtf8(candidate));
         }
@@ -211,50 +205,43 @@ bool NvidiaRuntime::loadNgx(std::string* error) {
     if (!opened && std::string(fallback) != primary) {
         std::string fallback_message;
         opened = openSdkLibrary(ngx_, fallback, false, &fallback_message);
-        if (!opened) {
-            message += "; " + fallback_message;
-        }
+        if (!opened) message += "; " + fallback_message;
     }
     if (!opened && !features_complete) {
-        ComponentStatus& component = addComponent("RTX Video SDK (NGX)");
-        component.note = errorOr(message, "nvsdk_ngx not found and the NGX feature DLLs are missing");
-        if (error != nullptr) {
-            *error = component.note;
-        }
+        auto& [cn, cp, cpres, cver, cnote] = rtAddComponent(rt, "RTX Video SDK (NGX)");
+        (void)cn; (void)cp; (void)cpres; (void)cver;
+        cnote = errorOr(message, "nvsdk_ngx not found and the NGX feature DLLs are missing");
+        if (error != nullptr) *error = cnote;
         return false;
     }
     if (opened && feature_directory.empty()) {
-        feature_directory = pathToUtf8(utf8ToPath(ngx_.path()).parent_path());
+        feature_directory = pathToUtf8(utf8ToPath(dynPath(ngx_)).parent_path());
     }
     for (const char* feature : feature_names) {
-        ComponentStatus& feature_component = addComponent(feature);
+        auto& [fn, fp, fpres, fver, fnote] = rtAddComponent(rt, feature);
+        (void)fn; (void)fver;
         const std::filesystem::path candidate =
             feature_directory.empty() ? std::filesystem::path()
                                       : utf8ToPath(feature_directory) / feature;
-        feature_component.present =
-            !candidate.empty() && fileExists(pathToUtf8(candidate));
-        feature_component.path = pathToUtf8(candidate);
-        feature_component.note =
-            feature_component.present ? "feature DLL present" : "feature DLL missing";
+        fpres = !candidate.empty() && fileExists(pathToUtf8(candidate));
+        fp = pathToUtf8(candidate);
+        fnote = fpres ? "feature DLL present" : "feature DLL missing";
     }
-    ComponentStatus& component = addComponent("RTX Video SDK (NGX)");
-    component.present = true;
-    component.path = opened ? ngx_.path() : feature_directory;
+    auto& [cn, cp, cpres, cver, cnote] = rtAddComponent(rt, "RTX Video SDK (NGX)");
+    (void)cn; (void)cver;
+    cpres = true;
+    cp = opened ? dynPath(ngx_) : feature_directory;
     if (opened) {
-        ngx::Table table;
         std::string resolve_error;
-        if (table.resolve(ngx_, &resolve_error)) {
-            component.note = "NGX exports resolved (D3D12 evaluate entry points)";
+        if (ngx::resolveExports(ngx_, &resolve_error)) {
+            cnote = "NGX exports resolved (D3D12 evaluate entry points)";
         } else {
-            component.note = resolve_error;
+            cnote = resolve_error;
         }
     } else {
-        component.note =
-            "feature DLLs present; the NGX host stub is embedded in rtx_ngx_bridge";
+        cnote = "feature DLLs present; the NGX host stub is embedded in rtx_ngx_bridge";
     }
-    if (error != nullptr) {
-        error->clear();
-    }
+    if (error != nullptr) error->clear();
     return true;
 }
 }  // namespace rtx_shim

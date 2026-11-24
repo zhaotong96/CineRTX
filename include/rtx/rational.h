@@ -14,8 +14,8 @@ namespace rtx {
 
 // @rtx-type-justification
 // Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
+// Why-Std-Fails: 有理数时间基值类型，重载算术与三路比较运算符并维护约分正规化不变量，std::pair<int64_t,int64_t> 无法承载运算符语义。
+// Invariant: 合法 Rational 满足 den > 0 且 gcd(|num|, den) == 1。
 struct Rational {
     int64_t num = 0;
     int64_t den = 1;

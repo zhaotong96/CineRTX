@@ -106,39 +106,39 @@ RtxBackendConfig validBackendConfig() {
 RTX_TEST(shim_dynamic_library_loading) {
     DynLibrary library;
     std::string error;
-    RTX_REQUIRE(library.openSystemLibrary(probeLibraryName(), &error));
-    RTX_CHECK(library.isOpen());
-    RTX_CHECK(!library.path().empty());
+    RTX_REQUIRE(dynOpenSystem(library, probeLibraryName(), &error));
+    RTX_CHECK(dynIsOpen(library));
+    RTX_CHECK(!dynPath(library).empty());
     RTX_CHECK(error.empty());
-    const std::string platform = DynLibrary::platformName();
+    const std::string platform = dynPlatformName();
     RTX_CHECK(platform == "windows" || platform == "linux" || platform == "macos" ||
               platform == "posix");
-    RTX_CHECK(library.symbol(probeSymbolName()) != nullptr);
+    RTX_CHECK(dynSymbol(library, probeSymbolName()) != nullptr);
 // "posix" is what dyn_library_posix.cpp reports; the loader has no separate
 // linux/macos implementation, so both spellings are part of the contract.
-    RTX_CHECK(library.symbol("this_symbol_does_not_exist") == nullptr);
+    RTX_CHECK(dynSymbol(library, "this_symbol_does_not_exist") == nullptr);
 
     DynLibrary missing;
-    RTX_CHECK(!missing.openSystemLibrary("rtx-does-not-exist-12345", &error));
-    RTX_CHECK(!missing.isOpen());
+    RTX_CHECK(!dynOpenSystem(missing, "rtx-does-not-exist-12345", &error));
+    RTX_CHECK(!dynIsOpen(missing));
     RTX_CHECK(!error.empty());
 // A bare name never resolves outside System32, and an explicit path that
 // does not exist must report a structured error rather than crash.
-    RTX_CHECK(!missing.openExplicitPath("rtx-does-not-exist-12345.dll", &error));
-    RTX_CHECK(!missing.isOpen());
+    RTX_CHECK(!dynOpenExplicit(missing, "rtx-does-not-exist-12345.dll", &error));
+    RTX_CHECK(!dynIsOpen(missing));
     RTX_CHECK(!error.empty());
-    RTX_CHECK(!missing.openExplicitPath("", &error));
+    RTX_CHECK(!dynOpenExplicit(missing, "", &error));
     RTX_CHECK(!error.empty());
 
     DynLibrary moved = std::move(library);
-    RTX_CHECK(!library.isOpen());
-    RTX_CHECK(moved.isOpen());
-    RTX_CHECK(moved.symbol(probeSymbolName()) != nullptr);
+    RTX_CHECK(!dynIsOpen(library));
+    RTX_CHECK(dynIsOpen(moved));
+    RTX_CHECK(dynSymbol(moved, probeSymbolName()) != nullptr);
 // Ownership transfers on move; the source is left closed.
-    moved.close();
-    RTX_CHECK(!moved.isOpen());
-    RTX_CHECK(moved.path().empty());
-    RTX_CHECK(moved.symbol(probeSymbolName()) == nullptr);
+    dynClose(moved);
+    RTX_CHECK(!dynIsOpen(moved));
+    RTX_CHECK(dynPath(moved).empty());
+    RTX_CHECK(dynSymbol(moved, probeSymbolName()) == nullptr);
 }
 RTX_TEST(shim_abi_version_and_result_names) {
     RTX_CHECK_EQ(rtx_shim_abi_version(), RTX_SHIM_ABI_VERSION);
@@ -368,14 +368,9 @@ RTX_TEST(shim_ngx_d3d12_interop_selftest) {
     RTX_CHECK(rtx_ngx_pack_last_error() != nullptr);
 }
 RTX_TEST(shim_probe_json_is_ascii_safe) {
-    rtx::cli::ShimProbeResult probe;
-    probe.loaded = true;
-    probe.abi_version = RTX_SHIM_ABI_VERSION;
-    probe.result = RTX_OK;
-    probe.path = "C:\\Program Files\\CineRTX\\CineRTX.exe";
-    probe.diagnostics.component_count = 1;
-
-    RtxComponentInfo& component = probe.diagnostics.components[0];
+    RtxDiagnostics diag{};
+    diag.component_count = 1;
+    RtxComponentInfo& component = diag.components[0];
     std::snprintf(component.name, sizeof(component.name), "%s", "localized");
     component.present = 0;
 
@@ -389,6 +384,7 @@ RTX_TEST(shim_probe_json_is_ascii_safe) {
     std::memcpy(component.note, note.data(), note.size());
     component.note[note.size()] = '\0';
 
+    const rtx::cli::ShimProbeResult probe{true, "C:\\Program Files\\CineRTX\\CineRTX.exe", "", RTX_SHIM_ABI_VERSION, RTX_OK, diag};
     const std::string json = rtx::cli::formatProbeJson(probe);
     RTX_CHECK(json.find("\"loaded\": true") != std::string::npos);
     RTX_CHECK(json.find("\\u627e\\u4e0d\\u5230") != std::string::npos);

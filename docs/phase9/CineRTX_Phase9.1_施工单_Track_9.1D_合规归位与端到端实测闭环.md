@@ -26,7 +26,7 @@
 2. **全仓正则脱敏扫描**：
    在根目录下执行正则扫描命令：
    ```powershell
-   Select-String -Path "docs\**\*.md","README*.md" -Pattern "C:\\PUBLIC|C:\\Users\\zt\\AppData|192\.168\."
+   cmake -P cmake/AuditPrivacy.cmake
    ```
    **门禁断言**：匹配命中数必须严格为 **`0`**。
 3. **更新 `docs/README.md`**：

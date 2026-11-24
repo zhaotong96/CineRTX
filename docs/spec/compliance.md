@@ -22,7 +22,7 @@ and comply with NVIDIA's own licenses.
 | `include/rtx/`, `src/core/`, `src/io/`, `src/cli/` | `GPL-3.0-or-later WITH Plugin-Exception` | `LICENSE`, `COPYING.EXCEPTION` |
 | `src/gui/`, `webui/` | `GPL-3.0-or-later WITH Plugin-Exception` | same |
 | `tests/` | same | same |
-| `CMakeLists.txt`, `cmake/`, `tools/`, `.github/` | same | same |
+| `CMakeLists.txt`, `cmake/`, `.github/` | same | same |
 | `include/shim/`, `src/shim/` | `MIT OR Apache-2.0` | `LICENSE-MIT`, `LICENSE-APACHE` |
 
 The exception is an additional permission under GPLv3 section 7. It allows a
@@ -44,11 +44,11 @@ Operationally:
 
 | Requirement | Where it is enforced |
 | --- | --- |
-| No `--enable-gpl`, no `--enable-nonfree` | `tools/build_ffmpeg_static_*.sh` configure line |
+| No `--enable-gpl`, no `--enable-nonfree` | `cmake/RtxFfmpegStatic.cmake` |
 | No FFmpeg hardware/NVIDIA integration (`--disable-ffnvcodec --disable-cuvid --disable-nvenc --disable-cuda-llvm`) | same |
 | No swscale/avfilter/postproc (LGPL modules the engine never calls) | same |
 | Static archives, never DLLs | `cmake/RtxFfmpegStatic.cmake` (450 KB import-stub fuse) |
-| Zero `av*.dll` / `sw*.dll` in the output tree | `tools/audit_imports.ps1` |
+| Zero `av*.dll` / `sw*.dll` in the output tree | `cmake/AuditImports.cmake` |
 | FFmpeg is **not** an Independent Module | `COPYING.EXCEPTION` section 0 |
 
 The consequence for distribution: shipping `CineRTX.exe` conveys the
@@ -90,7 +90,7 @@ C ABI is exercised on every platform.
 
 `DynLibrary` (MIT/Apache-2.0) implements a narrow, auditable search order:
 
-- explicit path from `RTX_NVIDIA_DIR` or the executable directory;
+- deterministic executable directory and `plugins/nvidia_rtx/` subdirectory (zero environment-variable overrides);
 - `%SystemRoot%\System32\<name>` for bare driver DLL names;
 - `dlopen(path, RTLD_NOW | RTLD_LOCAL)` on POSIX.
 
@@ -106,7 +106,10 @@ device pointers are `uint64_t`, and all handles are opaque.
 ### 5.1 SPDX and boundary audit
 
 ```powershell
-pwsh tools/check_spdx.ps1
+cmake -P cmake/AuditSpdx.cmake
+cmake -P cmake/AuditTypes.cmake
+cmake -P cmake/AuditSloc.cmake
+cmake -P cmake/AuditPrivacy.cmake
 ```
 
 Checks:
@@ -125,7 +128,8 @@ Exit code is non-zero on any violation.
 ### 5.2 Import-table audit
 
 ```powershell
-pwsh tools/audit_imports.ps1 -BuildDir .vs/build/cmake/windows-msvc-ninja
+cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/CineRTX.exe -DMODE=GUI -P cmake/AuditImports.cmake
+cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/rtx_headless_cli.exe -DMODE=HEADLESS -P cmake/AuditImports.cmake
 ```
 
 On Windows the script parses the PE import and delay-import directories
@@ -145,7 +149,7 @@ way.
 
 ### 5.3 Release packaging audit
 
-`tools/package.ps1` refuses to create a release if:
+`cmake/PackageRelease.cmake` refuses to create a release if:
 
 - any required artifact is missing;
 - the SPDX or import audit fails;
@@ -173,12 +177,12 @@ A failing audit blocks the build; packaging depends on the three build jobs.
 
 | Gate item | Evidence |
 | --- | --- |
-| Core import table contains no NVIDIA DLL | `tools/audit_imports.ps1`, CI job |
+| Core import table contains no NVIDIA DLL | `cmake/AuditImports.cmake`, CI job |
 | Missing GPU/SDK reports structured diagnostics | shim probe tests, `--probe --json` (CLI exit `4`/`5` only when the shim itself cannot answer) |
-| Every GPL file has an SPDX header | `tools/check_spdx.ps1` |
+| Every GPL file has an SPDX header | `cmake/AuditSpdx.cmake` |
 | `LICENSE` and `COPYING.EXCEPTION` present | repository root, install rule |
-| Shim files are MIT/Apache-2.0 | `check_spdx.ps1`, per-file headers |
-| No proprietary binaries in the source tree | `check_spdx.ps1` binary scan |
+| Shim files are MIT/Apache-2.0 | `cmake/AuditSpdx.cmake`, per-file headers |
+| No proprietary binaries in the source tree | `cmake/AuditSpdx.cmake` binary scan |
 
 ## 8. Third-party components
 
@@ -189,7 +193,7 @@ A failing audit blocks the build; packaging depends on the three build jobs.
   the engine only loads them at run time.
 - **FFmpeg** — statically linked, always. The surgical static archives
   (`libavformat`, `libavcodec`, `libavutil`, `libswresample`) are built by
-  `tools/build_ffmpeg_static_*.sh` without `--enable-gpl` and without
+  `cmake/RtxFfmpegStatic.cmake` without `--enable-gpl` and without
   `--enable-nonfree`, i.e. under **LGPLv2.1-or-later**. LGPLv2.1 section 3
   permits combining them into the GPLv3 Covered Work, so the shipped single
   executable is GPLv3 throughout. There is no configuration in which the engine
@@ -205,7 +209,7 @@ A failing audit blocks the build; packaging depends on the three build jobs.
   runtime is linked. The thin dynamic-loading wrapper from the former vendor
   tree is original project code and now lives at
   `include/shim/dynlink_nvEncodeAPI.h` (`MIT OR Apache-2.0`), including
-  `<ffnvcodec/nvEncodeAPI.h>` from the submodule. `tools/check_spdx.ps1`
+  `<ffnvcodec/nvEncodeAPI.h>` from the submodule. `cmake/AuditSpdx.cmake`
   audits the submodule's headers for MIT when the submodule is initialised
   and prints a notice when it is not.
 

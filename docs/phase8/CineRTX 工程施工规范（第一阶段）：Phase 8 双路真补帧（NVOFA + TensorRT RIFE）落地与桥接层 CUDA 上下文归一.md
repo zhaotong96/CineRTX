@@ -79,7 +79,7 @@
   1. 在 [`src/shim/ngx_bridge/trt_loader.cpp`](../../src/shim/ngx_bridge/trt_loader.cpp) 中**立即删除第 55 行**：
      ```cpp
      // 严禁硬编码本机路径！必须删除：
-     // dirs.push_back(L"C:\\PUBLIC\\[REDACTED_PROJ]\\build\\external\\tensorrt\\TensorRT-10.13.3.9\\lib");
+     // dirs.push_back(L"[REDACTED_PATH]");
      ```
      仅保留环境变量（`RTX_TENSORRT_ROOT` / `TENSORRT_DIR`）与相对于模块目录 `getModuleDirectory()` 的探测路径（`<modDir>`、`<modDir>/plugins/nvidia_rtx`、`<modDir>/../../../build/external/tensorrt/TensorRT-10.13.3.9/lib`）。
   2. 在 [`CMakeLists.txt`](../../CMakeLists.txt) 第 294 行：若 `${RTX_EXTERNAL_DIR}/TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip` 存在而 `${RTX_TENSORRT_ROOT}/include/NvInfer.h` 不存在，自动调用 `file(ARCHIVE_EXTRACT ...)` 解压；并在 `rtx_stage_ngx_plugin` 目标中，将存在的 `nvinfer_10.dll`、`nvinfer_builder_resource_10.dll`、`nvonnxparser_10.dll` 自动 `copy_if_different` 至 `<exe_dir>/plugins/nvidia_rtx/`。
@@ -171,7 +171,7 @@
 执行工程师在提交 Stage 1 代码前，必须逐条执行以下命令并全部勾选确认：
 
 - [ ] **门禁 1.1（零硬编码路径与零 `destroy()` 静态扫描）**：
-  - 执行命令：`rg -n "(C:\\\\PUBLIC|::destroy\()" src/ include/`
+  - 执行命令：`cmake -P cmake/AuditPrivacy.cmake` 與 `rg -n "::destroy\(" src/ include/`
   - 通过标准：输出严格为 **0 命中**。
 - [ ] **门禁 1.2（源码树零内嵌 PTX 头文件污染）**：
   - 执行命令：`Test-Path src/shim/ngx_bridge/rife_pack_ptx.h` 與 `Test-Path src/shim/ngx_bridge/p010_pack_ptx.h`

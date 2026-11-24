@@ -59,7 +59,7 @@
 - **事实取证**：
   该函数硬编码从当前工作目录下的 `fixtures/` 读取样本。
   - 当在构建输出目录 `.vs/build/cmake/windows-msvc-ninja/` 下执行时，因 CMake `POST_BUILD` 拷贝了文件而得以 PASS；
-  - 但当在项目根目录（`C:\PUBLIC\CineRTX`）或未来 CI 环境中以相对路径调用可执行文件时，寻址失败直接触发 2 项断言崩溃：
+  - 但当在项目根目录（`[REDACTED_PATH]`）或未来 CI 环境中以相对路径调用可执行文件时，寻址失败直接触发 2 项断言崩溃：
     - `playback_session_fence_gated_slot_retirement: REQUIRE failed: bytes.has_value()`
     - `playback_session_native_decode_h264_hevc_av1: REQUIRE failed: bytes.has_value()`
 

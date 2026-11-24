@@ -6,8 +6,9 @@
 
 #include "trt_loader.h"
 
-#include <cstdlib>
 #include <filesystem>
+#include <memory>
+#include <type_traits>
 #include <vector>
 
 #if defined(_WIN32)
@@ -15,90 +16,73 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#else
-#include <dlfcn.h>
 #endif
 
-namespace rtx_ngx {
+namespace rtx_ngx::trt_loader {
 
 namespace {
 
 #if defined(_WIN32)
-std::wstring getModuleDirectory() {
+inline constexpr auto freeDll = [](void* h) noexcept {
+    if (h != nullptr) ::FreeLibrary(static_cast<HMODULE>(h));
+};
+using ScopedDll = std::unique_ptr<void, std::remove_cvref_t<decltype(freeDll)>>;
+#else
+using ScopedDll = std::unique_ptr<void, void (*)(void*)>;
+#endif
+
+#if defined(_WIN32)
+ScopedDll g_nvinfer{};
+ScopedDll g_nvonnxparser{};
+std::wstring g_trt_dir;
+#else
+void* g_nvinfer = nullptr;
+void* g_nvonnxparser = nullptr;
+#endif
+int32_t g_version = 0;
+void* (*g_create_runtime)(void*, int32_t) = nullptr;
+void* (*g_create_builder)(void*, int32_t) = nullptr;
+#if defined(_WIN32)
+int32_t (*g_get_version)() = nullptr;
+#endif
+void* (*g_create_parser)(void*, void*, int32_t) = nullptr;
+
+#if defined(_WIN32)
+std::vector<std::wstring> getCandidateDirectories() {
+    std::vector<std::wstring> dirs;
     wchar_t buffer[MAX_PATH] = {};
     HMODULE hMod = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&TrtLoader::instance), &hMod);
+                       reinterpret_cast<LPCWSTR>(&loadRuntime), &hMod);
     GetModuleFileNameW(hMod, buffer, MAX_PATH);
     std::filesystem::path p(buffer);
-    return p.parent_path().wstring();
-}
-std::vector<std::wstring> getCandidateDirectories() {
-    std::vector<std::wstring> dirs;
-
-    const wchar_t* envRoots[] = { L"RTX_TENSORRT_ROOT", L"TENSORRT_DIR", L"TRT_ROOT" };
-    for (const wchar_t* envName : envRoots) {
-        wchar_t envVal[MAX_PATH] = {};
-        DWORD len = GetEnvironmentVariableW(envName, envVal, MAX_PATH);
-        if (len > 0 && len < MAX_PATH) {
-            std::filesystem::path root(envVal);
-            dirs.push_back((root / L"lib").wstring());
-            dirs.push_back((root / L"bin").wstring());
-            dirs.push_back(root.wstring());
-        }
-    }
-    const std::wstring modDir = getModuleDirectory();
-    if (!modDir.empty()) {
-        std::filesystem::path p(modDir);
-        dirs.push_back(p.wstring());
-        dirs.push_back((p / L"plugins" / L"nvidia_rtx").wstring());
-        dirs.push_back((p.parent_path() / L"plugins" / L"nvidia_rtx").wstring());
-        dirs.push_back((p / L".." / L".." / L".." / L"build" / L"external" / L"tensorrt" /
+    if (const std::filesystem::path parent = p.parent_path(); !parent.empty()) {
+        dirs.push_back(parent.wstring());
+        dirs.push_back((parent / L"plugins" / L"nvidia_rtx").wstring());
+        dirs.push_back((parent.parent_path() / L"plugins" / L"nvidia_rtx").wstring());
+        dirs.push_back((parent / L".." / L".." / L".." / L".vs" / L"build" / L"external" / L"tensorrt" /
+                        L"TensorRT-10.13.3.9" / L"lib").wstring());
+        dirs.push_back((parent / L".." / L".." / L".." / L"build" / L"external" / L"tensorrt" /
                         L"TensorRT-10.13.3.9" / L"lib").wstring());
     }
     dirs.push_back(L"build\\external\\tensorrt\\TensorRT-10.13.3.9\\lib");
-
     return dirs;
-// Relative path fallback for local developer builds
 }
 #endif
 
 }  // namespace
 
-TrtLoader& TrtLoader::instance() {
-    static TrtLoader loader;
-    return loader;
-}
-TrtLoader::~TrtLoader() {
-#if defined(_WIN32)
-    if (hNvOnnxParser_) {
-        FreeLibrary(reinterpret_cast<HMODULE>(hNvOnnxParser_));
-        hNvOnnxParser_ = nullptr;
-    }
-    if (hNvInfer_) {
-        FreeLibrary(reinterpret_cast<HMODULE>(hNvInfer_));
-        hNvInfer_ = nullptr;
-    }
-#endif
-}
-bool TrtLoader::isRuntimeLoaded() const noexcept {
-    return hNvInfer_ != nullptr;
-}
-bool TrtLoader::isParserLoaded() const noexcept {
-    return hNvOnnxParser_ != nullptr;
-}
-int32_t TrtLoader::getVersion() const noexcept {
-    return version_;
-}
-bool TrtLoader::loadRuntime(std::string* error) {
-    if (hNvInfer_ != nullptr) return true;
+bool isRuntimeLoaded() noexcept { return g_nvinfer != nullptr; }
+bool isParserLoaded() noexcept { return g_nvonnxparser != nullptr; }
+int32_t getVersion() noexcept { return g_version; }
 
+bool loadRuntime(std::string* error) {
+    if (g_nvinfer != nullptr) return true;
 #if defined(_WIN32)
     std::wstring foundDir;
     for (const auto& dir : getCandidateDirectories()) {
-        std::filesystem::path dllPath = std::filesystem::path(dir) / L"nvinfer_10.dll";
-        if (std::filesystem::exists(dllPath)) {
+        if (std::filesystem::exists(std::filesystem::path(dir) / L"nvinfer_10.dll")) {
             foundDir = dir;
             break;
         }
@@ -107,94 +91,86 @@ bool TrtLoader::loadRuntime(std::string* error) {
         if (error) *error = "nvinfer_10.dll was not found in any candidate directory";
         return false;
     }
-    trtDir_ = foundDir;
+    g_trt_dir = foundDir;
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     AddDllDirectory(foundDir.c_str());
 
-    std::filesystem::path fullPath = std::filesystem::path(foundDir) / L"nvinfer_10.dll";
-    HMODULE h = LoadLibraryExW(fullPath.c_str(), nullptr,
-                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    const std::filesystem::path fullPath = std::filesystem::path(foundDir) / L"nvinfer_10.dll";
+    ScopedDll h{LoadLibraryExW(fullPath.c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)};
     if (!h) {
         if (error) *error = "LoadLibraryExW failed for " + fullPath.string() + " (error " + std::to_string(GetLastError()) + ")";
         return false;
     }
-    createInferRuntime_INTERNAL_ = reinterpret_cast<decltype(createInferRuntime_INTERNAL_)>(
-        GetProcAddress(h, "createInferRuntime_INTERNAL"));
-    createInferBuilder_INTERNAL_ = reinterpret_cast<decltype(createInferBuilder_INTERNAL_)>(
-        GetProcAddress(h, "createInferBuilder_INTERNAL"));
-    getInferLibVersion_ = reinterpret_cast<decltype(getInferLibVersion_)>(
-        GetProcAddress(h, "getInferLibVersion"));
-
-    if (!createInferRuntime_INTERNAL_ || !getInferLibVersion_) {
-        FreeLibrary(h);
+    auto mod = static_cast<HMODULE>(h.get());
+    g_create_runtime = reinterpret_cast<decltype(g_create_runtime)>(GetProcAddress(mod, "createInferRuntime_INTERNAL"));
+    g_create_builder = reinterpret_cast<decltype(g_create_builder)>(GetProcAddress(mod, "createInferBuilder_INTERNAL"));
+    g_get_version = reinterpret_cast<decltype(g_get_version)>(GetProcAddress(mod, "getInferLibVersion"));
+    if (!g_create_runtime || !g_get_version) {
         if (error) *error = "nvinfer_10.dll is missing required export symbols";
         return false;
     }
-    version_ = getInferLibVersion_();
-    if (version_ >= 101400) {
-        FreeLibrary(h);
-        createInferRuntime_INTERNAL_ = nullptr;
-        createInferBuilder_INTERNAL_ = nullptr;
-        getInferLibVersion_ = nullptr;
+    g_version = g_get_version();
+    if (g_version >= 101400) {
+        g_create_runtime = nullptr;
+        g_create_builder = nullptr;
+        g_get_version = nullptr;
         if (error) {
-            *error = "TensorRT version " + std::to_string(version_) +
+            *error = "TensorRT version " + std::to_string(g_version) +
                      " >= 10.14 contains known GridSample regression; requires 10.13.3.9";
         }
         return false;
     }
-    hNvInfer_ = reinterpret_cast<void*>(h);
+    g_nvinfer = std::move(h);
     return true;
-// TensorRT 10.14/10.15 regression barrier
 #else
     if (error) *error = "TensorRT runtime dynamic loading unsupported on non-Windows";
     return false;
 #endif
 }
-bool TrtLoader::loadParser(std::string* error) {
-    if (hNvOnnxParser_ != nullptr) return true;
-    if (!loadRuntime(error)) return false;
 
+bool loadParser(std::string* error) {
+    if (g_nvonnxparser != nullptr) return true;
+    if (!loadRuntime(error)) return false;
 #if defined(_WIN32)
-    std::filesystem::path fullPath = std::filesystem::path(trtDir_) / L"nvonnxparser_10.dll";
+    std::filesystem::path fullPath = std::filesystem::path(g_trt_dir) / L"nvonnxparser_10.dll";
     if (!std::filesystem::exists(fullPath)) {
         for (const auto& dir : getCandidateDirectories()) {
-            std::filesystem::path p = std::filesystem::path(dir) / L"nvonnxparser_10.dll";
-            if (std::filesystem::exists(p)) {
-                fullPath = p;
+            if (std::filesystem::path p = std::filesystem::path(dir) / L"nvonnxparser_10.dll";
+                std::filesystem::exists(p)) {
+                fullPath = std::move(p);
                 break;
             }
         }
     }
-    HMODULE h = LoadLibraryExW(fullPath.c_str(), nullptr,
-                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    ScopedDll h{LoadLibraryExW(fullPath.c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)};
     if (!h) {
         if (error) *error = "LoadLibraryExW failed for nvonnxparser_10.dll (error " + std::to_string(GetLastError()) + ")";
         return false;
     }
-    createNvOnnxParser_INTERNAL_ = reinterpret_cast<decltype(createNvOnnxParser_INTERNAL_)>(
-        GetProcAddress(h, "createNvOnnxParser_INTERNAL"));
-    if (!createNvOnnxParser_INTERNAL_) {
-        FreeLibrary(h);
+    g_create_parser = reinterpret_cast<decltype(g_create_parser)>(
+        GetProcAddress(static_cast<HMODULE>(h.get()), "createNvOnnxParser_INTERNAL"));
+    if (!g_create_parser) {
         if (error) *error = "nvonnxparser_10.dll is missing createNvOnnxParser_INTERNAL";
         return false;
     }
-    hNvOnnxParser_ = reinterpret_cast<void*>(h);
+    g_nvonnxparser = std::move(h);
     return true;
 #else
     if (error) *error = "nvonnxparser dynamic loading unsupported on non-Windows";
     return false;
 #endif
 }
-void* TrtLoader::createInferRuntime(void* logger) {
-    if (!loadRuntime()) return nullptr;
-    return createInferRuntime_INTERNAL_(logger, version_);
+
+void* createInferRuntime(void* logger) noexcept {
+    return loadRuntime() ? g_create_runtime(logger, g_version) : nullptr;
 }
-void* TrtLoader::createInferBuilder(void* logger) {
-    if (!loadRuntime() || !createInferBuilder_INTERNAL_) return nullptr;
-    return createInferBuilder_INTERNAL_(logger, version_);
+void* createInferBuilder(void* logger) noexcept {
+    return (loadRuntime() && g_create_builder) ? g_create_builder(logger, g_version) : nullptr;
 }
-void* TrtLoader::createNvOnnxParser(void* network, void* logger) {
-    if (!loadParser() || !createNvOnnxParser_INTERNAL_) return nullptr;
-    return createNvOnnxParser_INTERNAL_(network, logger, version_);
+void* createNvOnnxParser(void* network, void* logger) noexcept {
+    return (loadParser() && g_create_parser) ? g_create_parser(network, logger, g_version) : nullptr;
 }
-}  // namespace rtx_ngx
+
+}  // namespace rtx_ngx::trt_loader

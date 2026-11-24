@@ -38,12 +38,6 @@ void putU32(std::vector<uint8_t>& out, uint32_t value) {
     out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
     out.push_back(static_cast<uint8_t>(value & 0xFF));
 }
-void putLe32(std::vector<uint8_t>& out, uint32_t value) {
-    out.push_back(static_cast<uint8_t>(value & 0xFF));
-    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
-}
 void appendLeb128(std::vector<uint8_t>& out, uint64_t value) {
     do {
         uint8_t byte = static_cast<uint8_t>(value & 0x7F);
@@ -54,28 +48,6 @@ void appendLeb128(std::vector<uint8_t>& out, uint64_t value) {
         out.push_back(byte);
     } while (value != 0);
 }
-int findInt(const std::string& json, const std::string& key, int fallback) {
-    const std::string needle = "\"" + key + "\"";
-    size_t position = json.find(needle);
-    if (position == std::string::npos) {
-        return fallback;
-    }
-    position = json.find(':', position + needle.size());
-    if (position == std::string::npos) {
-        return fallback;
-    }
-    ++position;
-    while (position < json.size() &&
-           (json[position] == ' ' || json[position] == '\t' || json[position] == '\n')) {
-        ++position;
-    }
-    try {
-        return std::stoi(json.substr(position));
-    } catch (const std::exception&) {
-        return fallback;
-    }
-}
-std::string boolString(bool value) { return value ? "true" : "false"; }
 
 // Phase 7 (Task 7-B2): MSB-first bit writer for the SMPTE ST 2094-40 v1
 // payload.  Layout mirrors the de-facto interop payload (ETSI TS 103 433-1,
@@ -83,44 +55,13 @@ std::string boolString(bool value) { return value ? "true" : "false"; }
 //   T.35 carrier (0xB5 / 0x003C / 0x00) + application identifier 4
 //   + application version 1 + one full-frame window + luminance statistics
 //   + knee-point driven tone mapping.
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-class Hdr10PlusBitWriter {
-public:
-    void put(uint32_t bits, uint32_t value) {
-        for (int shift = static_cast<int>(bits) - 1; shift >= 0; --shift) {
-            const uint32_t bit = (value >> shift) & 1u;
-            current_ = (current_ << 1) | bit;
-            ++filled_;
-            if (filled_ == 8) {
-                out_.push_back(static_cast<uint8_t>(current_));
-                current_ = 0;
-                filled_ = 0;
-            }
-        }
-    }
-    std::vector<uint8_t> finish() {
-        if (filled_ != 0) {
-            current_ <<= (8 - filled_);
-            out_.push_back(static_cast<uint8_t>(current_));
-            current_ = 0;
-            filled_ = 0;
-        }
-        return out_;
-    }
-private:
-    std::vector<uint8_t> out_;
-    uint32_t current_ = 0;
-    int filled_ = 0;
-};
-
 uint32_t nitsToS2094(uint32_t nits) { return nits > 13107u ? 131071u : nits * 10u; }
 
 }  // namespace
 
-Result<void> TrueHdrParameters::validate() const {
+Result<void> SeiSynthesizer::validateTrueHdr(const TrueHdrParameters& params) {
+    const auto& [contrast, saturation, middle_gray, max_luminance, mastering, max_fall] = params;
+    (void)mastering;
     if (contrast < 50 || contrast > 200) {
         return err(ErrorCode::InvalidArgument,
 // ST 2094-40 luminance fields carry nits/10000 in 17-bit unsigned words
@@ -151,83 +92,65 @@ Result<void> TrueHdrParameters::validate() const {
 }
 MasteringDisplay SeiSynthesizer::makeMasteringDisplay(MasteringPreset preset, uint32_t max_nits,
                                                       uint32_t min_nits_10000) {
-    MasteringDisplay display{};
+    const uint32_t max_l = max_nits * 10000u;
+    const uint32_t min_l = std::max<uint32_t>(1u, min_nits_10000);
     if (preset == MasteringPreset::Bt2020) {
-        display.red_x = kBt2020RedX;
-        display.red_y = kBt2020RedY;
-        display.green_x = kBt2020GreenX;
-        display.green_y = kBt2020GreenY;
-        display.blue_x = kBt2020BlueX;
-        display.blue_y = kBt2020BlueY;
-    } else {
-        display.red_x = kDciP3RedX;
-        display.red_y = kDciP3RedY;
-        display.green_x = kDciP3GreenX;
-        display.green_y = kDciP3GreenY;
-        display.blue_x = kDciP3BlueX;
-        display.blue_y = kDciP3BlueY;
+        return {kBt2020RedX, kBt2020RedY, kBt2020GreenX, kBt2020GreenY,
+                kBt2020BlueX, kBt2020BlueY, kD65WhiteX, kD65WhiteY, max_l, min_l};
     }
-    display.white_x = kD65WhiteX;
-    display.white_y = kD65WhiteY;
-    display.max_luminance = max_nits * 10000u;
-    display.min_luminance = std::max<uint32_t>(1u, min_nits_10000);
-    return display;
+    return {kDciP3RedX, kDciP3RedY, kDciP3GreenX, kDciP3GreenY,
+            kDciP3BlueX, kDciP3BlueY, kD65WhiteX, kD65WhiteY, max_l, min_l};
 }
 Result<Hdr10Metadata> SeiSynthesizer::makeMetadata(const TrueHdrParameters& params) {
-    const Result<void> validation = params.validate();
+    const Result<void> validation = validateTrueHdr(params);
     if (!validation.has_value()) {
         return std::unexpected(validation.error());
-// units of 0.0001 cd/m^2, matching SMPTE ST 2086 / NVENC.
     }
+    const auto& [contrast, saturation, middle_gray, max_luminance, mastering, max_fall] = params;
+    (void)contrast; (void)saturation; (void)middle_gray;
     Hdr10Metadata metadata{};
     metadata.enabled = true;
-    metadata.mastering = makeMasteringDisplay(params.mastering, static_cast<uint32_t>(params.max_luminance));
-    metadata.cll.max_cll = static_cast<uint16_t>(
-        std::min<int>(params.max_luminance, 65535));
-    metadata.cll.max_fall = static_cast<uint16_t>(std::max(0, params.max_fall));
+    metadata.mastering = makeMasteringDisplay(mastering, static_cast<uint32_t>(max_luminance));
+    metadata.cll.first = static_cast<uint16_t>(std::min<int>(max_luminance, 65535));
+    metadata.cll.second = static_cast<uint16_t>(std::max(0, max_fall));
     metadata.color = ColorDescription{ColorPrimaries::BT2020, TransferFunction::SMPTE2084,
                                       MatrixCoefficients::BT2020NC, ColorRange::Limited};
-    metadata.target_nits = static_cast<uint32_t>(params.max_luminance);
+    metadata.target_nits = static_cast<uint32_t>(max_luminance);
     return metadata;
 }
 NvencHevcHdrSettings SeiSynthesizer::makeNvencSettings(const Hdr10Metadata& metadata) {
-    NvencHevcHdrSettings settings{};
-    settings.pixel_bit_depth_minus8 = 2;
-    settings.output_mastering_display = metadata.enabled ? 1u : 0u;
-    settings.output_max_cll = metadata.enabled ? 1u : 0u;
-    settings.vui.colour_description_present_flag = 1;
-    settings.vui.colour_primaries =
-        static_cast<uint8_t>(metadata.color.primaries == ColorPrimaries::BT2020 ? 9 : 1);
-    settings.vui.transfer_characteristics =
-        static_cast<uint8_t>(metadata.color.transfer == TransferFunction::SMPTE2084 ? 16 : 1);
-    settings.vui.matrix_coefficients =
-        static_cast<uint8_t>(metadata.color.matrix == MatrixCoefficients::BT2020NC ? 9 : 1);
-    settings.vui.chroma_sample_location_flag = 1;
-    settings.vui.chroma_sample_loc_type_top_field = 2;
-    settings.vui.chroma_sample_loc_type_bottom_field = 2;
-    settings.vui.video_full_range_flag = 0;
-    return settings;
+    const uint32_t flag = metadata.enabled ? 1u : 0u;
+    const auto [cp, ct, cm, cr] = metadata.color;
+    (void)cr;
+    const HevcVuiParameters vui{
+        0,
+        1,
+        static_cast<uint8_t>(cp == ColorPrimaries::BT2020 ? 9 : 1),
+        static_cast<uint8_t>(ct == TransferFunction::SMPTE2084 ? 16 : 1),
+        static_cast<uint8_t>(cm == MatrixCoefficients::BT2020NC ? 9 : 1),
+        1,
+        2,
+        2,
+        0,
+    };
+    return {2u, flag, flag, vui};
 }
 std::vector<uint8_t> SeiSynthesizer::masteringDisplayPayload(const Hdr10Metadata& metadata) {
     std::vector<uint8_t> payload;
     payload.reserve(24);
-    putU16(payload, metadata.mastering.green_x);
-    putU16(payload, metadata.mastering.green_y);
-    putU16(payload, metadata.mastering.blue_x);
-    putU16(payload, metadata.mastering.blue_y);
-    putU16(payload, metadata.mastering.red_x);
-    putU16(payload, metadata.mastering.red_y);
-    putU16(payload, metadata.mastering.white_x);
-    putU16(payload, metadata.mastering.white_y);
-    putU32(payload, metadata.mastering.max_luminance);
-    putU32(payload, metadata.mastering.min_luminance);
+    const auto [rx, ry, gx, gy, bx, by, wx, wy, max_l, min_l] = metadata.mastering;
+    putU16(payload, gx); putU16(payload, gy);
+    putU16(payload, bx); putU16(payload, by);
+    putU16(payload, rx); putU16(payload, ry);
+    putU16(payload, wx); putU16(payload, wy);
+    putU32(payload, max_l); putU32(payload, min_l);
     return payload;
 }
 std::vector<uint8_t> SeiSynthesizer::contentLightPayload(const Hdr10Metadata& metadata) {
     std::vector<uint8_t> payload;
     payload.reserve(4);
-    putU16(payload, metadata.cll.max_cll);
-    putU16(payload, metadata.cll.max_fall);
+    putU16(payload, metadata.cll.first);
+    putU16(payload, metadata.cll.second);
     return payload;
 }
 std::vector<uint8_t> SeiSynthesizer::insertEmulationPrevention(const std::vector<uint8_t>& rbsp) {
@@ -287,8 +210,8 @@ std::vector<uint8_t> SeiSynthesizer::av1MetadataObu(const Hdr10Metadata& metadat
 
     std::vector<uint8_t> cll;
     cll.push_back(1);
-    putU16(cll, metadata.cll.max_cll);
-    putU16(cll, metadata.cll.max_fall);
+    putU16(cll, metadata.cll.first);
+    putU16(cll, metadata.cll.second);
     appendObu(cll);
 
     std::vector<uint8_t> mdcv;
@@ -300,38 +223,50 @@ std::vector<uint8_t> SeiSynthesizer::av1MetadataObu(const Hdr10Metadata& metadat
     return obus;
 }
 std::vector<uint8_t> SeiSynthesizer::hdr10PlusItuT35Payload(const Hdr10PlusFrameStats& stats) {
-    Hdr10PlusBitWriter w;
-// metadata_type = 1 (HDR_CLL)
-    w.put(8, 0xB5);    // country code (US)
-    w.put(8, 0x00);    // terminal provider code, high byte
-    w.put(8, 0x3C);    // terminal provider code, low byte (0x003C)
-    w.put(8, 0x00);    // terminal provider oriented code
-    w.put(8, 0x04);    // application identifier: SMPTE ST 2094-40
-    w.put(8, 0x01);    // application version 1
-// metadata_type = 2 (HDR_MDCV)
-    w.put(2, 0);       // num_windows - 1 (single full-frame window)
-    w.put(16, 0);      // center_of_ellipse_x
-    w.put(16, 0);      // center_of_ellipse_y
-    w.put(8, 0);       // major_axis
-    w.put(8, 0);       // minor_axis
-    w.put(8, 0);       // rotation
-    w.put(8, 0);       // reflectance
-    w.put(1, 0);       // tone_mapping_mode_flag (no polynomial curve)
-    w.put(1, 0);       // sharpening_flag
-    w.put(17, nitsToS2094(stats.maxscl_r_nits));
-// ITU-T T.35 carrier mandated by the expert verdict (§4.4).
-    w.put(17, nitsToS2094(stats.maxscl_g_nits));
-    w.put(17, nitsToS2094(stats.maxscl_b_nits));
-    w.put(17, nitsToS2094(stats.average_maxrgb_nits));
-    w.put(1, 0);       // num_distribution_maxrgb_percentiles = 0
-    w.put(1, 0);       // fraction_bright_pixels = 0
-    w.put(1, 1);       // tone_mapping_flag
-    w.put(16, stats.knee_point_x);
-// Window shape parameters (centre/axes/rotation unset).
-    w.put(16, stats.knee_point_y);
-    w.put(3, 0);       // num_bezier_curve_anchors
-    w.put(10, 0);      // color_saturation_weight
-    return w.finish();
+    const auto& [maxscl_r, maxscl_g, maxscl_b, avg_maxrgb, knee_x, knee_y] = stats;
+    std::vector<uint8_t> out;
+    uint32_t current = 0;
+    int filled = 0;
+    auto put = [&](uint32_t bits, uint32_t value) {
+        for (int shift = static_cast<int>(bits) - 1; shift >= 0; --shift) {
+            current = (current << 1) | ((value >> shift) & 1u);
+            if (++filled == 8) {
+                out.push_back(static_cast<uint8_t>(current));
+                current = 0;
+                filled = 0;
+            }
+        }
+    };
+    put(8, 0xB5);    // country code (US)
+    put(8, 0x00);    // terminal provider code, high byte
+    put(8, 0x3C);    // terminal provider code, low byte (0x003C)
+    put(8, 0x00);    // terminal provider oriented code
+    put(8, 0x04);    // application identifier: SMPTE ST 2094-40
+    put(8, 0x01);    // application version 1
+    put(2, 0);       // num_windows - 1 (single full-frame window)
+    put(16, 0);      // center_of_ellipse_x
+    put(16, 0);      // center_of_ellipse_y
+    put(8, 0);       // major_axis
+    put(8, 0);       // minor_axis
+    put(8, 0);       // rotation
+    put(8, 0);       // reflectance
+    put(1, 0);       // tone_mapping_mode_flag (no polynomial curve)
+    put(1, 0);       // sharpening_flag
+    put(17, nitsToS2094(maxscl_r));
+    put(17, nitsToS2094(maxscl_g));
+    put(17, nitsToS2094(maxscl_b));
+    put(17, nitsToS2094(avg_maxrgb));
+    put(1, 0);       // num_distribution_maxrgb_percentiles = 0
+    put(1, 0);       // fraction_bright_pixels = 0
+    put(1, 1);       // tone_mapping_flag
+    put(16, knee_x);
+    put(16, knee_y);
+    put(3, 0);       // num_bezier_curve_anchors
+    put(10, 0);      // color_saturation_weight
+    if (filled != 0) {
+        out.push_back(static_cast<uint8_t>(current << (8 - filled)));
+    }
+    return out;
 }
 std::vector<uint8_t> SeiSynthesizer::av1Hdr10PlusMetadataObu(const Hdr10PlusFrameStats& stats) {
     const std::vector<uint8_t> t35 = hdr10PlusItuT35Payload(stats);

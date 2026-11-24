@@ -8,8 +8,10 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "rtx/status.h"
@@ -22,110 +24,52 @@ enum class MasteringPreset {
     Bt2020,
 };
 
-// RTX Video SDK uses 100-based integers for contrast/saturation and
-// middle-grey; these are the values aligned with the NVIDIA App defaults.
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct TrueHdrParameters {
-    int contrast = 125;
-    int saturation = 75;
-    int middle_gray = 44;
-    int max_luminance = 1000;
-    MasteringPreset mastering = MasteringPreset::DciP3D65;
-    int max_fall = 300;
+// Phase 12 (Wave 12.2-B2): standard tuple/array aliases replace passive HDR parameter bags.
+// TrueHdrParameters: (contrast, saturation, middle_gray, max_luminance, mastering, max_fall)
+using TrueHdrParameters = std::tuple<int, int, int, int, MasteringPreset, int>;
 
-    Result<void> validate() const;
-};
+[[nodiscard]] constexpr TrueHdrParameters defaultTrueHdrParameters() noexcept {
+    return {125, 75, 44, 1000, MasteringPreset::DciP3D65, 300};
+}
 
-// Mirrors NV_ENC_CONFIG_HEVC_VUI_PARAMETERS for the fields the engine sets.
-// The shim copies these values verbatim into the SDK structure; no NVIDIA
-// header is required in the GPL core.
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct HevcVuiParameters {
-    uint8_t aspect_ratio_info_present_flag = 0;
-    uint8_t colour_description_present_flag = 1;
-    uint8_t colour_primaries = 9;
-    uint8_t transfer_characteristics = 16;
-    uint8_t matrix_coefficients = 9;
-    uint8_t chroma_sample_location_flag = 1;
-    uint8_t chroma_sample_loc_type_top_field = 2;    // top-left
-    uint8_t chroma_sample_loc_type_bottom_field = 2; // top-left
-    uint8_t video_full_range_flag = 0;
-};
+// HevcVuiParameters: [aspect_ratio_info_present_flag, colour_description_present_flag,
+//   colour_primaries, transfer_characteristics, matrix_coefficients,
+//   chroma_sample_location_flag, chroma_sample_loc_type_top_field,
+//   chroma_sample_loc_type_bottom_field, video_full_range_flag]
+using HevcVuiParameters = std::array<uint8_t, 9>;
 
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct NvencHevcHdrSettings {
-    uint32_t pixel_bit_depth_minus8 = 2;
-    uint32_t output_mastering_display = 1;
-    uint32_t output_max_cll = 1;
-    HevcVuiParameters vui{};
-};
+// NvencHevcHdrSettings: (pixel_bit_depth_minus8, output_mastering_display, output_max_cll, vui)
+using NvencHevcHdrSettings = std::tuple<uint32_t, uint32_t, uint32_t, HevcVuiParameters>;
 
-// Phase 7 (Task 7-B2): one frame's real GPU-reduced luminance statistics for
-// the SMPTE ST 2094-40 (HDR10+) dynamic metadata synthesis.  Plain aggregate
-// so designated initialisers keep working.
-// @rtx-type-justification
-// Category: Domain-Model
-// Why-Std-Fails: 多字段领域模型：具名字段承载序列化/校验/反射契约，压进 std::tuple 会丢失全部字段语义与默认值契约。
-// Invariant: 字段集合与默认值即对外契约（schema/测试逐字段锚定）；只增不删。
-struct Hdr10PlusFrameStats {
-    std::uint32_t maxscl_r_nits = 1000;
-    std::uint32_t maxscl_g_nits = 1000;
-    std::uint32_t maxscl_b_nits = 1000;
-    std::uint32_t average_maxrgb_nits = 400;
-    std::uint16_t knee_point_x = 500;
-    std::uint16_t knee_point_y = 500;
-};
+// Hdr10PlusFrameStats: (maxscl_r_nits, maxscl_g_nits, maxscl_b_nits,
+//   average_maxrgb_nits, knee_point_x, knee_point_y)
+using Hdr10PlusFrameStats = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint16_t, uint16_t>;
 
-// @rtx-type-justification
-// Category: NonTrivial-StateMachine
-// Why-Std-Fails: 协调多资源异步生命周期的宿主状态机：std::unique_ptr/std::jthread/std::tuple 无法表达其声明序即析构逆序、线程亲和与受控降级路径的交叉不变量。
-// Invariant: 成员声明序即依赖序（先声明者后析构）；状态迁移仅在持锁线程或属主线程发生。
-class SeiSynthesizer {
-public:
-    static Result<Hdr10Metadata> makeMetadata(const TrueHdrParameters& params);
+namespace SeiSynthesizer {
+    Result<void> validateTrueHdr(const TrueHdrParameters& params);
+    Result<Hdr10Metadata> makeMetadata(const TrueHdrParameters& params);
 
-    static MasteringDisplay makeMasteringDisplay(MasteringPreset preset, uint32_t max_nits,
-                                                 uint32_t min_nits_10000 = 1);
-    static NvencHevcHdrSettings makeNvencSettings(const Hdr10Metadata& metadata);
+    MasteringDisplay makeMasteringDisplay(MasteringPreset preset, uint32_t max_nits,
+                                          uint32_t min_nits_10000 = 1);
+    NvencHevcHdrSettings makeNvencSettings(const Hdr10Metadata& metadata);
 
-// HEVC SEI payloads, excluding the payload-type and payload-size fields.
-    static std::vector<uint8_t> masteringDisplayPayload(const Hdr10Metadata& metadata);
-    static std::vector<uint8_t> contentLightPayload(const Hdr10Metadata& metadata);
+    // HEVC SEI payloads, excluding the payload-type and payload-size fields.
+    std::vector<uint8_t> masteringDisplayPayload(const Hdr10Metadata& metadata);
+    std::vector<uint8_t> contentLightPayload(const Hdr10Metadata& metadata);
 
-// Complete Annex-B prefix SEI NAL unit (start code included) carrying both
-// payload type 137 and 144.  Emulation-prevention bytes are inserted.
-    static std::vector<uint8_t> prefixSeiNal(const Hdr10Metadata& metadata);
+    // Complete Annex-B prefix SEI NAL unit (start code included) carrying both
+    // payload type 137 and 144.  Emulation-prevention bytes are inserted.
+    std::vector<uint8_t> prefixSeiNal(const Hdr10Metadata& metadata);
 
-// AV1 metadata OBU payload (mdcv + clli) for container/bitstream use.
-    static std::vector<uint8_t> av1MetadataObu(const Hdr10Metadata& metadata);
+    // AV1 metadata OBU payload (mdcv + clli) for container/bitstream use.
+    std::vector<uint8_t> av1MetadataObu(const Hdr10Metadata& metadata);
 
-// Phase 7 (Task 7-B2): ITU-T T.35 carrier of the SMPTE ST 2094-40
-// (HDR10+) dynamic metadata payload: country_code 0xB5, terminal provider
-// code 0x003C, terminal provider oriented code 0x00, application
-// identifier 0x04, followed by the ST 2094-40 v1 bitstream built from the
-// frame statistics.
-    static std::vector<uint8_t> hdr10PlusItuT35Payload(const Hdr10PlusFrameStats& stats);
+    // Phase 7 (Task 7-B2): ITU-T T.35 carrier of SMPTE ST 2094-40 (HDR10+).
+    std::vector<uint8_t> hdr10PlusItuT35Payload(const Hdr10PlusFrameStats& stats);
+    std::vector<uint8_t> av1Hdr10PlusMetadataObu(const Hdr10PlusFrameStats& stats);
+    std::vector<uint8_t> hevcHdr10PlusPrefixSei(const Hdr10PlusFrameStats& stats);
 
-// Phase 7 (Task 7-B2): the same T.35 payload wrapped as an AV1
-// OBU_METADATA (OBU type 6, METADATA_TYPE_ITUT_T35 = 3) temporal-unit
-// fragment ready to prepend to an encoded AV1 packet.
-    static std::vector<uint8_t> av1Hdr10PlusMetadataObu(const Hdr10PlusFrameStats& stats);
-
-// Phase 7 (Task 7-B2): complete Annex-B prefix SEI NAL (start code
-// included, payload type 4 = user data registered by ITU-T T.35) for the
-// HEVC Main10 HDR10+ path.
-    static std::vector<uint8_t> hevcHdr10PlusPrefixSei(const Hdr10PlusFrameStats& stats);
-
-    static std::vector<uint8_t> insertEmulationPrevention(const std::vector<uint8_t>& rbsp);
-};
+    std::vector<uint8_t> insertEmulationPrevention(const std::vector<uint8_t>& rbsp);
+}  // namespace SeiSynthesizer
 
 }  // namespace rtx

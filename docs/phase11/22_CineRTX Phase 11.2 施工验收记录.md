@@ -1,8 +1,8 @@
 # **CineRTX Phase 11.2 施工验收记录（18 号施工单 CINERTX-P11-WORKORDER-018-REV2）**
 
 - **验收对象**：`docs/phase11/18_CineRTX Phase 11.2 SuperPower 施工单_实时视听内核与DirectComposition视口.md`（任务 1–5 + Check 1–4）
-- **验收环境**：测试机 `weak@192.168.123.3`，工作区严格限于 `C:\Users\weak\test\`（`~\test\CineRTX`）；GPU NVIDIA GeForce RTX 5060 Laptop GPU；驱动 621.01（R580 分支，**低于施工单前置基线要求的 ≥621.14 WHQL，见 § deviations**）；编译器 MSVC 14.51（VS 18 Community）+ Ninja，`RelWithDebInfo /std:c++latest /MT /W4 /permissive- /EHsc /utf-8 /arch:AVX2`
-- **构建目录**：`C:\Users\weak\test\CineRTX\.vs\build\cmake\windows-msvc-ninja`（复现脚本 `~/test/rtx_build.ps1`，全程未在 `~\test` 之外落盘任何文件）
+- **验收环境**：测试机 `[REDACTED_HOST]`，工作区严格限于 `[REDACTED_PATH]\test\`（`~\test\CineRTX`）；GPU NVIDIA GeForce RTX 5060 Laptop GPU；驱动 621.01（R580 分支，**低于施工单前置基线要求的 ≥621.14 WHQL，见 § deviations**）；编译器 MSVC 14.51（VS 18 Community）+ Ninja，`RelWithDebInfo /std:c++latest /MT /W4 /permissive- /EHsc /utf-8 /arch:AVX2`
+- **构建目录**：`[REDACTED_PATH]\test\CineRTX\.vs\build\cmake\windows-msvc-ninja`（复现脚本 `~/test/rtx_build.ps1`，全程未在 `~\test` 之外落盘任何文件）
 - **证据文件（服务器 `~\test\evidence\`）**：`configure.log`、`build.log`、`full_run.log`（RC=0）、`full_r1.log`（RC=0）、`full_r3.log`（RC=0）、`pb_r1..r6.log`（RC=0）、`full_r2.log`（1 项 RIFE 硬件波形抖动，见 §deviations）、`native_probe_1..2.log`、`rife_1..3.log`
 
 ---

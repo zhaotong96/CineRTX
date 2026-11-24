@@ -42,96 +42,82 @@ void pushUndo(EditStacks& history, NleEditDelta delta) {
     return true;
 }
 
+template <class... Ts> struct Overloaded : Ts... { using Ts::operator()...; };
+
 Result<void> applyDelta(NleProject& project, const NleEditDelta& delta, bool invert) {
-    return std::visit(
-        [&](const auto& op) -> Result<void> {
-            using T = std::decay_t<decltype(op)>;
-            if constexpr (std::is_same_v<T, std::pair<bool, TimelineClip>>) {
-                const auto& [is_delete, clip_copy] = op;
-                const bool do_delete = invert ? !is_delete : is_delete;
-                if (do_delete) {
-                    const auto erased = std::erase_if(project.clips, [&](const TimelineClip& c) {
-                        return c.id == clip_copy.id;
-                    });
-                    if (erased == 0) {
-                        return err(ErrorCode::NotFound, "nle: clip not found for delete");
-                    }
-                    if (project.selected_clip_id == clip_copy.id) {
-                        project.selected_clip_id = 0;
-                    }
-                } else {
-                    if (project.asset(clip_copy.asset_id) == nullptr) {
-                        return err(ErrorCode::InvalidArgument, "nle: asset not registered for clip");
-                    }
-                    if (project.clip(clip_copy.id) == nullptr) {
-                        project.clips.push_back(clip_copy);
-                    }
+    return std::visit(Overloaded{
+        [&](const std::pair<bool, TimelineClip>& op) -> Result<void> {
+            const auto& [is_delete, clip_copy] = op;
+            const auto& [cc_id, cc_aid, cc_nm, cc_ln, cc_st, cc_in, cc_out, cc_g] = clip_copy;
+            (void)cc_nm;(void)cc_ln;(void)cc_st;(void)cc_in;(void)cc_out;(void)cc_g;
+            if (invert ? !is_delete : is_delete) {
+                if (std::erase_if(project.clips, [&](const TimelineClip& c) { return nleClipId(c) == cc_id; }) == 0) {
+                    return err(ErrorCode::NotFound, "nle: clip not found for delete");
                 }
-                return {};
-            } else if constexpr (std::is_same_v<T, std::tuple<uint64_t, std::pair<int64_t, int64_t>,
-                                                              std::pair<int64_t, int64_t>>>) {
-                const auto& [clip_id, old_io, new_io] = op;
-                auto* target = project.clip(clip_id);
-                if (!target) {
-                    return err(ErrorCode::NotFound, "nle: clip not found for trim");
-                }
-                const auto& [in_f, out_f] = invert ? old_io : new_io;
-                target->in_flicks = in_f;
-                target->out_flicks = out_f;
-                return {};
-            } else if constexpr (std::is_same_v<T, std::tuple<uint64_t, uint64_t, int64_t, int64_t>>) {
-                const auto& [kept_id, created_id, split_at, old_out] = op;
-                auto* left = project.clip(kept_id);
-                if (!left) {
-                    return err(ErrorCode::NotFound, "nle: clip not found for split");
-                }
-                if (invert) {
-                    std::erase_if(project.clips, [&](const TimelineClip& c) {
-                        return c.id == created_id;
-                    });
-                    left->out_flicks = old_out;
-                    if (project.selected_clip_id == created_id) {
-                        project.selected_clip_id = kept_id;
-                    }
-                } else {
-                    const int64_t offset = split_at - left->start_flicks;
-                    const int64_t split_src = left->in_flicks + offset;
-                    TimelineClip right = *left;
-                    right.id = created_id;
-                    right.start_flicks = split_at;
-                    right.in_flicks = split_src;
-                    right.out_flicks = old_out;
-                    left->out_flicks = split_src;
-                    project.clips.push_back(std::move(right));
-                }
-                return {};
-            } else if constexpr (std::is_same_v<T, std::tuple<uint64_t, std::pair<int, int64_t>,
-                                                              std::pair<int, int64_t>>>) {
-                const auto& [clip_id, old_pos, new_pos] = op;
-                auto* target = project.clip(clip_id);
-                if (!target) {
-                    return err(ErrorCode::NotFound, "nle: clip not found for move");
-                }
-                const auto& [lane, start] = invert ? old_pos : new_pos;
-                target->lane = lane;
-                target->start_flicks = start;
-                return {};
-            } else if constexpr (std::is_same_v<T, std::pair<std::array<int8_t, kNleTrackCount>,
-                                                             std::array<int8_t, kNleTrackCount>>>) {
-                const auto& [old_stack, new_stack] = op;
-                project.lane_stack = invert ? old_stack : new_stack;
-                return {};
-            } else if constexpr (std::is_same_v<T, std::tuple<uint64_t, NleMediaAsset, NleMediaAsset>>) {
-                const auto& [asset_id, prev_asset, verified_asset] = op;
-                auto* target = project.asset(asset_id);
-                if (!target) {
-                    return err(ErrorCode::NotFound, "nle: asset not found for relink");
-                }
-                *target = invert ? prev_asset : verified_asset;
-                return {};
+                if (project.selected_clip_id == cc_id) project.selected_clip_id = 0;
+            } else {
+                if (!project.asset(cc_aid)) return err(ErrorCode::InvalidArgument, "nle: asset not registered for clip");
+                if (!project.clip(cc_id)) project.clips.push_back(clip_copy);
             }
+            return {};
         },
-        delta);
+        [&](const std::tuple<uint64_t, std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>& op) -> Result<void> {
+            const auto& [clip_id, old_io, new_io] = op;
+            auto* target = project.clip(clip_id);
+            if (!target) return err(ErrorCode::NotFound, "nle: clip not found for trim");
+            auto& [tid, taid, tnm, tln, tst, tin, tout, tg] = *target;
+            (void)tid;(void)taid;(void)tnm;(void)tln;(void)tst;(void)tg;
+            std::tie(tin, tout) = invert ? old_io : new_io;
+            return {};
+        },
+        [&](const std::tuple<uint64_t, uint64_t, int64_t, int64_t>& op) -> Result<void> {
+            const auto& [kept_id, created_id, split_at, old_out] = op;
+            auto* left = project.clip(kept_id);
+            if (!left) return err(ErrorCode::NotFound, "nle: clip not found for split");
+            if (invert) {
+                std::erase_if(project.clips, [&](const TimelineClip& c) { return nleClipId(c) == created_id; });
+                auto& [lid, laid, lnm, lln, lst, lin, lout, lg] = *project.clip(kept_id);
+                (void)lid;(void)laid;(void)lnm;(void)lln;(void)lst;(void)lin;(void)lg;
+                lout = old_out;
+                if (project.selected_clip_id == created_id) project.selected_clip_id = kept_id;
+            } else {
+                auto& [lid, laid, lnm, lln, lst, lin, lout, lg] = *left;
+                (void)lid;(void)laid;(void)lnm;(void)lln;(void)lg;
+                const int64_t split_src = lin + (split_at - lst);
+                TimelineClip right = *left;
+                auto& [rid, raid, rnm, rln, rst, rin, rout, rg] = right;
+                (void)raid;(void)rnm;(void)rln;(void)rg;
+                rid = created_id;
+                rst = split_at;
+                rin = split_src;
+                rout = old_out;
+                lout = split_src;
+                project.clips.push_back(std::move(right));
+            }
+            return {};
+        },
+        [&](const std::tuple<uint64_t, std::pair<int, int64_t>, std::pair<int, int64_t>>& op) -> Result<void> {
+            const auto& [clip_id, old_pos, new_pos] = op;
+            auto* target = project.clip(clip_id);
+            if (!target) return err(ErrorCode::NotFound, "nle: clip not found for move");
+            auto& [tid, taid, tnm, tln, tst, tin, tout, tg] = *target;
+            (void)tid;(void)taid;(void)tnm;(void)tin;(void)tout;(void)tg;
+            std::tie(tln, tst) = invert ? old_pos : new_pos;
+            return {};
+        },
+        [&](const std::pair<std::array<int8_t, kNleTrackCount>, std::array<int8_t, kNleTrackCount>>& op) -> Result<void> {
+            const auto& [old_stack, new_stack] = op;
+            project.lane_stack = invert ? old_stack : new_stack;
+            return {};
+        },
+        [&](const std::tuple<uint64_t, NleMediaAsset, NleMediaAsset>& op) -> Result<void> {
+            const auto& [asset_id, prev_asset, verified_asset] = op;
+            auto* target = project.asset(asset_id);
+            if (!target) return err(ErrorCode::NotFound, "nle: asset not found for relink");
+            *target = invert ? prev_asset : verified_asset;
+            return {};
+        },
+    }, delta);
 }
 
 Result<int64_t> parseInt64Token(std::string_view token) {
@@ -148,7 +134,7 @@ Result<int64_t> parseInt64Token(std::string_view token) {
 int64_t NleProject::timelineDurationFlicks() const noexcept {
     int64_t max_end = 0;
     for (const auto& c : clips) {
-        max_end = std::max(max_end, c.start_flicks + nleClipDuration(c));
+        const auto& [cid, caid, cnm, cln, cst, cin, cout, cg] = c; (void)cid;(void)caid;(void)cnm;(void)cln;(void)cin;(void)cout;(void)cg; max_end = std::max(max_end, cst + nleClipDuration(c));
     }
     return max_end;
 }
@@ -174,16 +160,16 @@ std::string NleProject::toJson() const {
     out += "  \"assets\": [";
     for (std::size_t i = 0; i < assets.size(); ++i) {
         if (i > 0) out += ",";
-        const auto& a = assets[i];
+        const auto& [a_id, a_uuid, a_name, a_path, a_dur, a_w, a_h, a_off] = assets[i];
         out += "\n    {";
-        out += std::format("\"id\": {}, ", a.id);
-        out += "\"uuid\": " + rtx::json::jsonQuoted(a.uuid) + ", ";
-        out += "\"name\": " + rtx::json::jsonQuoted(a.name) + ", ";
-        out += "\"path\": " + rtx::json::jsonQuoted(a.path) + ", ";
-        out += std::format("\"durationFlicks\": {}, ", a.duration_flicks);
-        out += std::format("\"width\": {}, ", a.width);
-        out += std::format("\"height\": {}, ", a.height);
-        out += std::format("\"offline\": {}", a.offline ? "true" : "false");
+        out += std::format("\"id\": {}, ", a_id);
+        out += "\"uuid\": " + rtx::json::jsonQuoted(a_uuid) + ", ";
+        out += "\"name\": " + rtx::json::jsonQuoted(a_name) + ", ";
+        out += "\"path\": " + rtx::json::jsonQuoted(a_path) + ", ";
+        out += std::format("\"durationFlicks\": {}, ", a_dur);
+        out += std::format("\"width\": {}, ", a_w);
+        out += std::format("\"height\": {}, ", a_h);
+        out += std::format("\"offline\": {}", a_off ? "true" : "false");
         out += "}";
     }
     if (!assets.empty()) out += "\n  ";
@@ -192,16 +178,16 @@ std::string NleProject::toJson() const {
     out += "  \"clips\": [";
     for (std::size_t i = 0; i < clips.size(); ++i) {
         if (i > 0) out += ",";
-        const auto& c = clips[i];
+        const auto& [c_id, c_aid, c_name, c_lane, c_st, c_in, c_out, c_gain] = clips[i];
         out += "\n    {";
-        out += std::format("\"id\": {}, ", c.id);
-        out += std::format("\"assetId\": {}, ", c.asset_id);
-        out += "\"name\": " + rtx::json::jsonQuoted(c.name) + ", ";
-        out += std::format("\"lane\": {}, ", c.lane);
-        out += std::format("\"startFlicks\": {}, ", c.start_flicks);
-        out += std::format("\"inFlicks\": {}, ", c.in_flicks);
-        out += std::format("\"outFlicks\": {}, ", c.out_flicks);
-        out += std::format("\"gain\": {:.6f}", static_cast<double>(c.gain));
+        out += std::format("\"id\": {}, ", c_id);
+        out += std::format("\"assetId\": {}, ", c_aid);
+        out += "\"name\": " + rtx::json::jsonQuoted(c_name) + ", ";
+        out += std::format("\"lane\": {}, ", c_lane);
+        out += std::format("\"startFlicks\": {}, ", c_st);
+        out += std::format("\"inFlicks\": {}, ", c_in);
+        out += std::format("\"outFlicks\": {}, ", c_out);
+        out += std::format("\"gain\": {:.6f}", static_cast<double>(c_gain));
         out += "}";
     }
     if (!clips.empty()) out += "\n  ";
@@ -276,43 +262,27 @@ Result<NleProject> NleProject::fromJson(std::string_view json_text) {
             auto obj = rtx::json::scanObject(elem, epos);
             if (!obj.has_value()) return std::unexpected(obj.error());
 
-            NleMediaAsset a{};
             auto id = rtx::json::memberInt64(*obj, "id", 0);
             if (!id.has_value()) return std::unexpected(id.error());
             if (*id <= 0) return err(ErrorCode::InvalidArgument, "nle: asset id must be positive");
-            a.id = static_cast<uint64_t>(*id);
-
             auto uuid = rtx::json::memberString(*obj, "uuid");
             if (!uuid.has_value()) return std::unexpected(uuid.error());
-            a.uuid = std::move(*uuid);
-
             auto name = rtx::json::memberString(*obj, "name");
             if (!name.has_value()) return std::unexpected(name.error());
-            a.name = std::move(*name);
-
             auto path = rtx::json::memberString(*obj, "path");
             if (!path.has_value()) return std::unexpected(path.error());
-            a.path = std::move(*path);
-
             auto dur = rtx::json::memberInt64(*obj, "durationFlicks", 0);
             if (!dur.has_value()) return std::unexpected(dur.error());
             if (*dur < 0) return err(ErrorCode::InvalidArgument, "nle: asset duration must be >= 0");
-            a.duration_flicks = *dur;
-
             auto w = rtx::json::memberInt(*obj, "width", 0);
             if (!w.has_value()) return std::unexpected(w.error());
-            a.width = *w;
-
             auto h = rtx::json::memberInt(*obj, "height", 0);
             if (!h.has_value()) return std::unexpected(h.error());
-            a.height = *h;
-
             auto offline = rtx::json::memberBool(*obj, "offline", false);
             if (!offline.has_value()) return std::unexpected(offline.error());
-            a.offline = *offline;
-
-            project.next_id = std::max(project.next_id, a.id + 1);
-            project.assets.push_back(std::move(a));
+            const uint64_t aid = static_cast<uint64_t>(*id);
+            project.next_id = std::max(project.next_id, aid + 1);
+            project.assets.push_back(makeNleAsset(aid, std::move(*uuid), std::move(*name), std::move(*path), *dur, *w, *h, *offline));
         }
     }
 
@@ -325,52 +295,33 @@ Result<NleProject> NleProject::fromJson(std::string_view json_text) {
             auto obj = rtx::json::scanObject(elem, epos);
             if (!obj.has_value()) return std::unexpected(obj.error());
 
-            TimelineClip c{};
             auto id = rtx::json::memberInt64(*obj, "id", 0);
             if (!id.has_value()) return std::unexpected(id.error());
             if (*id <= 0) return err(ErrorCode::InvalidArgument, "nle: clip id must be positive");
-            c.id = static_cast<uint64_t>(*id);
-
             auto asset_id = rtx::json::memberInt64(*obj, "assetId", 0);
             if (!asset_id.has_value()) return std::unexpected(asset_id.error());
             if (*asset_id <= 0 || project.asset(static_cast<uint64_t>(*asset_id)) == nullptr) {
                 return err(ErrorCode::InvalidArgument, "nle: clip references unknown assetId");
             }
-            c.asset_id = static_cast<uint64_t>(*asset_id);
-
             auto name = rtx::json::memberString(*obj, "name");
             if (!name.has_value()) return std::unexpected(name.error());
-            c.name = std::move(*name);
-
             auto lane = rtx::json::memberInt(*obj, "lane", 1);
             if (!lane.has_value()) return std::unexpected(lane.error());
             if (!validLane(*lane)) return err(ErrorCode::InvalidArgument, "nle: clip lane out of range");
-            c.lane = *lane;
-
             auto start = rtx::json::memberInt64(*obj, "startFlicks", 0);
             if (!start.has_value()) return std::unexpected(start.error());
             if (*start < 0) return err(ErrorCode::InvalidArgument, "nle: clip startFlicks must be >= 0");
-            c.start_flicks = *start;
-
             auto in_f = rtx::json::memberInt64(*obj, "inFlicks", 0);
             if (!in_f.has_value()) return std::unexpected(in_f.error());
             auto out_f = rtx::json::memberInt64(*obj, "outFlicks", 0);
             if (!out_f.has_value()) return std::unexpected(out_f.error());
-            if (*in_f < 0 || *out_f < *in_f) {
-                return err(ErrorCode::InvalidArgument, "nle: clip in/out range invalid");
-            }
-            c.in_flicks = *in_f;
-            c.out_flicks = *out_f;
-
+            if (*in_f < 0 || *out_f < *in_f) return err(ErrorCode::InvalidArgument, "nle: clip in/out range invalid");
             auto gain = rtx::json::memberDouble(*obj, "gain", 1.0);
             if (!gain.has_value()) return std::unexpected(gain.error());
-            if (!std::isfinite(*gain) || *gain < 0.0) {
-                return err(ErrorCode::InvalidArgument, "nle: clip gain invalid");
-            }
-            c.gain = static_cast<float>(*gain);
-
-            project.next_id = std::max(project.next_id, c.id + 1);
-            project.clips.push_back(std::move(c));
+            if (!std::isfinite(*gain) || *gain < 0.0) return err(ErrorCode::InvalidArgument, "nle: clip gain invalid");
+            const uint64_t cid = static_cast<uint64_t>(*id);
+            project.next_id = std::max(project.next_id, cid + 1);
+            project.clips.push_back(makeTimelineClip(cid, static_cast<uint64_t>(*asset_id), std::move(*name), *lane, *start, *in_f, *out_f, static_cast<float>(*gain)));
         }
     }
 
@@ -378,50 +329,40 @@ Result<NleProject> NleProject::fromJson(std::string_view json_text) {
 }
 
 Result<uint64_t> nleRegisterAsset(NleProject& project, NleMediaAsset asset) {
-    if (asset.path.empty()) {
-        return err(ErrorCode::InvalidArgument, "nle: asset path must not be empty");
-    }
-    if (asset.duration_flicks < 0) {
-        return err(ErrorCode::InvalidArgument, "nle: asset duration must be >= 0");
-    }
-    if (asset.id == 0) {
-        asset.id = project.next_id++;
+    auto& [a_id, a_uuid, a_name, a_path, a_dur, a_w, a_h, a_off] = asset;
+    (void)a_uuid;(void)a_name;(void)a_w;(void)a_h;(void)a_off;
+    if (a_path.empty()) return err(ErrorCode::InvalidArgument, "nle: asset path must not be empty");
+    if (a_dur < 0) return err(ErrorCode::InvalidArgument, "nle: asset duration must be >= 0");
+    if (a_id == 0) {
+        a_id = project.next_id++;
     } else {
-        if (project.asset(asset.id) != nullptr) {
-            return err(ErrorCode::InvalidArgument,
-                       "nle: duplicate asset id " + std::to_string(asset.id));
+        if (project.asset(a_id) != nullptr) {
+            return err(ErrorCode::InvalidArgument, "nle: duplicate asset id " + std::to_string(a_id));
         }
-        project.next_id = std::max(project.next_id, asset.id + 1);
+        project.next_id = std::max(project.next_id, a_id + 1);
     }
-    const uint64_t assigned_id = asset.id;
+    const uint64_t assigned_id = a_id;
     project.assets.push_back(std::move(asset));
     return assigned_id;
 }
 
 Result<uint64_t> nleAddClip(NleProject& project, EditStacks& history, TimelineClip clip) {
-    if (project.asset(clip.asset_id) == nullptr) {
-        return err(ErrorCode::InvalidArgument, "nle: addClip references unregistered asset");
-    }
-    if (!validLane(clip.lane)) {
-        return err(ErrorCode::InvalidArgument, "nle: addClip lane out of range");
-    }
-    if (clip.start_flicks < 0 || clip.in_flicks < 0 || clip.out_flicks <= clip.in_flicks) {
-        return err(ErrorCode::InvalidArgument, "nle: addClip timing range invalid");
-    }
-    if (clip.id == 0) {
-        clip.id = project.next_id++;
+    auto& [c_id, c_aid, c_name, c_lane, c_st, c_in, c_out, c_gain] = clip;
+    (void)c_name;(void)c_gain;
+    if (project.asset(c_aid) == nullptr) return err(ErrorCode::InvalidArgument, "nle: addClip references unregistered asset");
+    if (!validLane(c_lane)) return err(ErrorCode::InvalidArgument, "nle: addClip lane out of range");
+    if (c_st < 0 || c_in < 0 || c_out <= c_in) return err(ErrorCode::InvalidArgument, "nle: addClip timing range invalid");
+    if (c_id == 0) {
+        c_id = project.next_id++;
     } else {
-        if (project.clip(clip.id) != nullptr) {
-            return err(ErrorCode::InvalidArgument,
-                       "nle: duplicate clip id " + std::to_string(clip.id));
+        if (project.clip(c_id) != nullptr) {
+            return err(ErrorCode::InvalidArgument, "nle: duplicate clip id " + std::to_string(c_id));
         }
-        project.next_id = std::max(project.next_id, clip.id + 1);
+        project.next_id = std::max(project.next_id, c_id + 1);
     }
-    const uint64_t assigned_id = clip.id;
+    const uint64_t assigned_id = c_id;
     NleEditDelta delta = std::pair<bool, TimelineClip>{false, clip};
-    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) {
-        return std::unexpected(applied.error());
-    }
+    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) return std::unexpected(applied.error());
     pushUndo(history, std::move(delta));
     return assigned_id;
 }
@@ -429,21 +370,18 @@ Result<uint64_t> nleAddClip(NleProject& project, EditStacks& history, TimelineCl
 Result<void> nleTrimClip(NleProject& project, EditStacks& history, uint64_t clip_id,
                          int64_t new_in_flicks, int64_t new_out_flicks) {
     auto* target = project.clip(clip_id);
-    if (!target) {
-        return err(ErrorCode::NotFound, "nle: trimClip target not found");
-    }
-    if (new_in_flicks < 0 || new_out_flicks <= new_in_flicks) {
-        return err(ErrorCode::InvalidArgument, "nle: trimClip range invalid");
-    }
-    const auto* a = project.asset(target->asset_id);
-    if (a != nullptr && a->duration_flicks > 0 && new_out_flicks > a->duration_flicks) {
-        return err(ErrorCode::InvalidArgument, "nle: trimClip exceeds asset duration");
+    if (!target) return err(ErrorCode::NotFound, "nle: trimClip target not found");
+    if (new_in_flicks < 0 || new_out_flicks <= new_in_flicks) return err(ErrorCode::InvalidArgument, "nle: trimClip range invalid");
+    const auto& [tid, taid, tnm, tln, tst, tin, tout, tg] = *target;
+    (void)tid;(void)tnm;(void)tln;(void)tst;(void)tg;
+    if (const auto* a = project.asset(taid); a != nullptr) {
+        const auto& [aid, au, an, ap, adur, aw, ah, aoff] = *a;
+        (void)aid;(void)au;(void)an;(void)ap;(void)aw;(void)ah;(void)aoff;
+        if (adur > 0 && new_out_flicks > adur) return err(ErrorCode::InvalidArgument, "nle: trimClip exceeds asset duration");
     }
     NleEditDelta delta = std::tuple<uint64_t, std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>{
-        clip_id, {target->in_flicks, target->out_flicks}, {new_in_flicks, new_out_flicks}};
-    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) {
-        return applied;
-    }
+        clip_id, {tin, tout}, {new_in_flicks, new_out_flicks}};
+    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) return applied;
     pushUndo(history, std::move(delta));
     return {};
 }
@@ -451,19 +389,17 @@ Result<void> nleTrimClip(NleProject& project, EditStacks& history, uint64_t clip
 Result<uint64_t> nleSplitClip(NleProject& project, EditStacks& history, uint64_t clip_id,
                               int64_t split_timeline_flicks) {
     auto* target = project.clip(clip_id);
-    if (!target) {
-        return err(ErrorCode::NotFound, "nle: splitClip target not found");
-    }
-    const int64_t end_flicks = target->start_flicks + nleClipDuration(*target);
-    if (split_timeline_flicks <= target->start_flicks || split_timeline_flicks >= end_flicks) {
+    if (!target) return err(ErrorCode::NotFound, "nle: splitClip target not found");
+    const auto& [tid, taid, tnm, tln, tst, tin, tout, tg] = *target;
+    (void)tid;(void)taid;(void)tnm;(void)tln;(void)tin;(void)tg;
+    const int64_t end_flicks = tst + nleClipDuration(*target);
+    if (split_timeline_flicks <= tst || split_timeline_flicks >= end_flicks) {
         return err(ErrorCode::InvalidArgument, "nle: split point must lie strictly inside clip");
     }
     const uint64_t created_id = project.next_id++;
     NleEditDelta delta = std::tuple<uint64_t, uint64_t, int64_t, int64_t>{
-        clip_id, created_id, split_timeline_flicks, target->out_flicks};
-    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) {
-        return std::unexpected(applied.error());
-    }
+        clip_id, created_id, split_timeline_flicks, tout};
+    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) return std::unexpected(applied.error());
     pushUndo(history, std::move(delta));
     return created_id;
 }
@@ -471,14 +407,12 @@ Result<uint64_t> nleSplitClip(NleProject& project, EditStacks& history, uint64_t
 Result<void> nleMoveClip(NleProject& project, EditStacks& history, uint64_t clip_id,
                          int new_lane, int64_t new_start_flicks) {
     auto* target = project.clip(clip_id);
-    if (!target) {
-        return err(ErrorCode::NotFound, "nle: moveClip target not found");
-    }
-    if (!validLane(new_lane) || new_start_flicks < 0) {
-        return err(ErrorCode::InvalidArgument, "nle: moveClip lane or start invalid");
-    }
+    if (!target) return err(ErrorCode::NotFound, "nle: moveClip target not found");
+    if (!validLane(new_lane) || new_start_flicks < 0) return err(ErrorCode::InvalidArgument, "nle: moveClip lane or start invalid");
+    const auto& [tid, taid, tnm, tln, tst, tin, tout, tg] = *target;
+    (void)tid;(void)taid;(void)tnm;(void)tin;(void)tout;(void)tg;
     NleEditDelta delta = std::tuple<uint64_t, std::pair<int, int64_t>, std::pair<int, int64_t>>{
-        clip_id, {target->lane, target->start_flicks}, {new_lane, new_start_flicks}};
+        clip_id, {tln, tst}, {new_lane, new_start_flicks}};
     if (auto applied = applyDelta(project, delta, false); !applied.has_value()) {
         return applied;
     }
@@ -524,32 +458,32 @@ Result<void> nleRelinkAsset(NleProject& project, EditStacks& history, uint64_t a
         return err(ErrorCode::InvalidArgument, "nle: relinkAsset path must not be empty");
     }
     NleMediaAsset verified = *target;
-    verified.path = std::move(new_path);
-    if (verified_duration_flicks >= 0) {
-        verified.duration_flicks = verified_duration_flicks;
-    }
-    if (verified_width > 0) verified.width = verified_width;
-    if (verified_height > 0) verified.height = verified_height;
-    verified.offline = false;
+    auto& [vid, vuuid, vname, vpath, vdur, vw, vh, voff] = verified;
+    (void)vid;(void)vuuid;(void)vname;
+    vpath = std::move(new_path);
+    if (verified_duration_flicks >= 0) vdur = verified_duration_flicks;
+    if (verified_width > 0) vw = verified_width;
+    if (verified_height > 0) vh = verified_height;
+    voff = false;
 
-    const int64_t new_duration = verified.duration_flicks;
+    const int64_t new_duration = vdur;
     NleEditDelta delta = std::tuple<uint64_t, NleMediaAsset, NleMediaAsset>{
         asset_id, *target, std::move(verified)};
-    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) {
-        return applied;
-    }
+    if (auto applied = applyDelta(project, delta, false); !applied.has_value()) return applied;
     pushUndo(history, std::move(delta));
 
     // 若新素材时长缩短，自动截断所有引用该素材且 out_flicks 越界的片段并压入可逆 Trim delta。
     if (verified_duration_flicks > 0) {
         for (const auto& c : project.clips) {
-            if (c.asset_id != asset_id || c.out_flicks <= new_duration) continue;
-            const int64_t clamped_in = std::min(c.in_flicks, std::max<int64_t>(0, new_duration - 1));
+            const auto& [cid, caid, cnm, cln, cst, cin, cout, cg] = c;
+            (void)cnm;(void)cln;(void)cst;(void)cg;
+            if (caid != asset_id || cout <= new_duration) continue;
+            const int64_t clamped_in = std::min(cin, std::max<int64_t>(0, new_duration - 1));
             const int64_t clamped_out = new_duration;
             if (clamped_out > clamped_in) {
                 NleEditDelta trim_delta =
                     std::tuple<uint64_t, std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>{
-                        c.id, {c.in_flicks, c.out_flicks}, {clamped_in, clamped_out}};
+                        cid, {cin, cout}, {clamped_in, clamped_out}};
                 if (auto trimmed = applyDelta(project, trim_delta, false); trimmed.has_value()) {
                     pushUndo(history, std::move(trim_delta));
                 }

@@ -21,9 +21,9 @@ namespace rtx_ngx {
 class D3D12Interop;
 
 // @rtx-type-justification
-// Category: Polymorphic-Boundary
-// Why-Std-Fails: 抽象/跨层虚接口实现：std::function 单方法无法表达虚析构 + 多方法契约，实现与调用方跨层替换必须经此 is-a 边界。
-// Invariant: 虚表契约稳定；实现方在构造/析构线程亲和与资源归还顺序上的不变量由接口注释约束。
+// Category: NonTrivial-StateMachine
+// Why-Std-Fails: 持有 NGX VSR/TrueHDR Feature Handle、D3D12 CommandList/Allocator 与自适应 TrueHDR 平滑滤波状态机，析构需先等待共享 fence 并按固定逆序释放参数图与特征句柄。
+// Invariant: 所有评估与析构操作受 mutex_ 保护；命令列表关闭与特征释放顺序严格固定。
 class NgxD3D12Bridge {
 public:
     NgxD3D12Bridge();

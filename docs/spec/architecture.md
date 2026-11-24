@@ -1,5 +1,7 @@
 # Architecture
 
+> **v0.4.0 (Phase 12) Governance Note**: As of `v0.4.0`, all build, static audit, and release packaging gates are governed exclusively by pure CMake-native scripts (`cmake/AuditSpdx.cmake`, `cmake/AuditTypes.cmake`, `cmake/AuditSloc.cmake`, `cmake/AuditPrivacy.cmake`, `cmake/AuditImports.cmake`, and `cmake/PackageRelease.cmake`) with zero external `tools/` or `scripts/` directories. Historical references below to legacy `tools/` scripts are superseded by `cmake/*.cmake` and [`docs/spec/compliance.md`](compliance.md).
+
 ## 1. Scope
 
 The engine remasters 720p/1080p SDR sources into 4K HDR10 AV1 Main10 (default on Ada/Blackwell sm_89+) or HEVC Main10 (automatic fallback on pre-Ada architectures), with optional dual-path true frame interpolation. Its distinguishing constraint is that uncompressed frames must never cross the PCIe bus on the NVIDIA path. That constraint drives the stage order, the memory plan, and the plugin boundary.

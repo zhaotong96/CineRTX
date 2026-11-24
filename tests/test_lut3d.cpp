@@ -56,18 +56,18 @@ std::string makeScaledCube(int grid, float scale) {
 }  // namespace
 
 RTX_TEST(lut3d_cube_parse_identity_33) {
-    const Result<Lut3D> lut = Lut3D::parse(makeIdentityCube(33));
+    const Result<Lut3D> lut = parseLut3d(makeIdentityCube(33));
     RTX_REQUIRE(lut.has_value());
-    RTX_CHECK_EQ(lut.value().gridSize(), 33);
-    RTX_CHECK_EQ(lut.value().half4Data().size(), 33u * 33u * 33u * 4u);
+    RTX_CHECK_EQ(lut.value().first, 33);
+    RTX_CHECK_EQ(lut.value().second.size(), 33u * 33u * 33u * 4u);
     for (int b = 0; b < 33; ++b) {
         for (int g = 0; g < 33; g += 4) {
 // Identity accuracy after the FP16 round trip must stay below 1e-3.
             for (int r = 0; r < 33; ++r) {
                 const size_t index = (static_cast<size_t>(b) * 33 + g) * 33 + r;
-                const std::uint16_t hr = lut.value().half4Data()[index * 4u + 0u];
-                const std::uint16_t hg = lut.value().half4Data()[index * 4u + 1u];
-                const std::uint16_t hb = lut.value().half4Data()[index * 4u + 2u];
+                const std::uint16_t hr = lut.value().second[index * 4u + 0u];
+                const std::uint16_t hg = lut.value().second[index * 4u + 1u];
+                const std::uint16_t hb = lut.value().second[index * 4u + 2u];
                 RTX_CHECK_NEAR(halfToFloat(hr), static_cast<float>(r) / 32.0f, 1e-3);
                 RTX_CHECK_NEAR(halfToFloat(hg), static_cast<float>(g) / 32.0f, 1e-3);
                 RTX_CHECK_NEAR(halfToFloat(hb), static_cast<float>(b) / 32.0f, 1e-3);
@@ -76,12 +76,12 @@ RTX_TEST(lut3d_cube_parse_identity_33) {
     }
 }
 RTX_TEST(lut3d_cube_parse_identity_65) {
-    const Result<Lut3D> lut = Lut3D::parse(makeIdentityCube(65));
+    const Result<Lut3D> lut = parseLut3d(makeIdentityCube(65));
     RTX_REQUIRE(lut.has_value());
-    RTX_CHECK_EQ(lut.value().gridSize(), 65);
-    RTX_CHECK_EQ(lut.value().half4Data().size(), 65u * 65u * 65u * 4u);
-    RTX_CHECK_NEAR(halfToFloat(lut.value().half4Data()[3]), 1.0, 1e-6);
-    RTX_CHECK_NEAR(halfToFloat(lut.value().half4Data()[65u * 65u * 65u * 4u - 1u]), 1.0, 1e-6);
+    RTX_CHECK_EQ(lut.value().first, 65);
+    RTX_CHECK_EQ(lut.value().second.size(), 65u * 65u * 65u * 4u);
+    RTX_CHECK_NEAR(halfToFloat(lut.value().second[3]), 1.0, 1e-6);
+    RTX_CHECK_NEAR(halfToFloat(lut.value().second[65u * 65u * 65u * 4u - 1u]), 1.0, 1e-6);
 }
 // Alpha carries 1.0 for every texel (the CUDA half4 layout).
 RTX_TEST(lut3d_half_conversion_round_trip) {
@@ -94,26 +94,26 @@ RTX_TEST(lut3d_half_conversion_round_trip) {
         RTX_CHECK_NEAR(restored, value,
                        std::fabs(value) * 1.01e-3 + 1e-7);
     }
-    const Result<Lut3D> scaled = Lut3D::parse(makeScaledCube(17, 0.5f));
+    const Result<Lut3D> scaled = parseLut3d(makeScaledCube(17, 0.5f));
     RTX_REQUIRE(scaled.has_value());
     const size_t last = 17u * 17u * 17u - 1u;
-    RTX_CHECK_NEAR(halfToFloat(scaled.value().half4Data()[last * 4u + 0u]), 0.5, 1e-3);
+    RTX_CHECK_NEAR(halfToFloat(scaled.value().second[last * 4u + 0u]), 0.5, 1e-3);
 // Scaling: a 0.5-scaled table must map 1.0 -> 0.5 on the diagonal texel.
-    RTX_CHECK_NEAR(halfToFloat(scaled.value().half4Data()[last * 4u + 1u]), 0.5, 1e-3);
-    RTX_CHECK_NEAR(halfToFloat(scaled.value().half4Data()[last * 4u + 2u]), 0.5, 1e-3);
+    RTX_CHECK_NEAR(halfToFloat(scaled.value().second[last * 4u + 1u]), 0.5, 1e-3);
+    RTX_CHECK_NEAR(halfToFloat(scaled.value().second[last * 4u + 2u]), 0.5, 1e-3);
 }
 RTX_TEST(lut3d_rejects_malformed_input) {
-    const Result<Lut3D> one_d = Lut3D::parse("LUT_1D_SIZE 8\n");
+    const Result<Lut3D> one_d = parseLut3d("LUT_1D_SIZE 8\n");
     RTX_REQUIRE(!one_d.has_value());
-    const Result<Lut3D> no_header = Lut3D::parse("0.0 0.0 0.0\n1.0 1.0 1.0\n");
+    const Result<Lut3D> no_header = parseLut3d("0.0 0.0 0.0\n1.0 1.0 1.0\n");
     RTX_REQUIRE(!no_header.has_value());
-    const Result<Lut3D> short_table = Lut3D::parse("LUT_3D_SIZE 4\n0.0 0.0 0.0\n");
+    const Result<Lut3D> short_table = parseLut3d("LUT_3D_SIZE 4\n0.0 0.0 0.0\n");
 // 1D LUTs are unsupported.
     RTX_REQUIRE(!short_table.has_value());
-    const Result<Lut3D> giant = Lut3D::parse("LUT_3D_SIZE 512\n");
+    const Result<Lut3D> giant = parseLut3d("LUT_3D_SIZE 512\n");
 // Missing LUT_3D_SIZE header.
     RTX_REQUIRE(!giant.has_value());
-    const Result<Lut3D> bad_row = Lut3D::parse("LUT_3D_SIZE 2\n0.0 zero 0.0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n");
+    const Result<Lut3D> bad_row = parseLut3d("LUT_3D_SIZE 2\n0.0 zero 0.0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n");
 // Wrong row count.
     RTX_REQUIRE(!bad_row.has_value());
     const std::filesystem::path temp = std::filesystem::temp_directory_path() /
@@ -125,13 +125,13 @@ RTX_TEST(lut3d_rejects_malformed_input) {
         out << makeIdentityCube(33);
 // A valid file still round-trips from disk.
     }
-    const Result<Lut3D> from_disk = Lut3D::loadFromCubeFile(temp);
+    const Result<Lut3D> from_disk = loadLut3dFromCubeFile(temp);
     RTX_REQUIRE(from_disk.has_value());
-    RTX_CHECK_EQ(from_disk.value().gridSize(), 33);
+    RTX_CHECK_EQ(from_disk.value().first, 33);
     std::error_code ec;
     std::filesystem::remove(temp, ec);
     const Result<Lut3D> missing =
-        Lut3D::loadFromCubeFile(std::filesystem::temp_directory_path() /
+        loadLut3dFromCubeFile(std::filesystem::temp_directory_path() /
                                 "cinertx_missing_lut_file.cube");
     RTX_REQUIRE(!missing.has_value());
 }

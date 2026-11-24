@@ -5,56 +5,46 @@
 #include <algorithm>
 #include <chrono>
 #include <format>
-#include <sstream>
 
 namespace rtx {
 
-std::string EncoderJob::formatSummary() const {
+std::string formatEncoderJobSummary(const EncoderJob& job) {
+    const auto& [id, nm, inputs, eo, od, profile, st, fi, fp, tp, fps, el, em, fr] = job;
+    (void)id;(void)nm;(void)eo;(void)od;(void)st;(void)fi;(void)fp;(void)tp;(void)fps;(void)el;(void)em;(void)fr;
     return std::format("{} file(s) | {} {} {} | {} VSR{} | {}",
-        inputs.size(),
-        profile.codec,
-        profile.rate_control,
-        profile.qp,
-        profile.resolution,
-        profile.vsr_quality,
-        profile.fps_mode);
+        inputs.size(), profile.codec, profile.rate_control, profile.qp,
+        profile.resolution, profile.vsr_quality, profile.fps_mode);
 }
-std::string EncoderJob::toJson() const {
-    std::ostringstream oss;
-    oss << "{"
-        << "\"jobId\":" << job_id << ","
-        << "\"name\":\"" << rtx::str::escapeJson(name) << "\","
-        << "\"status\":\"" << jobStatusName(status) << "\","
-        << "\"fileCount\":" << inputs.size() << ","
-        << "\"currentFileIndex\":" << current_file_index << ","
-        << "\"currentFilePct\":" << current_file_pct << ","
-        << "\"totalJobPct\":" << total_job_pct << ","
-        << "\"currentFps\":" << current_fps << ","
-        << "\"summary\":\"" << rtx::str::escapeJson(formatSummary()) << "\","
-        << "\"error\":\"" << rtx::str::escapeJson(error_message) << "\""
-        << "}";
-    return oss.str();
+
+std::string encoderJobToJson(const EncoderJob& job) {
+    const auto& [job_id, name, inputs, eo, od, pr, status, fi, fp, tp, fps, el, error_message, fr] = job;
+    (void)eo;(void)od;(void)pr;(void)el;(void)fr;
+    return std::format(
+        R"({{"jobId":{},"name":"{}","status":"{}","fileCount":{},"currentFileIndex":{},"currentFilePct":{},"totalJobPct":{},"currentFps":{},"summary":"{}","error":"{}"}})",
+        job_id, rtx::str::escapeJson(name), jobStatusName(status), inputs.size(),
+        fi, fp, tp, fps,
+        rtx::str::escapeJson(formatEncoderJobSummary(job)), rtx::str::escapeJson(error_message));
 }
+
 EncoderJobQueue::EncoderJobQueue(RunnerFunc custom_runner)
     : runner_(custom_runner ? std::move(custom_runner) : RunnerFunc(&runNvidiaRemasterTranscode)) {}
 
-EncoderJobQueue::~EncoderJobQueue() noexcept {
-    stopQueue(true);
-}
+EncoderJobQueue::~EncoderJobQueue() noexcept { stopQueue(true); }
+
 void EncoderJobQueue::setEventCallback(EventCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     on_event_ = std::move(cb);
 }
-void EncoderJobQueue::emit(JobQueueEvent::Kind kind, const EncoderJob& job) {
+
+void EncoderJobQueue::emit(JobQueueEventKind kind, const EncoderJob& job) {
     EventCallback cb;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         cb = on_event_;
     }
-    if (cb) {
-        cb(JobQueueEvent{kind, job.job_id, job});
-    }
+    if (cb) cb(JobQueueEvent{kind, encoderJobId(job), job});
 }
+
 Result<uint64_t> EncoderJobQueue::enqueueJob(
     std::vector<std::filesystem::path> inputs,
     const TranscodeProfile& profile,
@@ -62,116 +52,123 @@ Result<uint64_t> EncoderJobQueue::enqueueJob(
     if (inputs.empty()) {
         return err(ErrorCode::InvalidArgument, "enqueueJob requires at least one input file");
     }
-    EncoderJob created;
+    EncoderJob created{};
+    uint64_t created_id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        created.job_id = next_job_id_++;
-        created.inputs = std::move(inputs);
-        created.output_directory = std::move(output_dir);
-        created.profile = profile;
-        created.name = created.inputs.size() == 1
-            ? rtx::str::pathToUtf8(created.inputs.front().filename())
+        auto& [jid, jname, jin, jeo, jod, jprof, jst, jfi, jfp, jtp, jfps, jel, jem, jfr] = created;
+        (void)jeo;(void)jfi;(void)jfp;(void)jtp;(void)jfps;(void)jel;(void)jem;(void)jfr;
+        jid = next_job_id_++;
+        created_id = jid;
+        jin = std::move(inputs);
+        jod = std::move(output_dir);
+        jprof = profile;
+        jst = JobStatus::Pending;
+        jname = jin.size() == 1
+            ? rtx::str::pathToUtf8(jin.front().filename())
             : std::format("{} (+{} files)",
-                rtx::str::pathToUtf8(created.inputs.front().filename()),
-                created.inputs.size() - 1);
+                rtx::str::pathToUtf8(jin.front().filename()), jin.size() - 1);
         jobs_.push_back(created);
     }
     cv_.notify_all();
-    emit(JobQueueEvent::Kind::JobAdded, created);
-    return created.job_id;
+    emit(JobQueueEventKind::JobAdded, created);
+    return created_id;
 }
+
 Result<void> EncoderJobQueue::updatePendingJob(
     uint64_t job_id,
     const TranscodeProfile& new_profile,
     std::optional<std::vector<std::filesystem::path>> new_inputs) {
-    EncoderJob snapshot;
+    EncoderJob snapshot{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = std::find_if(jobs_.begin(), jobs_.end(),
-            [job_id](const EncoderJob& j) { return j.job_id == job_id; });
-        if (it == jobs_.end()) {
-            return err(ErrorCode::NotFound, "Job not found");
-        }
-        if (it->status != JobStatus::Pending) {
-            return err(ErrorCode::State, "Only Pending jobs can be edited");
-        }
-        it->profile = new_profile;
-        if (new_inputs.has_value() && !new_inputs->empty()) {
-            it->inputs = std::move(*new_inputs);
-        }
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
+        if (it == jobs_.end()) return err(ErrorCode::NotFound, "Job not found");
+        auto& [jid, jname, jin, jeo, jod, jprof, jst, jfi, jfp, jtp, jfps, jel, jem, jfr] = *it;
+        (void)jid;(void)jname;(void)jeo;(void)jod;(void)jfi;(void)jfp;(void)jtp;(void)jfps;(void)jel;(void)jem;(void)jfr;
+        if (jst != JobStatus::Pending) return err(ErrorCode::State, "Only Pending jobs can be edited");
+        jprof = new_profile;
+        if (new_inputs.has_value() && !new_inputs->empty()) jin = std::move(*new_inputs);
         snapshot = *it;
     }
-    emit(JobQueueEvent::Kind::JobUpdated, snapshot);
+    emit(JobQueueEventKind::JobUpdated, snapshot);
     return {};
 }
+
 Result<void> EncoderJobQueue::removeJob(uint64_t job_id) {
-    EncoderJob removed;
+    EncoderJob removed{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = std::find_if(jobs_.begin(), jobs_.end(),
-            [job_id](const EncoderJob& j) { return j.job_id == job_id; });
-        if (it == jobs_.end()) {
-            return err(ErrorCode::NotFound, "Job not found");
-        }
-        if (it->status == JobStatus::Running) {
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
+        if (it == jobs_.end()) return err(ErrorCode::NotFound, "Job not found");
+        if (encoderJobStatus(*it) == JobStatus::Running) {
             return err(ErrorCode::State, "Cannot remove Running job; use skipCurrentJob");
         }
         removed = std::move(*it);
         jobs_.erase(it);
     }
-    emit(JobQueueEvent::Kind::JobRemoved, removed);
+    emit(JobQueueEventKind::JobRemoved, removed);
     return {};
 }
+
 Result<void> EncoderJobQueue::moveJob(uint64_t job_id, int delta) {
     if (delta == 0) return {};
-    EncoderJob snapshot;
+    EncoderJob snapshot{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = std::find_if(jobs_.begin(), jobs_.end(),
-            [job_id](const EncoderJob& j) { return j.job_id == job_id; });
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
         if (it == jobs_.end()) return err(ErrorCode::NotFound, "Job not found");
-        if (it->status != JobStatus::Pending) return err(ErrorCode::State, "Only Pending jobs can be reordered");
+        if (encoderJobStatus(*it) != JobStatus::Pending) return err(ErrorCode::State, "Only Pending jobs can be reordered");
 
         const ptrdiff_t idx = std::distance(jobs_.begin(), it);
         const ptrdiff_t target = std::clamp<ptrdiff_t>(idx + delta, 0, static_cast<ptrdiff_t>(jobs_.size()) - 1);
-        if (target != idx && jobs_[static_cast<size_t>(target)].status == JobStatus::Pending) {
+        if (target != idx && encoderJobStatus(jobs_[static_cast<size_t>(target)]) == JobStatus::Pending) {
             std::swap(jobs_[static_cast<size_t>(idx)], jobs_[static_cast<size_t>(target)]);
             snapshot = jobs_[static_cast<size_t>(target)];
         } else {
             return {};
         }
     }
-    emit(JobQueueEvent::Kind::JobReordered, snapshot);
+    emit(JobQueueEventKind::JobReordered, snapshot);
     return {};
 }
+
 void EncoderJobQueue::clearNonRunningJobs(bool completed_only) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::erase_if(jobs_, [completed_only](const EncoderJob& j) {
-        if (j.status == JobStatus::Running) return false;
-        return completed_only ? (j.status == JobStatus::Completed) : true;
+        const JobStatus st = encoderJobStatus(j);
+        if (st == JobStatus::Running) return false;
+        return completed_only ? (st == JobStatus::Completed) : true;
     });
 }
+
 Result<void> EncoderJobQueue::retryJob(uint64_t job_id) {
-    EncoderJob snapshot;
+    EncoderJob snapshot{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = std::find_if(jobs_.begin(), jobs_.end(),
-            [job_id](const EncoderJob& j) { return j.job_id == job_id; });
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
         if (it == jobs_.end()) return err(ErrorCode::NotFound, "Job not found");
-        if (it->status != JobStatus::Failed && it->status != JobStatus::Cancelled) {
+        auto& [jid, jname, jin, jeo, jod, jprof, jst, jfi, jfp, jtp, jfps, jel, jem, jfr] = *it;
+        (void)jid;(void)jname;(void)jin;(void)jeo;(void)jod;(void)jprof;(void)jfps;(void)jel;(void)jfr;
+        if (jst != JobStatus::Failed && jst != JobStatus::Cancelled) {
             return err(ErrorCode::State, "Only Failed or Cancelled jobs can be retried");
         }
-        it->status = JobStatus::Pending;
-        it->error_message.clear();
-        it->current_file_index = 0;
-        it->current_file_pct = 0.0;
-        it->total_job_pct = 0.0;
+        jst = JobStatus::Pending;
+        jem.clear();
+        jfi = 0;
+        jfp = 0.0;
+        jtp = 0.0;
         snapshot = *it;
     }
     cv_.notify_all();
-    emit(JobQueueEvent::Kind::JobUpdated, snapshot);
+    emit(JobQueueEventKind::JobUpdated, snapshot);
     return {};
 }
+
 void EncoderJobQueue::startWorker() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (worker_active_.load()) return;
@@ -181,117 +178,124 @@ void EncoderJobQueue::startWorker() {
     if (worker_thread_.joinable()) worker_thread_.join();
     worker_thread_ = std::thread([this]() { workerLoop(); });
 }
-void EncoderJobQueue::skipCurrentJob() {
-    skip_current_requested_.store(true);
-}
+
+void EncoderJobQueue::skipCurrentJob() { skip_current_requested_.store(true); }
+
 void EncoderJobQueue::stopQueue(bool wait_for_idle) {
     stop_all_requested_.store(true);
     skip_current_requested_.store(true);
     cv_.notify_all();
-    if (wait_for_idle && worker_thread_.joinable()) {
-        worker_thread_.join();
-    }
+    if (wait_for_idle && worker_thread_.joinable()) worker_thread_.join();
 }
-bool EncoderJobQueue::isWorkerRunning() const noexcept {
-    return worker_active_.load();
-}
+
+bool EncoderJobQueue::isWorkerRunning() const noexcept { return worker_active_.load(); }
+
 std::vector<EncoderJob> EncoderJobQueue::snapshotJobs() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return {jobs_.begin(), jobs_.end()};
 }
+
 std::optional<EncoderJob> EncoderJobQueue::findJob(uint64_t job_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = std::find_if(jobs_.begin(), jobs_.end(),
-        [job_id](const EncoderJob& j) { return j.job_id == job_id; });
+        [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
     if (it == jobs_.end()) return std::nullopt;
     return *it;
 }
+
 void EncoderJobQueue::workerLoop() {
     for (;;) {
         uint64_t active_id = 0;
-        EncoderJob job_copy;
+        EncoderJob job_copy{};
         {
             std::unique_lock<std::mutex> lock(mutex_);
             auto it = std::find_if(jobs_.begin(), jobs_.end(),
-                [](const EncoderJob& j) { return j.status == JobStatus::Pending; });
+                [](const EncoderJob& j) { return encoderJobStatus(j) == JobStatus::Pending; });
             if (it == jobs_.end() || stop_all_requested_.load()) {
                 worker_active_.store(false);
                 break;
             }
-            it->status = JobStatus::Running;
-            it->current_file_index = 0;
-            it->current_file_pct = 0.0;
-            it->total_job_pct = 0.0;
-            it->current_fps = 0.0;
-            it->error_message.clear();
-            active_id = it->job_id;
+            auto& [jid, jname, jin, jeo, jod, jprof, jst, jfi, jfp, jtp, jfps, jel, jem, jfr] = *it;
+            (void)jname;(void)jin;(void)jeo;(void)jod;(void)jprof;(void)jel;(void)jfr;
+            jst = JobStatus::Running;
+            jfi = 0;
+            jfp = 0.0;
+            jtp = 0.0;
+            jfps = 0.0;
+            jem.clear();
+            active_id = jid;
             job_copy = *it;
         }
         skip_current_requested_.store(false);
-        emit(JobQueueEvent::Kind::JobStarted, job_copy);
+        emit(JobQueueEventKind::JobStarted, job_copy);
+
+        const auto& [c_id, c_name, c_inputs, c_exp_out, c_out_dir, c_profile,
+                     c_st, c_fi, c_fp, c_tp, c_fps, c_el, c_em, c_fr] = job_copy;
+        (void)c_id;(void)c_name;(void)c_st;(void)c_fi;(void)c_fp;(void)c_tp;(void)c_fps;(void)c_el;(void)c_em;(void)c_fr;
 
         bool job_ok = true;
         std::string err_msg;
         std::vector<HwTranscodeReport> reports;
-        const size_t file_count = std::max<size_t>(1, job_copy.inputs.size());
+        const size_t file_count = std::max<size_t>(1, c_inputs.size());
 
-        for (size_t i = 0; i < job_copy.inputs.size(); ++i) {
+        for (size_t i = 0; i < c_inputs.size(); ++i) {
             if (stop_all_requested_.load() || skip_current_requested_.load()) {
                 job_ok = false;
                 err_msg = "Cancelled";
                 break;
             }
-            TranscodeProfile prof = job_copy.profile;
-            prof.input = rtx::str::pathToUtf8(job_copy.inputs[i]);
-            if (job_copy.inputs.size() == 1 && !job_copy.explicit_output.empty()) {
-                prof.output = rtx::str::pathToUtf8(job_copy.explicit_output);
+            TranscodeProfile prof = c_profile;
+            prof.input = rtx::str::pathToUtf8(c_inputs[i]);
+            if (c_inputs.size() == 1 && !c_exp_out.empty()) {
+                prof.output = rtx::str::pathToUtf8(c_exp_out);
                 prof.auto_output = false;
-            } else if (job_copy.inputs.size() == 1 && !prof.output.empty() && !prof.auto_output) {
+            } else if (c_inputs.size() == 1 && !prof.output.empty() && !prof.auto_output) {
             } else {
                 prof.output.clear();
                 prof.auto_output = true;
             }
             (void)validateAndNormalizeProfile(prof, false);
             HwTranscodeOptions opts = profileToHwOptions(prof);
-            if (!job_copy.output_directory.empty() && prof.auto_output) {
-                opts.output_path = job_copy.output_directory / opts.output_path.filename();
+            if (!c_out_dir.empty() && prof.auto_output) {
+                opts.output_path = c_out_dir / opts.output_path.filename();
             }
             opts.cancel = &skip_current_requested_;
             opts.split_ratio = &active_split_ratio_;
 
             auto last_prog_emit = std::chrono::steady_clock::now() - std::chrono::seconds(1);
             opts.progress = [this, active_id, i, file_count, &last_prog_emit](const HwTranscodeProgress& p) {
+                const auto [frames_dec, frames_enc, total_frames, elapsed_ms] = p;
+                (void)frames_dec;
                 const auto now = std::chrono::steady_clock::now();
                 if (std::chrono::duration<double>(now - last_prog_emit).count() < 0.10 &&
-                    (p.total_frames == 0 || p.frames_encoded < p.total_frames)) {
+                    (total_frames == 0 || frames_enc < total_frames)) {
                     return;
-// Keep explicit single-file output from profile
                 }
                 last_prog_emit = now;
-                const double file_pct = (p.total_frames > 0)
-                    ? std::clamp(static_cast<double>(p.frames_encoded) * 100.0 / static_cast<double>(p.total_frames), 0.0, 100.0)
+                const double file_pct = (total_frames > 0)
+                    ? std::clamp(static_cast<double>(frames_enc) * 100.0 / static_cast<double>(total_frames), 0.0, 100.0)
                     : 0.0;
                 const double total_pct = ((static_cast<double>(i) * 100.0) + file_pct) / static_cast<double>(file_count);
-                const double fps = (p.elapsed_ms > 0.0) ? (static_cast<double>(p.frames_encoded) * 1000.0 / p.elapsed_ms) : 0.0;
+                const double fps = (elapsed_ms > 0.0) ? (static_cast<double>(frames_enc) * 1000.0 / elapsed_ms) : 0.0;
 
-                EncoderJob prog_snap;
+                EncoderJob prog_snap{};
                 bool found = false;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     auto it = std::find_if(jobs_.begin(), jobs_.end(),
-                        [active_id](const EncoderJob& j) { return j.job_id == active_id; });
+                        [active_id](const EncoderJob& j) { return encoderJobId(j) == active_id; });
                     if (it != jobs_.end()) {
-                        it->current_file_index = i;
-                        it->current_file_pct = file_pct;
-                        it->total_job_pct = total_pct;
-                        it->current_fps = fps;
+                        auto& [jid, jname, jin, jeo, jod, jprof, jst, jfi, jfp, jtp, jfps, jel, jem, jfr] = *it;
+                        (void)jid;(void)jname;(void)jin;(void)jeo;(void)jod;(void)jprof;(void)jst;(void)jel;(void)jem;(void)jfr;
+                        jfi = i;
+                        jfp = file_pct;
+                        jtp = total_pct;
+                        jfps = fps;
                         prog_snap = *it;
                         found = true;
                     }
                 }
-                if (found) {
-                    emit(JobQueueEvent::Kind::JobProgress, prog_snap);
-                }
+                if (found) emit(JobQueueEventKind::JobProgress, prog_snap);
             };
 
             auto res = runner_(opts);
@@ -302,50 +306,51 @@ void EncoderJobQueue::workerLoop() {
             }
             reports.push_back(std::move(*res));
 
-            EncoderJob prog_snap;
+            EncoderJob prog_snap{};
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto it = std::find_if(jobs_.begin(), jobs_.end(),
-                    [active_id](const EncoderJob& j) { return j.job_id == active_id; });
+                    [active_id](const EncoderJob& j) { return encoderJobId(j) == active_id; });
                 if (it != jobs_.end()) {
-                    it->current_file_index = i + 1;
-                    it->current_file_pct = 100.0;
-                    it->total_job_pct = (static_cast<double>(i + 1) * 100.0) / static_cast<double>(file_count);
+                    auto& [jid, jname, jin, jeo, jod, jprof, jst, jfi, jfp, jtp, jfps, jel, jem, jfr] = *it;
+                    (void)jid;(void)jname;(void)jin;(void)jeo;(void)jod;(void)jprof;(void)jst;(void)jfps;(void)jel;(void)jem;(void)jfr;
+                    jfi = i + 1;
+                    jfp = 100.0;
+                    jtp = (static_cast<double>(i + 1) * 100.0) / static_cast<double>(file_count);
                     prog_snap = *it;
                 }
             }
-            emit(JobQueueEvent::Kind::JobProgress, prog_snap);
+            emit(JobQueueEventKind::JobProgress, prog_snap);
         }
-        EncoderJob fin_snap;
+        EncoderJob fin_snap{};
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = std::find_if(jobs_.begin(), jobs_.end(),
-                [active_id](const EncoderJob& j) { return j.job_id == active_id; });
+                [active_id](const EncoderJob& j) { return encoderJobId(j) == active_id; });
             if (it != jobs_.end()) {
+                auto& [jid, jname, jin, jeo, jod, jprof, jst, jfi, jfp, jtp, jfps, jel, jem, jfr] = *it;
+                (void)jid;(void)jname;(void)jin;(void)jeo;(void)jod;(void)jprof;(void)jfi;(void)jfp;(void)jfps;(void)jel;
                 if (job_ok) {
-                    it->status = JobStatus::Completed;
-                    it->total_job_pct = 100.0;
+                    jst = JobStatus::Completed;
+                    jtp = 100.0;
                 } else if (skip_current_requested_.load() || stop_all_requested_.load()) {
-                    it->status = JobStatus::Cancelled;
-                    it->error_message = err_msg;
+                    jst = JobStatus::Cancelled;
+                    jem = err_msg;
                 } else {
-                    it->status = JobStatus::Failed;
-                    it->error_message = err_msg;
+                    jst = JobStatus::Failed;
+                    jem = err_msg;
                 }
-                it->file_reports = std::move(reports);
+                jfr = std::move(reports);
                 fin_snap = *it;
             }
             const bool more_pending = !stop_all_requested_.load() &&
                 std::any_of(jobs_.begin(), jobs_.end(),
-                    [](const EncoderJob& j) { return j.status == JobStatus::Pending; });
-            if (!more_pending) {
-                worker_active_.store(false);
-            }
+                    [](const EncoderJob& j) { return encoderJobStatus(j) == JobStatus::Pending; });
+            if (!more_pending) worker_active_.store(false);
         }
-        emit(JobQueueEvent::Kind::JobFinished, fin_snap);
-        if (!worker_active_.load()) {
-            break;
-        }
+        emit(JobQueueEventKind::JobFinished, fin_snap);
+        if (!worker_active_.load()) break;
     }
 }
-} // namespace rtx
+
+}  // namespace rtx
