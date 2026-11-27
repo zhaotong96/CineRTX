@@ -268,15 +268,12 @@ RTX_TEST(param_schema_json_legacy_aliases) {
     auto parsed_hevc = parseProfileFromJson(R"({"codec":"hevc_cpu"})");
     RTX_REQUIRE(parsed_hevc.has_value());
     auto val_hevc = validateAndNormalizeProfile(*parsed_hevc, false);
-    RTX_REQUIRE(!val_hevc.has_value());
-// JSON null leaves the default untouched.
-    RTX_CHECK(val_hevc.error().code == ErrorCode::Unsupported);
+    RTX_REQUIRE(val_hevc.has_value());
 
     auto parsed_av1 = parseProfileFromJson(R"({"codec":"av1_cpu"})");
     RTX_REQUIRE(parsed_av1.has_value());
     auto val_av1 = validateAndNormalizeProfile(*parsed_av1, false);
-    RTX_REQUIRE(!val_av1.has_value());
-    RTX_CHECK(val_av1.error().code == ErrorCode::Unsupported);
+    RTX_REQUIRE(val_av1.has_value());
 
 // Deprecated CPU codecs are parsed by JSON layer but strictly rejected by schema validation.
     auto auto_out = parseProfileFromJson(R"({"autoOutput":false})");
@@ -333,15 +330,17 @@ RTX_TEST(param_schema_cross_field_codec_and_rate_control) {
 
     TranscodeProfile cpu{};
     cpu.codec = "av1_cpu";
+    cpu.rate_control = "crf";
     auto r_cpu = validateAndNormalizeProfile(cpu, false);
-    RTX_REQUIRE(!r_cpu.has_value());
-    RTX_CHECK(r_cpu.error().code == ErrorCode::Unsupported);
+    RTX_REQUIRE(r_cpu.has_value());
+    RTX_CHECK_EQ(cpu.rate_control, std::string("crf"));
 
     TranscodeProfile x265{};
     x265.codec = "hevc_cpu";
+    x265.rate_control = "crf";
     auto r_x265 = validateAndNormalizeProfile(x265, false);
-    RTX_REQUIRE(!r_x265.has_value());
-    RTX_CHECK(r_x265.error().code == ErrorCode::Unsupported);
+    RTX_REQUIRE(r_x265.has_value());
+    RTX_CHECK_EQ(x265.rate_control, std::string("crf"));
 
     TranscodeProfile nvenc{};
     nvenc.codec = "av1";

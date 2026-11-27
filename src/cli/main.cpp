@@ -75,45 +75,7 @@ int opt_h = 1080;
 void printHelp() {
     std::cout << "CineRTX " << RTX_VERSION_STRING << "\n"
               << tr(StrId::AppTitle) << "\n"
-              << "Offline SDR -> 4K HDR10 60fps transcode engine\n\n"
-              << "Usage:\n"
-              << "  CineRTX --probe [--json]\n"
-              << "  CineRTX --schema-json\n"
-              << "  CineRTX --session-stdio\n"
-              << "  CineRTX --input in.mp4 [--output out.mp4] [options]\n"
-              << "  CineRTX --build-rife-engine --onnx model.onnx --engine model.engine [--opt-w W --opt-h H]\n\n"
-              << "Options:\n"
-              << "  --input PATH                 Container input (MP4/MKV)\n"
-              << "  --output PATH                Container output (default: <stem>_remaster_<codec>.mp4)\n"
-              << "  --codec av1|hevc             10-bit HDR10 output video codec (default: av1)\n"
-              << "  --bitrate KBPS               Encoder target bitrate (0 = auto)\n"
-              << "  --preset 1..7                NVENC P1..P7 preset (default 5)\n"
-              << "  --rate-control cq|vbr|cbr|qp Rate control mode (default cq)\n"
-              << "  --qp N                       Constant QP/CQ target (default 22, 0..51)\n"
-              << "  --resolution 4k|2k|fhd|native Output resolution preset (default: 4k)\n"
-              << "  --target-width PX            Explicit output width override (default 3840)\n"
-              << "  --target-height PX           Explicit output height override (default 2160)\n"
-              << "  --target-fps N[/D]           Target frame rate (default 60, 0 = keep input)\n"
-              << "  --no-vsr                     Disable RTX VSR upscaling\n"
-              << "  --vsr-quality 1..4           NGX VSR quality (default 4 Ultra)\n"
-              << "  --peak-nits 400..4000        TrueHDR peak luminance in cd/m^2 (default 1000)\n"
-              << "  --frames N                   Frame limit (0 = whole stream)\n"
-              << "  --pillarbox                  Pad portrait content into 16:9 canvas instead of auto-rotate\n"
-              << "  --no-audio                   Drop audio streams from output\n"
-              << "  --lut PATH                   Apply .cube 3D LUT inside pack kernel\n"
-              << "  --hdr10plus                  Emit SMPTE ST 2094-40 (HDR10+) dynamic metadata\n"
-              << "  --gpu N                      Bind to GPU device N (default 0)\n"
-              << "  --rife-engine PATH           TensorRT RIFE engine path for AI interpolation\n"
-              << "  --build-rife-engine          Build TensorRT engine from RIFE ONNX\n"
-              << "  --onnx PATH                  Input ONNX path for --build-rife-engine\n"
-              << "  --engine PATH                Output engine path for --build-rife-engine\n"
-              << "  --opt-w W, --opt-h H         Optimal profile resolution for --build-rife-engine (default: 1920x1080)\n"
-              << "  --schema-json                Export SSOT parameter schema & bilingual i18n dictionary as JSON\n"
-              << "  --session-stdio              Run JSON-over-stdio interactive transcode session (WebUI bridge)\n"
-              << "  --json                       Machine-readable JSON output\n"
-              << "  --quiet, --verbose           Logging verbosity (all logs also stream to DebugView)\n"
-              << "  --lang en|zh                 Output language (default: zh)\n"
-              << "  --version, --help            Show version/help\n";
+              << rtx::formatCliHelp() << std::endl;
 }
 bool parseInteger(const std::string& text, int& value) {
     try {
@@ -152,7 +114,9 @@ bool parseOptions(int argc, char** argv, std::string& error) {
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         std::string value;
-        if (argument == "--help" || argument == "-h") {
+        if (argument == "--headless") {
+            continue;
+        } else if (argument == "--help" || argument == "-h") {
             opts::mode = Mode::Help;
         } else if (argument == "--version") {
             opts::mode = Mode::Version;

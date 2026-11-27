@@ -1063,6 +1063,30 @@ class Handler(BaseHTTPRequestHandler):
             elif self.command == "GET" and route == "/api/fs":
                 raw = parse_qs(parsed.query).get("path", [""])[0]
                 self._json({"ok": True, **list_dir(raw)})
+            elif self.command == "GET" and route in ("/api/v1/stream/latest_frame.jpg", "/api/preview/latest.jpg"):
+                import tempfile
+                _tdir = tempfile.gettempdir()
+                _cand = [
+                    (os.path.join(_tdir, "cinertx_latest_preview.jpg"), "image/jpeg"),
+                    (os.path.join(_tdir, "cinertx_latest_preview.bmp"), "image/bmp"),
+                ]
+                _served = False
+                for _p, _mime in _cand:
+                    if os.path.isfile(_p) and os.path.getsize(_p) > 0:
+                        with open(_p, "rb") as _jf:
+                            data = _jf.read()
+                        self.send_response(200)
+                        self.send_header("Content-Type", _mime)
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        _served = True
+                        break
+                if not _served:
+                    self.send_response(204)
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
             elif self.command == "GET" and route == "/api/media":
                 raw = parse_qs(parsed.query).get("path", [""])[0]
                 self._media(raw)

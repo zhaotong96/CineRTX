@@ -350,8 +350,10 @@ RtxResult launchPreprocessBuffer(
     int format = (in_fmt == RTX_PIXEL_P010) ? 2 : 1;
     int full_range = (in_fr != 0) ? 1 : 0;
     int matrix = in_mat;
-    void* args[] = {&y_plane, &uv_plane, &out_ptr, &out_pitch, &width,
-                    &height, &y_pitch, &uv_pitch, &format, &full_range, &matrix};
+    // Doc 47 (Defect 1): PTX rtx_yuv_to_rgb10_buf parameter order is
+    // (y, uv, out, width, height, y_pitch, uv_pitch, format, full_range, matrix, out_pitch).
+    void* args[] = {&y_plane, &uv_plane, &out_ptr, &width, &height,
+                    &y_pitch, &uv_pitch, &format, &full_range, &matrix, &out_pitch};
     const unsigned gx = (static_cast<unsigned>(width) + 15u) / 16u;
     const unsigned gy = (static_cast<unsigned>(height) + 15u) / 16u;
     return launchChecked(g_preprocess_buffer_kernel, "rtx_yuv_to_rgb10_buf", gx, gy, 16, 16, stream, args);

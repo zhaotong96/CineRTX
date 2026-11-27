@@ -276,9 +276,20 @@ int64_t rescaleQ(int64_t timestamp, Rational source_time_base, Rational destinat
         case Rounding::Down:    rnd = AV_ROUND_DOWN; break;
         case Rounding::Up:      rnd = AV_ROUND_UP; break;
     }
-    const AVRational src{static_cast<int>(source_time_base.num), static_cast<int>(source_time_base.den)};
-    const AVRational dst{static_cast<int>(destination_time_base.num), static_cast<int>(destination_time_base.den)};
-    return av_rescale_q_rnd(timestamp, src, dst, rnd);
+    int64_t sn = source_time_base.num;
+    int64_t sd = source_time_base.den;
+    int64_t dn = destination_time_base.num;
+    int64_t dd = destination_time_base.den;
+    if (sd < 0) { sn = -sn; sd = -sd; }
+    if (dd < 0) { dn = -dn; dd = -dd; }
+    const int64_t g1 = std::gcd(std::abs(sn), std::abs(dn));
+    if (g1 > 1) { sn /= g1; dn /= g1; }
+    const int64_t g2 = std::gcd(sd, dd);
+    if (g2 > 1) { sd /= g2; dd /= g2; }
+    const int64_t b = sn * dd;
+    const int64_t c = dn * sd;
+    if (c == 0) return 0;
+    return av_rescale_rnd(timestamp, b, c, rnd);
 }
 int64_t rescaleToFlicks(int64_t stream_pts, Rational time_base) {
     if (time_base.num <= 0 || time_base.den <= 0) {

@@ -59,34 +59,6 @@ std::string dtypeToString(nvinfer1::DataType dtype) {
     }
 }
 
-/* MIT-native 8x8 block-SAD shot-boundary detector (eliminates GPLv3 header dependency). */
-bool evalBlockSadSceneCut(const std::array<uint32_t, 64>& block_sad,
-                          uint32_t width, uint32_t height, float& ema_motion) noexcept {
-    if (width == 0 || height == 0) return false;
-    uint64_t total_sad = 0;
-    for (uint32_t s : block_sad) total_sad += s;
-    const double total_denom = static_cast<double>(width) * static_cast<double>(height) * 255.0;
-    const float mu_k = static_cast<float>(static_cast<double>(total_sad) / total_denom);
-    const double block_denom = (std::max)(1.0, static_cast<double>(width) / 8.0) *
-                               (std::max)(1.0, static_cast<double>(height) / 8.0) * 255.0;
-    int outliers = 0;
-    for (uint32_t s : block_sad) {
-        if (static_cast<float>(static_cast<double>(s) / block_denom) > 0.16f) ++outliers;
-    }
-    const float p_outlier = static_cast<float>(outliers) / 64.0f;
-    const float baseline = (std::max)(ema_motion, 0.025f);
-    const bool hard_cut = (mu_k > 0.22f) ||
-                          (mu_k > 0.085f && mu_k > 3.2f * baseline && p_outlier >= 0.30f) ||
-                          (p_outlier >= 0.375f && mu_k > 2.4f * ema_motion);
-    if (hard_cut) {
-        ema_motion = 0.03f;
-    } else {
-        constexpr float kAlpha = 2.0f / 9.0f;
-        ema_motion = (1.0f - kAlpha) * ema_motion + kAlpha * mu_k;
-    }
-    return hard_cut;
-}
-
 }  // namespace
 
 RifeEngine::~RifeEngine() {
@@ -103,10 +75,14 @@ void RifeEngine::releaseTrtObjects() noexcept {
 }
 
 void RifeEngine::resetFramePairCache() noexcept {
+    ++cache_generation_;
     last_prev_nv12_ = 0;
     last_curr_nv12_ = 0;
     last_pitch_ = 0;
+    last_alpha_ = -1.0f;
+    last_full_range_ = -1;
     last_scene_cut_ = 0;
+    ema_motion_ = 0.03f;
     cache_valid_ = false;
 }
 
@@ -122,6 +98,10 @@ void RifeEngine::releaseBuffers() noexcept {
     }
     input_bytes_ = 0;
     output_bytes_ = 0;
+    if (rife_stream_) {
+        (void)nv_cuda::streamDestroy(rife_stream_);
+        rife_stream_ = nullptr;
+    }
     resetFramePairCache();
 }
 
@@ -158,8 +138,9 @@ bool RifeEngine::loadEngineEx(const char* engine_path, uint32_t width, uint32_t 
     bool found_existing = !resolved_engine.empty() &&
                           std::filesystem::exists(resolved_engine, ec) &&
                           std::filesystem::file_size(resolved_engine, ec) > 0;
-    const bool is_portrait = (height > width && width > 0);
-    const std::string preferred_name = is_portrait ? "rife_v4.25_portrait.engine" : "rife_v4.25_landscape.engine";
+    // Phase 13 (Wave 2-A, [DEC-011]): 4-bucket discrete single-profile selection.
+    const RifeAspectBucket aspect_bucket = classifyRifeBucket(width, height);
+    const std::string preferred_name = rifeBucketEngineFilename(aspect_bucket);
 
     if (!found_existing) {
         std::vector<std::filesystem::path> base_dirs;
@@ -206,7 +187,7 @@ bool RifeEngine::loadEngineEx(const char* engine_path, uint32_t width, uint32_t 
                 break;
             }
         }
-        if (!found_existing && !is_portrait) {
+        if (!found_existing && aspect_bucket == RifeAspectBucket::Wide) {
             for (const auto& dir : base_dirs) {
                 const auto candidate = dir / "rife_v4.25.engine";
                 const auto fsz = std::filesystem::exists(candidate, ec) ? std::filesystem::file_size(candidate, ec) : 0ull;
@@ -257,7 +238,8 @@ bool RifeEngine::loadEngineEx(const char* engine_path, uint32_t width, uint32_t 
             }
         }
     }
-    if (resolved_engine.filename() == "rife_v4.25.engine") {
+    if (resolved_engine.filename() != preferred_name &&
+        resolved_engine.filename().string().starts_with("rife_v4.25")) {
         const auto sibling = resolved_engine.parent_path() / preferred_name;
         std::error_code sib_ec;
         if (std::filesystem::exists(sibling, sib_ec) &&
@@ -569,6 +551,13 @@ bool RifeEngine::loadEngineEx(const char* engine_path, uint32_t width, uint32_t 
         }
     }
 
+    // Doc 57 (Task 3.3): Create dedicated CU_STREAM_NON_BLOCKING (flags=1) stream for RIFE isolation.
+    if (!rife_stream_) {
+        void* created_stream = nullptr;
+        if (nv_cuda::streamCreate(&created_stream, 1u) == 0 && created_stream != nullptr) {
+            rife_stream_ = created_stream;
+        }
+    }
     const uint64_t trt_workspace = static_cast<uint64_t>(engine->getDeviceMemorySizeV2());
     trt_peak_allocation_bytes_ = trt_workspace + static_cast<uint64_t>(input_bytes_ + output_bytes_);
     if (out_trt_peak_bytes) *out_trt_peak_bytes = trt_peak_allocation_bytes_;
@@ -578,9 +567,14 @@ bool RifeEngine::loadEngineEx(const char* engine_path, uint32_t width, uint32_t 
 int32_t RifeEngine::interpolate(
     uint64_t prev_nv12, uint64_t curr_nv12, uint32_t pitch, float alpha,
     uint64_t out_nv12, int32_t full_range, int32_t* scene_cut, void* stream) {
-    if (!context_ || prev_nv12 == 0 || curr_nv12 == 0 || out_nv12 == 0 || pitch == 0) {
+    // Doc 57 (Task 1): Fail-fast geometry & pitch guard before any VRAM access or kernel launch.
+    if (!context_ || prev_nv12 == 0 || curr_nv12 == 0 || out_nv12 == 0 ||
+        width_ == 0u || height_ == 0u || pitch < width_ || (pitch & 1u) != 0u) {
         return RTX_ERR_INVALID_ARGUMENT;
     }
+    // Doc 57 (Task 3.3): Isolate on dedicated CU_STREAM_NON_BLOCKING stream when caller passes nullptr.
+    const bool using_internal_stream = (stream == nullptr && rife_stream_ != nullptr);
+    void* effective_stream = using_internal_stream ? rife_stream_ : stream;
     ++interpolate_calls_;
     if (scene_cut) *scene_cut = 0;
 
@@ -592,19 +586,21 @@ int32_t RifeEngine::interpolate(
     bool reuse = false;
     int32_t effective_scene_cut = 0;
     if (variant_ == Variant::SingleTensor7Ch && cache_valid_ &&
+        last_cache_generation_ == cache_generation_ &&
         prev_nv12 == last_prev_nv12_ && curr_nv12 == last_curr_nv12_ &&
-        pitch == last_pitch_ && d_input_fp32_scratch_ != 0) {
+        pitch == last_pitch_ && full_range == last_full_range_ &&
+        alpha > last_alpha_ && d_input_fp32_scratch_ != 0) {
         const uint64_t fp32_ch6 = d_input_fp32_scratch_ + 6ULL * plane_pixels * sizeof(float);
         uint32_t alpha_bits = 0;
         std::memcpy(&alpha_bits, &alpha, sizeof(alpha_bits));
         bool queued = false;
         if (in_dt == nvinfer1::DataType::kHALF && d_input_tensor_ != 0) {
             const uint64_t fp16_ch6 = d_input_tensor_ + 6ULL * plane_pixels * sizeof(uint16_t);
-            if (nv_cuda::memsetD32Async(fp32_ch6, alpha_bits, plane_pixels, stream) == 0) {
-                queued = (launchFp32ToFp16(fp32_ch6, fp16_ch6, static_cast<uint32_t>(plane_pixels), stream) == RTX_OK);
+            if (nv_cuda::memsetD32Async(fp32_ch6, alpha_bits, plane_pixels, effective_stream) == 0) {
+                queued = (launchFp32ToFp16(fp32_ch6, fp16_ch6, static_cast<uint32_t>(plane_pixels), effective_stream) == RTX_OK);
             }
         } else {
-            queued = (nv_cuda::memsetD32Async(fp32_ch6, alpha_bits, plane_pixels, stream) == 0);
+            queued = (nv_cuda::memsetD32Async(fp32_ch6, alpha_bits, plane_pixels, effective_stream) == 0);
         }
         if (queued) {
             ++cache_reuse_;
@@ -615,16 +611,16 @@ int32_t RifeEngine::interpolate(
     if (!reuse) {
         ++preprocess_launches_;
         RtxResult prep_res = RTX_OK;
-        if (d_sad_sum_) (void)nv_cuda::memsetD32Async(d_sad_sum_, 0, 2, stream);
+        if (d_sad_sum_) (void)nv_cuda::memsetD32Async(d_sad_sum_, 0, 2, effective_stream);
         if (variant_ == Variant::SingleTensor7Ch) {
             prep_res = launchRifePreprocess(
                 std::make_tuple(prev_nv12, uint64_t{0}, curr_nv12, uint64_t{0}, d_input_fp32_scratch_,
                                 width_, height_, pitch, pitch, padded_width_, padded_height_,
                                 alpha, full_range, d_sad_sum_, reflect_padding_ ? 1 : 0, infer_width_, infer_height_),
-                stream);
+                effective_stream);
             if (prep_res == RTX_OK && in_dt == nvinfer1::DataType::kHALF) {
                 prep_res = launchFp32ToFp16(d_input_fp32_scratch_, d_input_tensor_,
-                                            static_cast<uint32_t>(7 * plane_pixels), stream);
+                                            static_cast<uint32_t>(7 * plane_pixels), effective_stream);
             }
         } else {
             prep_res = launchRifePreprocessSeparate(
@@ -633,20 +629,20 @@ int32_t RifeEngine::interpolate(
                                 d_img0_tensor_, d_img1_tensor_, d_timestep_tensor_,
                                 width_, height_, pitch, pitch, padded_width_, padded_height_,
                                 alpha, full_range, d_sad_sum_, int32_t{1}),
-                stream);
+                effective_stream);
         }
         if (prep_res != RTX_OK) return prep_res;
 
         if (d_block_sad_) {
-            (void)nv_cuda::memsetD32Async(d_block_sad_, 0, 64, stream);
-            (void)launchEvalBlockSad8x8(prev_nv12, curr_nv12, pitch, width_, height_, d_block_sad_, stream);
-            (void)nv_cuda::streamSync(stream);
+            (void)nv_cuda::memsetD32Async(d_block_sad_, 0, 64, effective_stream);
+            (void)launchEvalBlockSad8x8(prev_nv12, curr_nv12, pitch, width_, height_, d_block_sad_, effective_stream);
+            (void)nv_cuda::streamSync(effective_stream);
             std::array<uint32_t, 64> block_sad{};
             (void)nv_cuda::memcpyDtoH(block_sad.data(), d_block_sad_, sizeof(block_sad));
             const bool is_cut = evalBlockSadSceneCut(block_sad, width_, height_, ema_motion_);
             effective_scene_cut = (is_cut || (scene_cut && *scene_cut != 0)) ? 1 : 0;
         } else if (d_sad_sum_) {
-            (void)nv_cuda::streamSync(stream);
+            (void)nv_cuda::streamSync(effective_stream);
             uint64_t host_sad = 0;
             (void)nv_cuda::memcpyDtoH(&host_sad, d_sad_sum_, sizeof(uint64_t));
             const double total_pixels = static_cast<double>(width_) * static_cast<double>(height_);
@@ -659,34 +655,44 @@ int32_t RifeEngine::interpolate(
             last_prev_nv12_ = prev_nv12;
             last_curr_nv12_ = curr_nv12;
             last_pitch_ = pitch;
+            last_alpha_ = alpha;
+            last_full_range_ = full_range;
+            last_cache_generation_ = cache_generation_;
             last_scene_cut_ = effective_scene_cut;
             cache_valid_ = true;
         }
     }
+    last_alpha_ = alpha;
     if (scene_cut) *scene_cut = effective_scene_cut;
     if (effective_scene_cut != 0) {
         const uint64_t src = (alpha < 0.5f) ? prev_nv12 : curr_nv12;
-        (void)nv_cuda::memcpyDtoDAsync(out_nv12, src, total_nv12_bytes, stream);
+        (void)nv_cuda::memcpyDtoDAsync(out_nv12, src, total_nv12_bytes, effective_stream);
+        if (using_internal_stream) (void)nv_cuda::streamSync(effective_stream);
         return RTX_OK;
     }
-    if (!static_cast<nvinfer1::IExecutionContext*>(context_)->enqueueV3(reinterpret_cast<cudaStream_t>(stream))) {
+    if (!static_cast<nvinfer1::IExecutionContext*>(context_)->enqueueV3(reinterpret_cast<cudaStream_t>(effective_stream))) {
         const uint64_t src = (alpha < 0.5f) ? prev_nv12 : curr_nv12;
-        (void)nv_cuda::memcpyDtoDAsync(out_nv12, src, total_nv12_bytes, stream);
+        (void)nv_cuda::memcpyDtoDAsync(out_nv12, src, total_nv12_bytes, effective_stream);
+        if (using_internal_stream) (void)nv_cuda::streamSync(effective_stream);
         return RTX_ERR_INTERNAL;
     }
     if (out_dt == nvinfer1::DataType::kHALF) {
         const size_t out_elems = 3ULL * static_cast<size_t>(padded_width_) * static_cast<size_t>(padded_height_);
         if (const int32_t cvt_res = launchFp16ToFp32(d_output_tensor_, d_output_fp32_scratch_,
-                                                     static_cast<uint32_t>(out_elems), stream);
+                                                     static_cast<uint32_t>(out_elems), effective_stream);
             cvt_res != RTX_OK) {
             return cvt_res;
         }
     }
-    return launchRifePostprocess(
+    const RtxResult post_res = launchRifePostprocess(
         std::make_tuple(d_output_fp32_scratch_, out_nv12, uint64_t{0},
                         width_, height_, pitch, pitch, padded_width_, padded_height_,
                         full_range, infer_width_, infer_height_),
-        stream);
+        effective_stream);
+    if (post_res == RTX_OK && using_internal_stream) {
+        (void)nv_cuda::streamSync(effective_stream);
+    }
+    return post_res;
 }
 
 }  // namespace rtx_ngx

@@ -12,8 +12,11 @@
 #pragma once
 
 #include <cstdint>
+#include <format>
 #include <string>
+#include <span>
 #include <string_view>
+#include <utility>
 
 #include "rtx/status.h"
 
@@ -187,5 +190,26 @@ StrId strIdForError(ErrorCode code) noexcept;
 // Exports the complete bilingual dictionary {"en":{...},"zh":{...}} as JSON
 // so WebUI and external tools never duplicate translations.
 std::string exportI18nJson();
+
+
+// Phase 13 (Wave 4-A): Zero-heap named placeholder interpolation ({key} -> value) into caller stack buffer.
+[[nodiscard]] std::string_view formatI18nTemplate(
+    std::string_view tmpl,
+    std::span<const std::pair<std::string_view, std::string_view>> args,
+    char* out_buf,
+    size_t out_cap) noexcept;
+
+
+// Wave D-2 (80_ Task D-2): Single-source std::vformat interpolation (stateless, zero global flags).
+[[nodiscard]] inline std::string formatI18nVFormat(StrId id, std::format_args args) {
+    const std::string pattern = tr(id);
+    return std::vformat(pattern, args);
+}
+
+template <typename... Args>
+[[nodiscard]] inline std::string formatI18n(StrId id, Args&&... args) {
+    const std::string pattern = tr(id);
+    return std::vformat(pattern, std::make_format_args(args...));
+}
 
 }  // namespace rtx

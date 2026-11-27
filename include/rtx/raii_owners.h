@@ -37,6 +37,7 @@
 #endif
 #include <unknwn.h>
 #include <windows.h>
+#include "rtx/sys_dynload.h"
 #endif
 
 namespace rtx {
@@ -61,13 +62,13 @@ struct FnDeleter {
 }
 using UniqueHandle = std::unique_ptr<void, FnDeleter<&CloseHandle>>;
 using UniqueModule = std::unique_ptr<HINSTANCE__, FnDeleter<&FreeLibrary>>;
-using UniqueHwnd = std::unique_ptr<HWND__, FnDeleter<&DestroyWindow>>;
-using UniqueBrush = std::unique_ptr<HBRUSH__, FnDeleter<&DeleteObject>>;
-using UniqueFont = std::unique_ptr<HFONT__, FnDeleter<&DeleteObject>>;
-using UniqueBitmap = std::unique_ptr<HBITMAP__, FnDeleter<&DeleteObject>>;
+using UniqueHwnd = std::unique_ptr<HWND__, FnDeleter<&rtx::sys::destroyWindow>>;
+using UniqueBrush = std::unique_ptr<HBRUSH__, FnDeleter<&rtx::sys::deleteObject>>;
+using UniqueFont = std::unique_ptr<HFONT__, FnDeleter<&rtx::sys::deleteObject>>;
+using UniqueBitmap = std::unique_ptr<HBITMAP__, FnDeleter<&rtx::sys::deleteObject>>;
 
 [[nodiscard]] inline UniqueBrush makeSolidBrush(COLORREF color) noexcept {
-    return UniqueBrush{CreateSolidBrush(color)};
+    return UniqueBrush{rtx::sys::createSolidBrush(color)};
 }
 
 inline void releaseComUnknown(void* p) noexcept {

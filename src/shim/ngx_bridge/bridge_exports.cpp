@@ -20,6 +20,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -28,13 +29,16 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <string>
 #include <tuple>
 
 #include "d3d12_interop.h"
+#include "nv_func_tables.h"
 #include "nvof_engine.h"
 #include "p010_pack_runtime.h"
 #include "rife_engine.h"
+#include "rife_pack_runtime.h"
 #if defined(RTX_HAVE_NGX_SDK)
 #include "ngx_d3d12_bridge.h"
 #endif
@@ -74,6 +78,9 @@ struct RtxNgxBridge {
     size_t upload_bytes = 0;
     uint64_t interp_buffer = 0;
     size_t interp_bytes = 0;
+    uint64_t nvof_d_block_sad = 0;
+    float nvof_ema_motion = 0.03f;
+    int32_t last_nvof_scene_cut = 0;
     std::unique_ptr<rtx_ngx::NvofEngine> nvof_engine;
     std::unique_ptr<rtx_ngx::RifeEngine> rife_engine;
 
@@ -90,7 +97,7 @@ struct RtxNgxBridge {
             for (uint64_t& buffer : p010_ring) {
                 if (buffer != 0) { (void)interop->free_device(buffer, &ignored); buffer = 0; }
             }
-            for (uint64_t* dev : {&stats_devptr, &upload_buffer, &interp_buffer}) {
+            for (uint64_t* dev : {&stats_devptr, &upload_buffer, &interp_buffer, &nvof_d_block_sad}) {
                 if (*dev != 0) { (void)interop->free_device(*dev, &ignored); *dev = 0; }
             }
             for (uint64_t& buffer : preview_ring) buffer = 0;
@@ -607,7 +614,10 @@ RTX_SHIM_API RtxResult RTX_SHIM_CALL rtx_ngx_bridge_download_preview(
         bridge->error = "rtx_ngx_bridge_download_preview: no preview frame was produced yet";
         return RTX_ERR_UNSUPPORTED;
     }
-    const size_t needed = static_cast<size_t>(bridge->preview_pitch) * 540u;
+    const uint32_t ring_h = bridge->interop->previewRingHeight() > 0u
+        ? bridge->interop->previewRingHeight()
+        : 540u;
+    const size_t needed = static_cast<size_t>(bridge->preview_pitch) * static_cast<size_t>(ring_h);
     if (destination_bytes < needed) {
         bridge->error = "rtx_ngx_bridge_download_preview: destination is too small";
         return RTX_ERR_INVALID_ARGUMENT;
@@ -701,6 +711,32 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_nv12(
                                                bridge->interop->pack_stream());
         }
     }
+    bridge->last_nvof_scene_cut = 0;
+    // Phase 13 (Wave A-1): GPU 8x8 block-SAD shot-boundary detector (eliminates
+    // 8-row CPU sampling & missing stream_synchronize race).
+    if (width >= 16u && height >= 16u && rtx_ngx::nv_cuda::loaded()) {
+        if (bridge->nvof_d_block_sad == 0) {
+            (void)rtx_ngx::nv_cuda::memAlloc(&bridge->nvof_d_block_sad, 64u * sizeof(uint32_t));
+        }
+        if (bridge->nvof_d_block_sad != 0) {
+            void* stream = bridge->interop->pack_stream();
+            (void)rtx_ngx::nv_cuda::memsetD32Async(bridge->nvof_d_block_sad, 0, 64u, stream);
+            (void)rtx_ngx::launchEvalBlockSad8x8(prev_nv12, curr_nv12, pitch, width, height,
+                                                 bridge->nvof_d_block_sad, stream);
+            std::string sync_err;
+            (void)bridge->interop->stream_synchronize(stream, &sync_err);
+            std::array<uint32_t, 64> block_sad{};
+            if (rtx_ngx::nv_cuda::memcpyDtoH(block_sad.data(), bridge->nvof_d_block_sad, sizeof(block_sad)) == 0 &&
+                rtx_ngx::evalBlockSadSceneCut(block_sad, width, height, bridge->nvof_ema_motion)) {
+                bridge->last_nvof_scene_cut = 1;
+                const uint64_t clean_src = (alpha < 0.5f) ? prev_nv12 : curr_nv12;
+                const size_t nv12_bytes = static_cast<size_t>(pitch) * height * 3u / 2u;
+                (void)rtx_ngx::nv_cuda::memcpyDtoDAsync(out_nv12, clean_src, nv12_bytes, stream);
+                (void)bridge->interop->stream_synchronize(stream, &sync_err);
+                return RTX_OK;
+            }
+        }
+    }
     uint64_t fwd_flow = 0, bwd_flow = 0, cost_buffer = 0;
     std::string exec_err;
     RtxResult res = RTX_OK;
@@ -720,6 +756,12 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_nv12(
         (void)bridge->interop->stream_synchronize(bridge->interop->pack_stream(), &sync_err);
     }
     return res;
+}
+
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_consume_nvof_scene_cut(RtxNgxBridge* bridge) {
+    if (!bridge) return 0;
+    std::lock_guard<std::mutex> lock(bridge->remaster_mutex);
+    return std::exchange(bridge->last_nvof_scene_cut, 0);
 }
 
 RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_init_rife(
@@ -779,8 +821,14 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_interpolate_rife(
         bridge->error = "rtx_ngx_bridge_interpolate_rife: " + ctx_err;
         return RTX_ERR_INTERNAL;
     }
-    const uint32_t height = bridge->config.input_height ? static_cast<uint32_t>(bridge->config.input_height) : 1080u;
-    const size_t needed = static_cast<size_t>(pitch) * height * 3u / 2u;
+    // Doc 57 (Task 1): Fail-fast geometry & pitch guard against initialized RIFE engine dimensions.
+    const uint32_t engine_w = bridge->rife_engine->width();
+    const uint32_t engine_h = bridge->rife_engine->height();
+    if (engine_w == 0u || engine_h == 0u || pitch < engine_w || (pitch & 1u) != 0u) {
+        bridge->error = "rtx_ngx_bridge_interpolate_rife: geometry/pitch mismatch with initialized RIFE engine";
+        return RTX_ERR_INVALID_ARGUMENT;
+    }
+    const size_t needed = static_cast<size_t>(pitch) * engine_h * 3u / 2u;
     if (out_nv12 == 0 || (bridge->interp_bytes < needed && out_nv12 == bridge->interp_buffer)) {
         if (!ensureInterpBuffer(bridge, needed)) return RTX_ERR_OUT_OF_MEMORY;
         out_nv12 = bridge->interp_buffer;
@@ -833,11 +881,6 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_playback_pack(
         bridge->error = "rtx_ngx_bridge_playback_pack: requires the headless playback bridge";
         return RTX_ERR_UNSUPPORTED;
     }
-    const uint64_t out_ptr = bridge->interop->previewRingDevicePtr(slot);
-    if (out_ptr == 0) {
-        bridge->error = "rtx_ngx_bridge_playback_pack: the preview ring is unavailable";
-        return RTX_ERR_UNSUPPORTED;
-    }
     void* stream = bridge->interop->pack_stream();
     if (!stream) {
         bridge->error = "rtx_ngx_bridge_playback_pack: the pack stream is unavailable";
@@ -847,6 +890,26 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_playback_pack(
     if (!bridge->interop->bind_context(&error)) {
         bridge->error = "rtx_ngx_bridge_playback_pack: " + error;
         return bridge->interop->pollDeviceLost(nullptr) ? RTX_ERR_DEVICE_LOST : RTX_ERR_INTERNAL;
+    }
+    if (bridge->interop->previewRingWidth() < width ||
+        bridge->interop->previewRingHeight() < height ||
+        bridge->interop->previewRingRowBytes() < width * 4u) {
+        (void)bridge->interop->stream_synchronize(stream, &error);
+        error.clear();
+        if (!bridge->interop->create_shared_buffer_ring(3u, width, height, 4u, &error)) {
+            bridge->error = "rtx_ngx_bridge_playback_pack: " + error;
+            return RTX_ERR_INTERNAL;
+        }
+        for (uint32_t i = 0; i < 3u && i < bridge->interop->previewRingSize(); ++i) {
+            bridge->preview_ring[i] = bridge->interop->previewRingDevicePtr(i);
+        }
+        bridge->preview_pitch = bridge->interop->previewRingRowBytes();
+        bridge->preview_ready = true;
+    }
+    const uint64_t out_ptr = bridge->interop->previewRingDevicePtr(slot);
+    if (out_ptr == 0) {
+        bridge->error = "rtx_ngx_bridge_playback_pack: the preview ring is unavailable";
+        return RTX_ERR_UNSUPPORTED;
     }
     const RtxResult packed = rtx_ngx::launchPreprocessBuffer(
         std::make_tuple(y_plane, uv_plane, out_ptr, static_cast<int32_t>(bridge->interop->previewRingRowBytes()),

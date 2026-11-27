@@ -30,6 +30,8 @@ namespace nv_cuda {
 [[nodiscard]] NvCuResult deviceGet(int* device, int ordinal) noexcept;
 [[nodiscard]] NvCuResult ctxGetCurrent(NvCuContext* ctx) noexcept;
 [[nodiscard]] NvCuResult ctxSetCurrent(NvCuContext ctx) noexcept;
+[[nodiscard]] NvCuResult ctxPushCurrent(NvCuContext ctx) noexcept;
+[[nodiscard]] NvCuResult ctxPopCurrent(NvCuContext* ctx) noexcept;
 [[nodiscard]] NvCuResult primaryCtxRetain(NvCuContext* ctx, int device) noexcept;
 [[nodiscard]] NvCuResult moduleLoadData(NvCuModule* mod, const void* image) noexcept;
 [[nodiscard]] NvCuResult moduleGetFunction(NvCuFunction* fn, NvCuModule mod, const char* name) noexcept;
@@ -49,6 +51,8 @@ namespace nv_cuda {
 [[nodiscard]] NvCuResult memcpyDtoH(void* dst, NvCuDevicePtr src, size_t bytes) noexcept;
 [[nodiscard]] NvCuResult memcpyDtoDAsync(NvCuDevicePtr dst, NvCuDevicePtr src, size_t bytes, NvCuStream stream) noexcept;
 [[nodiscard]] NvCuResult memsetD32Async(NvCuDevicePtr dst, unsigned int value, size_t count, NvCuStream stream) noexcept;
+[[nodiscard]] NvCuResult streamCreate(NvCuStream* stream, unsigned int flags) noexcept;
+[[nodiscard]] NvCuResult streamDestroy(NvCuStream stream) noexcept;
 [[nodiscard]] NvCuResult streamSync(NvCuStream stream) noexcept;
 [[nodiscard]] NvCuResult memcpy2DAsync(const void* copy_desc, NvCuStream stream) noexcept;
 

@@ -208,6 +208,7 @@ void NgxRemasterBridge::publishActivePreviewBridge(NgxRemasterBridge& loader,
         flag.store(0, std::memory_order_release);
     }
     loader.preview_latest_slot_.store(0, std::memory_order_release);
+    loader.preview_generation_.store(0, std::memory_order_release);
     activePreviewMonitor().store(&loader, std::memory_order_release);
 }
 void NgxRemasterBridge::clearActivePreviewBridge(NgxRemasterBridge* loader) noexcept {
@@ -223,6 +224,10 @@ bool NgxRemasterBridge::borrowActivePreview(std::uint32_t slot, void** out_d3d12
 std::uint32_t NgxRemasterBridge::latestPreviewSlot() {
     NgxRemasterBridge* loader = activePreviewMonitor().load(std::memory_order_acquire);
     return loader != nullptr ? loader->latestPublishedSlot() : 0;
+}
+std::uint64_t NgxRemasterBridge::latestPreviewGeneration() noexcept {
+    NgxRemasterBridge* loader = activePreviewMonitor().load(std::memory_order_acquire);
+    return loader != nullptr ? loader->previewGeneration() : 0u;
 }
 PreviewSlotFlags NgxRemasterBridge::previewSlotFlags() {
     NgxRemasterBridge* loader = activePreviewMonitor().load(std::memory_order_acquire);
@@ -244,6 +249,7 @@ bool NgxRemasterBridge::acquirePreviewSlot(std::uint32_t* out_slot) noexcept {
 void NgxRemasterBridge::publishPreviewSlot(std::uint32_t slot) noexcept {
     if (slot < kPreviewSlotCount) {
         preview_latest_slot_.store(slot, std::memory_order_release);
+        preview_generation_.fetch_add(1u, std::memory_order_acq_rel);
     }
 }
 PreviewSlotFlags NgxRemasterBridge::previewSlotFlagsArray() noexcept {
@@ -251,6 +257,9 @@ PreviewSlotFlags NgxRemasterBridge::previewSlotFlagsArray() noexcept {
 }
 std::uint32_t NgxRemasterBridge::latestPublishedSlot() const noexcept {
     return preview_latest_slot_.load(std::memory_order_acquire);
+}
+std::uint64_t NgxRemasterBridge::previewGeneration() const noexcept {
+    return preview_generation_.load(std::memory_order_acquire);
 }
 bool NgxRemasterBridge::borrowPreviewSlot(std::uint32_t slot, void** out_d3d12_device,
                                           void** out_d3d12_resource,
@@ -329,6 +338,7 @@ bool NgxRemasterBridge::open(std::string* error) {
     (void)bindSym(handle_, playback_pack_, "rtx_ngx_bridge_playback_pack");
     (void)bindSym(handle_, upload_frame_, "rtx_ngx_bridge_upload_frame");
     (void)bindSym(handle_, interpolate_nv12_, "rtx_ngx_bridge_interpolate_nv12");
+    (void)bindSym(handle_, consume_nvof_scene_cut_, "rtx_ngx_bridge_consume_nvof_scene_cut");
     (void)bindSym(handle_, get_interp_buffer_, "rtx_ngx_bridge_get_interp_buffer");
     (void)bindSym(handle_, init_rife_, "rtx_ngx_bridge_init_rife");
     (void)bindSym(handle_, init_rife_ex_, "rtx_ngx_bridge_init_rife_ex");
@@ -444,6 +454,9 @@ RtxResult NgxRemasterBridge::interpolateNv12(RtxNgxBridge* bridge, uint64_t prev
     return interpolate_nv12_ != nullptr
                ? static_cast<RtxResult>(interpolate_nv12_(bridge, prev_nv12, curr_nv12, pitch, alpha, out_nv12))
                : RTX_ERR_DLL_MISSING;
+}
+int32_t NgxRemasterBridge::consumeNvofSceneCut(RtxNgxBridge* bridge) const {
+    return consume_nvof_scene_cut_ != nullptr ? consume_nvof_scene_cut_(bridge) : 0;
 }
 uint64_t NgxRemasterBridge::getInterpBuffer(RtxNgxBridge* bridge, uint32_t width, uint32_t height) const {
     return get_interp_buffer_ != nullptr ? get_interp_buffer_(bridge, width, height) : 0;

@@ -184,14 +184,20 @@ void MediaPlaybackSession::Impl::publishTelemetry() {
     telemetrySetU64(snapshot, TelemetrySlot::FramesDecoded, frames_decoded);
     telemetrySetU64(snapshot, TelemetrySlot::FramesRendered, frames_rendered);
     telemetrySetU64(snapshot, TelemetrySlot::FramesDropped, frames_dropped);
-    const auto& [o_fps, o_spd, o_ah, o_vram, o_dev, o_aud] = options;
+    const auto& [o_fps, o_spd, o_ah, o_vram, o_dev, o_aud, o_null_sink, o_gain] = options;
+    (void)o_null_sink; (void)o_gain;
     (void)o_fps; (void)o_spd; (void)o_ah; (void)o_dev; (void)o_aud;
     telemetrySetU64(snapshot, TelemetrySlot::VramBudgetBytes, o_vram);
     telemetrySetU64(snapshot, TelemetrySlot::SequenceEpoch, epoch);
     telemetrySetI64(snapshot, TelemetrySlot::PlayheadFlicks, position);
     telemetrySetU32(snapshot, TelemetrySlot::CurrentFpsX100, measured_fps_x100);
-    telemetrySetI64(snapshot, TelemetrySlot::AvDriftUs, static_cast<int64_t>(
-        static_cast<double>(audio_flicks - position) * 1.0e6 / static_cast<double>(kFlicksPerSecond)));
+    const int64_t av_drift_us = static_cast<int64_t>(
+        static_cast<double>(audio_flicks - position) * 1.0e6 / static_cast<double>(kFlicksPerSecond));
+    const int64_t abs_drift_us = av_drift_us < 0 ? -av_drift_us : av_drift_us;
+    clock_state = (abs_drift_us > 32000) ? PlaybackSyncState::MeltdownBypass
+                : (abs_drift_us > 8000)  ? PlaybackSyncState::AudioDrift
+                                         : PlaybackSyncState::Normal;
+    telemetrySetI64(snapshot, TelemetrySlot::AvDriftUs, av_drift_us);
     telemetryPublish(telemetry, snapshot);
 }
 
@@ -247,6 +253,7 @@ void MediaPlaybackSession::Impl::pumpOnce(std::stop_token stop) {
 
 Result<void> MediaPlaybackSession::Impl::performSeek(int64_t target_flicks, std::stop_token stop) {
     if (auto located = gopSeekTo(seek, target_flicks); !located.has_value()) return located;
+    resetTemporalBuffers();
     releaseAll();
     if (shim->decoderReset(decoder.get()) != RTX_OK) {
         if (auto rec = recreateDecoder(); !rec.has_value()) return rec;
@@ -348,6 +355,7 @@ void MediaPlaybackSession::Impl::videoLoop(std::stop_token stop) {
             continue;
         }
         if (request == Request::StepForward) {
+            resetTemporalBuffers();
             retirePresented();
             fillQueue(stop);
             if (!decode_queue.empty() && !front_presented) presentFront();

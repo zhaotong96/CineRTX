@@ -238,11 +238,7 @@ struct RtxEncoder {
         const GUID& codec = av1 ? NV_ENC_CODEC_AV1_GUID
                                 : (hevc ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID);
         NV_ENC_TUNING_INFO tuning = tuningForPreset(config.preset);
-        constexpr const char* uhq_env = nullptr;  // Phase 12 (HYG-P12-02): hidden env switch removed.
-        if (sdk_13_1_active && config.preset >= 7 && uhq_env != nullptr &&
-            (*uhq_env == '1' || *uhq_env == 'y' || *uhq_env == 'Y')) {
-            tuning = static_cast<NV_ENC_TUNING_INFO>(kNvEncTuningInfoUhq);
-        }
+        (void)sdk_13_1_active;
 
         NV_ENC_PRESET_CONFIG preset_config{};
         preset_config.version = NV_ENC_PRESET_CONFIG_VER;
@@ -274,13 +270,7 @@ struct RtxEncoder {
         out->gopLength = config.gop_length > 0 ? static_cast<uint32_t>(config.gop_length)
                                                : kDefaultGop;
         out->frameIntervalP = 1;  // IPP: one compressed picture per input frame.
-        constexpr const char* bframes_env = nullptr;  // Phase 12 (HYG-P12-02): hidden env switch removed.
-        if (bframes_env != nullptr && *bframes_env != '\0') {
-            const int bf = std::atoi(bframes_env);
-            if (bf > 0) {
-                out->frameIntervalP = static_cast<uint32_t>(1 + bf);
-            }
-        }
+
         out->frameFieldMode = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
         out->mvPrecision = NV_ENC_MV_PRECISION_DEFAULT;
 

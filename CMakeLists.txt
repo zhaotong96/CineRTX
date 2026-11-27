@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.25)
 include(cmake/RtxBootstrap.cmake)
 
 project(CineRTX
-    VERSION 0.4.0
+    VERSION 0.5.0
     DESCRIPTION "Next-generation pure-GPU video remastering & NLE engine for NVIDIA RTX"
     LANGUAGES CXX)
 
@@ -47,6 +47,19 @@ if(RTX_ZIG_EXECUTABLE)
         "\"${RTX_ZIG_EXECUTABLE}\" ar q <TARGET> <LINK_FLAGS> <OBJECTS>")
     set(CMAKE_CXX_ARCHIVE_FINISH
         "\"${RTX_ZIG_EXECUTABLE}\" ar s <TARGET>")
+endif()
+
+if(WIN32 AND NOT MSVC)
+    # MSVC static archives (e.g. nvsdk_ngx_s.lib / cached FFmpeg) embed /DEFAULTLIB:{LIBCMT,libcpmt,OLDNAMES,uuid};
+    # provide empty ar stubs for lld-link while MinGW/Zig CRT & ngx_msvc_crt_compat.cpp supply runtime symbols.
+    set(_rtx_zig_lib_dir "${CMAKE_BINARY_DIR}/zig-compat-libs")
+    file(MAKE_DIRECTORY "${_rtx_zig_lib_dir}")
+    foreach(_stub_lib LIBCMT libcpmt OLDNAMES uuid)
+        if(NOT EXISTS "${_rtx_zig_lib_dir}/lib${_stub_lib}.a")
+            file(WRITE "${_rtx_zig_lib_dir}/lib${_stub_lib}.a" "!<arch>\n")
+        endif()
+    endforeach()
+    link_directories("${_rtx_zig_lib_dir}")
 endif()
 
 set(RTX_VIDEO_SDK_ROOT "" CACHE PATH
@@ -97,6 +110,7 @@ else()
 endif()
 
 # under include/ and src/ must carry a valid @rtx-type-justification block or
+include(cmake/ContractGuard.cmake)
 include(cmake/AuditTypes.cmake)
 
 set(RTX_CORE_SOURCES
@@ -399,6 +413,9 @@ add_library(rtx_ngx_bridge SHARED ${RTX_NGX_BRIDGE_SOURCES}
     src/core/shot_segmenter.cpp
     $<$<PLATFORM_ID:Windows>:src/shim/ngx_bridge/ngx_d3d12_bridge.cpp>)
 add_library(rtx::ngx_bridge ALIAS rtx_ngx_bridge)
+if(WIN32)
+    set_target_properties(rtx_ngx_bridge PROPERTIES PREFIX "")
+endif()
 target_link_libraries(rtx_ngx_bridge PRIVATE rtx_project_options)
 target_compile_definitions(rtx_ngx_bridge PRIVATE RTX_SHIM_EXPORTS=1)
 if(NOT MSVC)
@@ -531,9 +548,7 @@ if(WIN32)
     target_include_directories(CineRTX PRIVATE "${RTX_GENERATED_DIR}")
 endif()
 target_link_libraries(CineRTX PRIVATE rtx_core)
-if(WIN32)
-    target_link_libraries(CineRTX PRIVATE gdi32 user32)
-endif()
+# Wave D-1/D-3 (80_ Task D-1/D-3): gdi32.dll & user32.dll dynamically loaded via rtx::sys on GUI entry -> Static IAT == 1 (kernel32.dll only).
 if(CMAKE_DL_LIBS)
     target_link_libraries(CineRTX PRIVATE ${CMAKE_DL_LIBS})
 endif()
@@ -646,42 +661,8 @@ if(WIN32)
     add_dependencies(CineRTX rtx_ngx_bridge rtx_stage_ngx_plugin)
 endif()
 
-# Ruling 058 (Wave 12.3): Pure console headless CLI probe target for Gate 12.3-1 HEADLESS audit.
-# Reuses existing CLI sources with zero GUI sources, zero user32/gdi32 linkage, and zero new types.
-add_executable(rtx_headless_cli
-    src/cli/main_entry.cpp
-    src/cli/main.cpp
-    src/cli/shim_probe.cpp)
-add_executable(rtx::headless_cli ALIAS rtx_headless_cli)
-target_link_libraries(rtx_headless_cli PRIVATE rtx_core rtx_project_options)
-if(WIN32)
-    target_link_libraries(rtx_headless_cli PRIVATE bcrypt)
-endif()
-if(CMAKE_DL_LIBS)
-    target_link_libraries(rtx_headless_cli PRIVATE ${CMAKE_DL_LIBS})
-endif()
-target_include_directories(rtx_headless_cli PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/shim"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/cli")
-target_compile_definitions(rtx_headless_cli PRIVATE
-    RTX_VERSION_STRING="${PROJECT_VERSION}")
-if(WIN32)
-    if(MSVC)
-        target_compile_options(rtx_headless_cli PRIVATE /Gy $<$<CONFIG:RelWithDebInfo>:/O1>)
-        target_link_options(rtx_headless_cli PRIVATE
-            /SUBSYSTEM:CONSOLE /OPT:REF /OPT:ICF /INCREMENTAL:NO)
-    else()
-        target_compile_options(rtx_headless_cli PRIVATE
-            -Os -ffunction-sections -fdata-sections)
-        target_link_options(rtx_headless_cli PRIVATE
-            -static -static-libgcc -static-libstdc++
-            -Wl,--gc-sections -Wl,--strip-all)
-    endif()
-endif()
-set_target_properties(rtx_headless_cli PROPERTIES
-    OUTPUT_NAME "rtx_headless_cli"
-    PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols"
-    COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/symbols")
+# Phase 13 (Wave 0-A / 76_ Ruling): Single-EXE convergence — rtx_headless_cli physically removed.
+# CineRTX.exe (/SUBSYSTEM:WINDOWS) handles both GUI and --headless / CLI invocations.
 
 set(RTX_TEST_SOURCES
     tests/test_flicks_timebase.cpp

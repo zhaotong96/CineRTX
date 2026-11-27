@@ -19,6 +19,8 @@ extern "C" {
 #include "memory_avio.h"
 #include "rtx/hdr.h"
 #include "rtx/io.h"
+#include "rtx/ngx_remaster.h"
+#include "rtx/shot_segmenter.h"
 #include "rtx/types.h"
 #include "test_util.h"
 
@@ -527,4 +529,111 @@ RTX_TEST(io_display_matrix_passthrough_roundtrip) {
     for (size_t i = 0; i < kRot90.size(); ++i) {
         RTX_CHECK_EQ(reopened->display_matrix[i], kRot90[i]);
     }
+}
+
+RTX_TEST(io_mp4_pcm_audio_transcode_to_aac) {
+    // Synthesize a minimal H.264 video + PCM_S16LE audio stream and mux into in-memory MP4.
+    // FfmpegMuxer must transcode non-MP4 PCM_S16LE via SwrContext + AVAudioFifo -> AAC-LC.
+    std::vector<uint8_t> mp4_bytes;
+    auto muxer = makeMemoryMuxer(&mp4_bytes, "mp4");
+    RTX_REQUIRE(muxer != nullptr);
+
+    const std::vector<uint8_t> hvcc = {
+        0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x78, 0xF0, 0x00, 0xFC, 0xFD, 0xF8, 0xF8, 0x00, 0x00, 0x0F, 0x00,
+    };
+    MediaInfo info{};
+    info.format_name = "mp4";
+    info.codec = VideoCodec::HEVC;
+    info.video_codec = "hevc";
+    info.width = 64;
+    info.height = 48;
+    info.bit_depth = 8;
+    info.frame_rate = Rational{25, 1};
+    info.time_base = Rational{1, 90000};
+    info.extradata = hvcc;
+    info.annex_b = true;
+    info.audio_streams = 1;
+    info.primary_audio_index = 1;
+
+    std::shared_ptr<AVCodecParameters> pcm_par(
+        avcodec_parameters_alloc(), [](AVCodecParameters* p) noexcept { avcodec_parameters_free(&p); });
+    RTX_REQUIRE(pcm_par != nullptr);
+    pcm_par->codec_type = AVMEDIA_TYPE_AUDIO;
+    pcm_par->codec_id = AV_CODEC_ID_PCM_S16LE;
+    pcm_par->sample_rate = 48000;
+    av_channel_layout_default(&pcm_par->ch_layout, 2);
+    pcm_par->format = AV_SAMPLE_FMT_S16;
+    pcm_par->bits_per_coded_sample = 16;
+    info.passthrough_streams.emplace_back(
+        1, 1, static_cast<int>(AV_CODEC_ID_PCM_S16LE), std::string("pcm_s16le"),
+        Rational{1, 48000}, std::static_pointer_cast<void>(pcm_par));
+
+    const Result<void> opened = muxer->open("memory.mp4", info, Hdr10Metadata{});
+    RTX_REQUIRE(opened.has_value());
+
+    Packet vp{};
+    vp.stream_index = 0;
+    vp.pts = 0;
+    vp.dts = 0;
+    vp.duration = 3600;
+    vp.time_base = Rational{1, 90000};
+    vp.keyframe = true;
+    vp.data = {0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFE, 0xFD, 0xFC};
+    RTX_REQUIRE(muxer->writePacket(vp).has_value());
+
+    // Push 3 PCM packets (3 x 1024 stereo int16 samples = 12288 bytes) to exercise SwrContext + AVAudioFifo -> AAC.
+    for (int i = 0; i < 3; ++i) {
+        Packet ap{};
+        ap.stream_index = 1;
+        ap.pts = static_cast<int64_t>(i) * 1024;
+        ap.dts = ap.pts;
+        ap.duration = 1024;
+        ap.time_base = Rational{1, 48000};
+        ap.data.assign(1024u * 2u * sizeof(int16_t), 0u);
+        RTX_REQUIRE(muxer->writePacket(ap).has_value());
+    }
+    RTX_REQUIRE(muxer->finalize().has_value());
+    RTX_CHECK(!mp4_bytes.empty());
+
+    auto demuxer = makeMemoryDemuxer(mp4_bytes);
+    RTX_REQUIRE(demuxer != nullptr);
+    const Result<MediaInfo> probed = demuxer->open("memory.mp4");
+    RTX_REQUIRE(probed.has_value());
+    RTX_CHECK_EQ(probed->audio_streams, 1);
+    bool found_aac = false;
+    for (const auto& [ps_idx, ps_ct, ps_cid, ps_cn, ps_tb, ps_op] : probed->passthrough_streams) {
+        (void)ps_idx; (void)ps_cn; (void)ps_tb; (void)ps_op;
+        if (ps_ct == 1 && ps_cid == static_cast<int>(AV_CODEC_ID_AAC)) {
+            found_aac = true;
+        }
+    }
+    RTX_CHECK(found_aac);
+}
+
+RTX_TEST(shot_analyze_temporal_boundary_bus) {
+    constexpr int kW = 64;
+    constexpr int kH = 64;
+    std::vector<uint8_t> prev_y(kW * kH, 100u);
+    std::vector<uint8_t> same_y(kW * kH, 100u);
+    std::vector<uint8_t> black_y(kW * kH, 4u);
+    std::vector<uint8_t> cut_y(kW * kH, 220u);
+
+    RTX_CHECK(analyze_temporal_boundary(prev_y.data(), same_y.data(), kW, kH, kW) ==
+              TemporalBoundaryType::None);
+    RTX_CHECK(analyze_temporal_boundary(prev_y.data(), black_y.data(), kW, kH, kW) ==
+              TemporalBoundaryType::FadeToBlack);
+    RTX_CHECK(analyze_temporal_boundary(prev_y.data(), cut_y.data(), kW, kH, kW) ==
+              TemporalBoundaryType::HardCut);
+}
+
+RTX_TEST(ngx_preview_generation_monotonic_sync) {
+    NgxRemasterBridge bridge;
+    RTX_CHECK_EQ(bridge.previewGeneration(), 0u);
+    bridge.publishPreviewSlot(0u);
+    RTX_CHECK_EQ(bridge.previewGeneration(), 1u);
+    bridge.publishPreviewSlot(1u);
+    RTX_CHECK_EQ(bridge.previewGeneration(), 2u);
+    bridge.publishPreviewSlot(2u);
+    RTX_CHECK_EQ(bridge.previewGeneration(), 3u);
 }

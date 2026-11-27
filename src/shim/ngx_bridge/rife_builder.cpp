@@ -9,6 +9,7 @@
 
 #include "trt_loader.h"
 #include "ngx_bridge_abi.h"
+#include "rife_engine.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -441,10 +442,13 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
         }
     }
 
+    // Phase 13 (Wave 2-A, [DEC-011]): 4-bucket discrete single-profile geometry.
+    // Keep min_w/min_h = 128 so small synthetic unit-test frames remain inside profile bounds.
     constexpr int min_w = 128, min_h = 128;
-    const bool is_portrait = (height > width && width > 0);
-    const int opt_w = is_portrait ? 1152 : 1920, opt_h = is_portrait ? 1920 : 1152;
-    const int max_w = is_portrait ? 2176 : 3840, max_h = is_portrait ? 3840 : 2176;
+    const auto bucket = rtx_ngx::classifyRifeBucket(
+        static_cast<uint32_t>(width > 0 ? width : 1920),
+        static_cast<uint32_t>(height > 0 ? height : 1080));
+    const auto [opt_w, opt_h, max_w, max_h] = rtx_ngx::rifeBucketProfileDims(bucket);
 
     nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
     for (int32_t i = 0; i < network->getNbInputs(); ++i) {

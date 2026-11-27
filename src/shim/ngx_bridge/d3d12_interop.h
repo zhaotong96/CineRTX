@@ -76,6 +76,8 @@ public:
     void* previewRingResource(size_t slot) const noexcept;
     uint64_t previewRingDevicePtr(size_t slot) const noexcept;
     uint32_t previewRingRowBytes() const noexcept { return preview_ring_row_bytes_; }
+    uint32_t previewRingWidth() const noexcept { return preview_ring_width_; }
+    uint32_t previewRingHeight() const noexcept { return preview_ring_height_; }
     bool clear_p010_black(uint64_t device_ptr, size_t pitch, uint32_t width, uint32_t height,
                           std::string* error);
     bool free_device(uint64_t device_ptr, std::string* error);
@@ -137,6 +139,8 @@ private:
     TextureTuple mid_4k_{nullptr, nullptr, 0, nullptr, nullptr, nullptr, 0, 0, 0, 0};
     std::vector<BufferSlotTuple> preview_ring_;
     uint32_t preview_ring_row_bytes_ = 0;
+    uint32_t preview_ring_width_ = 0;
+    uint32_t preview_ring_height_ = 0;
     std::string diagnostics_;
 };
 

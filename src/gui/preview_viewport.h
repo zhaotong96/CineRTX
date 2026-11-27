@@ -27,6 +27,32 @@ constexpr UINT WM_APP_SPLIT_DRAG = WM_APP + 30;
 
 namespace rtx::gui {
 
+// Phase 13 (Wave 1-B): Zero-new-type dual-side preview color space bitmask flags
+inline constexpr std::uint32_t kPreviewLeftPq      = 1u << 0;
+inline constexpr std::uint32_t kPreviewLeftHlg     = 1u << 1;
+inline constexpr std::uint32_t kPreviewLeftBt2020  = 1u << 2;
+inline constexpr std::uint32_t kPreviewRightPq     = 1u << 3;
+inline constexpr std::uint32_t kPreviewRightHlg    = 1u << 4;
+inline constexpr std::uint32_t kPreviewRightBt2020 = 1u << 5;
+
+// Phase 13 (Wave 2-A): Aspect-fit centered drawRect {offX, offY, drawW, drawH}
+[[nodiscard]] inline std::array<int, 4> computeAspectFitDrawRect(
+    int dst_w, int dst_h, int src_w, int src_h) noexcept {
+    if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) {
+        return {0, 0, dst_w > 0 ? dst_w : 1, dst_h > 0 ? dst_h : 1};
+    }
+    const double sx = static_cast<double>(dst_w) / static_cast<double>(src_w);
+    const double sy = static_cast<double>(dst_h) / static_cast<double>(src_h);
+    const double scale = (sx < sy) ? sx : sy;
+    const int draw_w = (static_cast<int>(src_w * scale + 0.5) > 1) ? static_cast<int>(src_w * scale + 0.5) : 1;
+    const int draw_h = (static_cast<int>(src_h * scale + 0.5) > 1) ? static_cast<int>(src_h * scale + 0.5) : 1;
+    const int off_x = (dst_w - draw_w) / 2;
+    const int off_y = (dst_h - draw_h) / 2;
+    return {off_x, off_y, draw_w, draw_h};
+}
+
+
+
 using PreviewSlotTicket = std::pair<std::shared_ptr<std::array<std::atomic<std::uint32_t>, 3>>, std::uint32_t>;
 
 // @rtx-type-justification
@@ -53,6 +79,10 @@ public:
                        std::uint32_t pitch, std::uint32_t src_width, std::uint32_t src_height,
                        bool input_is_pq, float max_nits,
                        const PreviewSlotTicket& ticket = {}) noexcept;
+    void presentShared(void* borrowed_d3d12_device, void* shared_resource,
+                       std::uint32_t pitch, std::uint32_t src_width, std::uint32_t src_height,
+                       std::uint32_t color_flags, float left_max_nits, float right_max_nits,
+                       const PreviewSlotTicket& ticket = {}) noexcept;
 
     [[nodiscard]] bool lastPresentSkipped() const noexcept { return last_present_skipped_; }
     [[nodiscard]] bool deviceLost() const noexcept { return device_lost_; }
@@ -71,6 +101,7 @@ private:
     bool adoptDevice(void* borrowed_device) noexcept;
     bool createCompositionSwapChain() noexcept;
     bool createViewHeap() noexcept;
+    bool createComputeTarget() noexcept;
     [[nodiscard]] Result<void> markDeviceLost(const char* message) noexcept;
 
     using DCompositionCreateDeviceFn = HRESULT(WINAPI*)(IDXGIDevice*, REFIID, void**);
@@ -81,6 +112,7 @@ private:
     ComPtr<IDCompositionDevice> dcomp_device_;
     ComPtr<IDCompositionTarget> dcomp_target_;
     ComPtr<IDCompositionVisual> visual_;
+    ComPtr<IDCompositionRectangleClip> clip_;
     ComPtr<IDXGIFactory2> factory_;
     ComPtr<ID3D12Device> device_;
     ComPtr<ID3D12CommandQueue> cmd_queue_;
@@ -94,8 +126,11 @@ private:
     ComPtr<ID3D12RootSignature> root_signature_;
     ComPtr<ID3D12PipelineState> pipeline_;
     ComPtr<ID3D12Resource> render_targets_[2];
+    ComPtr<ID3D12Resource> compute_target_;
     ComPtr<IDXGISwapChain4> swap_chain_;
     UINT view_descriptor_size_ = 0;
+    int target_width_ = 960;
+    int target_height_ = 540;
     int width_ = 960;
     int height_ = 540;
     float split_ratio_ = 0.5f;

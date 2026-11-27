@@ -78,6 +78,8 @@ struct MediaPlaybackSession::Impl {
     std::chrono::steady_clock::time_point fps_window{};
     uint64_t fps_window_frames = 0;
     uint32_t measured_fps_x100 = 0;
+    PlaybackSyncState clock_state = PlaybackSyncState::Normal;
+    bool temporal_prev_valid = false;
 #if defined(_WIN32)
     std::atomic<bool> audio_ready{false};
 #endif
@@ -116,6 +118,10 @@ struct MediaPlaybackSession::Impl {
     void setClockPaused(bool paused) noexcept;
     Result<void> recreateDecoder();
     void releaseAll() noexcept;
+    void resetTemporalBuffers() noexcept {
+        temporal_prev_valid = false;
+        clock_state = PlaybackSyncState::Normal;
+    }
     void retirePresented() noexcept;
     void drainDecoder();
     void fillQueue(std::stop_token stop);

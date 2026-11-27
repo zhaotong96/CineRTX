@@ -24,7 +24,7 @@
     "vsrQuality": 4,
     "peakNits": 1000,
     "fpsMode": "60-nvofa",
-    "pipelineOrder": "vsr-first",
+    "pipelineOrder": "fg-first",
     "rifeEngine": "",
     "copyAudio": true,
     "hdr10plus": false,

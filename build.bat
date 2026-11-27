@@ -8,8 +8,8 @@ REM NASM, GNU Make, the git submodules and the static FFmpeg archives - is
 REM provisioned by the CMake configure step, which knows what the build needs.
 REM
 REM A host that already has CMake never needs this script:
-REM     cmake --preset zig-windows
-REM     cmake --build --preset zig-windows
+REM     cmake --preset windows-msvc-ninja
+REM     cmake --build --preset windows-msvc-ninja
 REM
 REM Usage:  build.bat [extra cmake configure args...]
 REM         (all arguments are forwarded to the cmake configure step)
@@ -62,14 +62,33 @@ if not defined CMAKE_EXE (
 for %%D in ("!CMAKE_EXE!") do set "PATH=%%~pD;!PATH!"
 echo [CineRTX-Bootstrap] cmake: !CMAKE_EXE!
 
-REM ---- 2. Hand off. CMake provisions the generator, compiler and deps -------
-"!CMAKE_EXE!" -S "!REPO!" -B "!BDIR!" -G Ninja ^
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
-    -DCMAKE_TOOLCHAIN_FILE="!REPO!\cmake\toolchain-zig.cmake" %*
+REM ---- 2. Pre-build static audit gates (Phase 13 Wave 0-A Guardrail 3) ------
+"!CMAKE_EXE!" -P "!REPO!\cmake\AuditPrivacy.cmake"
+if errorlevel 1 exit /b 1
+"!CMAKE_EXE!" -P "!REPO!\cmake\AuditSpdx.cmake"
+if errorlevel 1 exit /b 1
+"!CMAKE_EXE!" -P "!REPO!\cmake\ContractGuard.cmake"
 if errorlevel 1 exit /b 1
 
-"!CMAKE_EXE!" --build "!BDIR!" -j
-set "RC=!errorlevel!"
+REM ---- 3. Configure & build (single MSVC + Ninja + /MT + /W4 /WX baseline) --
+"!CMAKE_EXE!" --preset windows-msvc-ninja %*
+if errorlevel 1 exit /b 1
+
+"!CMAKE_EXE!" --build --preset windows-msvc-ninja
+if errorlevel 1 exit /b 1
+
+REM ---- 4. Post-build binary & architecture audit gates ----------------------
+"!CMAKE_EXE!" -P "!REPO!\cmake\AuditTypes.cmake"
+if errorlevel 1 exit /b 1
+if exist "!BDIR!\CineRTX.exe" (
+    "!CMAKE_EXE!" "-DTARGET_BIN=!BDIR!\CineRTX.exe" -P "!REPO!\cmake\AuditImports.cmake"
+    if errorlevel 1 exit /b 1
+)
+if exist "!BDIR!\rtx_tests.exe" (
+    "!BDIR!\rtx_tests.exe"
+    if errorlevel 1 exit /b 1
+)
+set "RC=0"
 endlocal & exit /b %RC%
 
 REM ============================================================================

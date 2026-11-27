@@ -159,7 +159,19 @@ std::filesystem::path resolveDefaultRifeEnginePath(std::string_view explicit_pat
     const std::filesystem::path exe_dir = executableDirectory();
     const std::filesystem::path candidates[] = {
         exe_dir / "models" / "rife_v4.25.engine",
+        exe_dir / "models" / "rife_v4.25_wide.engine",
+        exe_dir / "models" / "rife_v4.25_ultra.engine",
+        exe_dir / "models" / "rife_v4.25_square.engine",
+        exe_dir / "models" / "rife_v4.25_tall.engine",
+        exe_dir / "models" / "rife_v4.25_landscape.engine",
+        exe_dir / "models" / "rife_v4.25_portrait.engine",
         std::filesystem::path("models") / "rife_v4.25.engine",
+        std::filesystem::path("models") / "rife_v4.25_wide.engine",
+        std::filesystem::path("models") / "rife_v4.25_ultra.engine",
+        std::filesystem::path("models") / "rife_v4.25_square.engine",
+        std::filesystem::path("models") / "rife_v4.25_tall.engine",
+        std::filesystem::path("models") / "rife_v4.25_landscape.engine",
+        std::filesystem::path("models") / "rife_v4.25_portrait.engine",
         exe_dir / "rife.engine",
         std::filesystem::path("rife.engine"),
     };
@@ -181,11 +193,7 @@ Result<void> validateAndNormalizeProfile(TranscodeProfile& profile, bool require
         }
     });
 
-    if (profile.codec == "av1_cpu" || profile.codec == "hevc_cpu") {
-        return err(ErrorCode::Unsupported,
-                   std::format("CPU video encoder '{}' is not supported in this build; use hardware NVENC codecs ('av1', 'hevc')",
-                               profile.codec));
-    }
+    // Wave 1-B: av1_cpu (libsvtav1) & hevc_cpu (libx265) CRF unlocked.
     if (profile.codec == "h264" || profile.codec == "avc" || profile.codec == "2") {
         return err(ErrorCode::InvalidArgument,
                    "profile.codec 'h264' (8-bit SDR) is not supported by the 10-bit HDR10 remaster pipeline; use 'av1' or 'hevc'");
@@ -204,7 +212,12 @@ Result<void> validateAndNormalizeProfile(TranscodeProfile& profile, bool require
         profile.rate_control = "vbr";
     } else if (profile.rate_control == "constqp" || profile.rate_control == "2") {
         profile.rate_control = "qp";
-    } else if (profile.rate_control == "3" || profile.rate_control == "4" || profile.rate_control == "crf") {
+    } else if (profile.rate_control == "3") {
+        profile.rate_control = "cq";
+    } else if (profile.rate_control == "4") {
+        profile.rate_control = "crf";
+    }
+    if (profile.rate_control == "crf" && profile.codec != "av1_cpu" && profile.codec != "hevc_cpu") {
         profile.rate_control = "cq";
     }
     if (profile.resolution.empty()) {
@@ -288,8 +301,8 @@ Result<void> validateAndNormalizeProfile(TranscodeProfile& profile, bool require
     return {};
 }
 HwTranscodeOptions profileToHwOptions(const TranscodeProfile& profile) {
-    const bool is_cpu = false;
-    const VideoCodec codec = (profile.codec == "hevc") ? VideoCodec::HEVC : VideoCodec::AV1;
+    const bool is_cpu = (profile.codec == "av1_cpu" || profile.codec == "hevc_cpu");
+    const VideoCodec codec = (profile.codec == "hevc" || profile.codec == "hevc_cpu") ? VideoCodec::HEVC : VideoCodec::AV1;
     int rc = 3;
     if (profile.rate_control == "cq") {
         rc = 3;
@@ -300,6 +313,8 @@ HwTranscodeOptions profileToHwOptions(const TranscodeProfile& profile) {
         rc = 1;
     } else if (profile.rate_control == "cbr") {
         rc = 0;
+    } else if (profile.rate_control == "crf") {
+        rc = 4;
     }
     const int geom = (profile.geometry == "pillarbox") ? 1 : 0;
     const bool vsr_before_fg = (profile.pipeline_order != "fg-first");

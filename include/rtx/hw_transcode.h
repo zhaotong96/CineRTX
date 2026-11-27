@@ -14,6 +14,7 @@
 #include "rtx/status.h"
 #include "rtx/types.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -158,4 +159,42 @@ Result<HwTranscodeReport> runNvidiaRemasterTranscode(const HwTranscodeOptions& o
 // Phase 11.2 (Task 5-1 / C-02): runScrubPreview removed -- the fake-playback
 // scrub path performed a 15 Hz D2H readback that the zero-readback monitor
 // (MediaPlaybackSession + rtx_ngx_bridge_borrow_preview) replaces entirely.
+
+// Phase 13 (Wave 4-B): Zero-new-type declarative pipeline topology compiler.
+enum class PipelineStage : uint8_t {
+    Decode  = 0,
+    Fruc    = 1,
+    Vsr     = 2,
+    TrueHdr = 3,
+    Lut3D   = 4,
+    Encode  = 5,
+};
+
+// (ordered_stages, stage_count, estimated_vram_bytes, vsr_before_fg)
+using PipelinePlan = std::tuple<std::array<PipelineStage, 6>, uint8_t, uint64_t, bool>;
+
+[[nodiscard]] inline PipelinePlan evaluatePipelinePlan(
+    const HwTranscodeOptions& opts, int src_w, int src_h, int dst_w, int dst_h) noexcept {
+    std::array<PipelineStage, 6> stages{
+        PipelineStage::Decode, PipelineStage::Encode, PipelineStage::Encode,
+        PipelineStage::Encode, PipelineStage::Encode, PipelineStage::Encode};
+    uint8_t n = 0u;
+    stages[n++] = PipelineStage::Decode;
+    const bool has_vsr = opts.vsr_enabled && (dst_w > src_w || dst_h > src_h || opts.vsr_quality > 0);
+    if (opts.vsr_before_fg) {
+        if (has_vsr) stages[n++] = PipelineStage::Vsr;
+        if (opts.fruc_enabled) stages[n++] = PipelineStage::Fruc;
+    } else {
+        if (opts.fruc_enabled) stages[n++] = PipelineStage::Fruc;
+        if (has_vsr) stages[n++] = PipelineStage::Vsr;
+    }
+    if (opts.peak_nits > 0) stages[n++] = PipelineStage::TrueHdr;
+    if (!opts.lut_path.empty()) stages[n++] = PipelineStage::Lut3D;
+    stages[n++] = PipelineStage::Encode;
+    const uint64_t px = static_cast<uint64_t>(dst_w > 0 ? dst_w : 1920) *
+                        static_cast<uint64_t>(dst_h > 0 ? dst_h : 1080);
+    const uint64_t est_vram = px * 16ULL + (opts.fruc_enabled ? 512ULL * 1024ULL * 1024ULL : 0ULL);
+    return {stages, n, est_vram, opts.vsr_before_fg};
+}
+
 }  // namespace rtx

@@ -42,7 +42,7 @@ int64_t referenceFlicks(int64_t pts, Rational tb) {
 const Rational kContainerTimeBases[] = {
     Rational{1, 1000},     // MP4 / MOV millisecond edit lists
     Rational{1, 90000},    // MPEG-TS / Annex-B 90 kHz
-    Rational{1, 15360},    // non-divisible: 705600000 / 15360 = 45937.5
+    Rational{1, 15360},    // non-divisible: 706305600000 / 15360 = 45983437.5
     Rational{1, 48000},    // audio-sample axis
     Rational{1001, 30000}, // MKV default 29.97 frame period
     Rational{1, 10000000}, // AV_TIME_BASE
@@ -59,13 +59,13 @@ RTX_TEST(flicks_semantics_absolute_projection_exact) {
         }
     }
     const Rational awkward{1, 15360};
-    RTX_CHECK_EQ(absoluteTimestampToFlicks(1, awkward), 45937LL);
+    RTX_CHECK_EQ(absoluteTimestampToFlicks(1, awkward), 45983437LL);
 // 1/15360 is the canonical non-divisible base: one tick is 45937.5 Flicks,
 // so truncation toward zero must lose the half tick, never round it up.
-    RTX_CHECK_EQ(absoluteTimestampToFlicks(2, awkward), 91875LL);
-    RTX_CHECK_EQ(absoluteTimestampToFlicks(3, awkward), 137812LL);
-    RTX_CHECK_EQ(absoluteTimestampToFlicks(-1, awkward), -45937LL);
-    RTX_CHECK_EQ(absoluteTimestampToFlicks(-3, awkward), -137812LL);
+    RTX_CHECK_EQ(absoluteTimestampToFlicks(2, awkward), 91966875LL);
+    RTX_CHECK_EQ(absoluteTimestampToFlicks(3, awkward), 137950312LL);
+    RTX_CHECK_EQ(absoluteTimestampToFlicks(-1, awkward), -45983437LL);
+    RTX_CHECK_EQ(absoluteTimestampToFlicks(-3, awkward), -137950312LL);
 
     RTX_CHECK_EQ(absoluteTimestampToFlicks(1000, Rational{1, 0}), 0LL);
     RTX_CHECK_EQ(absoluteTimestampToFlicks(1000, Rational{0, 1}), 0LL);
@@ -129,7 +129,7 @@ RTX_TEST(flicks_semantics_bframe_reordered_pts) {
 
     std::sort(projected.begin(), projected.end());
     for (size_t i = 0; i < projected.size(); ++i) {
-        RTX_CHECK_EQ(projected[i], static_cast<int64_t>(i) * frame * 705600000LL / 90000);
+        RTX_CHECK_EQ(projected[i], static_cast<int64_t>(i) * frame * static_cast<int64_t>(kFlicksPerSecond / 90000ULL));
     }
     FlicksMonotonicGuard guard{0, false, 0u};
 // No monotonic repair happened: the raw projected PTS still regress.
@@ -222,12 +222,12 @@ RTX_TEST(flicks_semantics_audio_sample_axes) {
 RTX_TEST(flicks_semantics_incremental_remainder_carry) {
     IncrementalFlicksAccumulator accumulator = makeFlicksAccumulator(Rational{1, 15360});
     resetFlicksAccumulator(accumulator, 0);
-    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 45937LL);
+    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 45983437LL);
     RTX_CHECK_EQ(flicksAccumulatorRemainder(accumulator), 7680LL);
 // A non-zero anchor must survive the whole run untouched.
-    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 91875LL);
+    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 91966875LL);
     RTX_CHECK_EQ(flicksAccumulatorRemainder(accumulator), 0LL);
-    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 137812LL);
+    RTX_CHECK_EQ(advanceFlicksStep(accumulator), 137950312LL);
 
     resetFlicksAccumulator(accumulator, 0);
     int64_t last = 0;
@@ -246,7 +246,7 @@ RTX_TEST(flicks_semantics_incremental_remainder_carry) {
     for (int64_t i = 0; i < frames; ++i) {
         last = advanceFlicksStep(film);
     }
-    const int64_t expected = frames * 1001LL * static_cast<int64_t>(kFlicksPerSecond) / 24000;
+    const int64_t expected = frames * rtx::kFlicksNtsc23976;
     RTX_CHECK(last >= expected - 1 && last <= expected + 1);
 
     IncrementalFlicksAccumulator broken = makeFlicksAccumulator(Rational{0, 1});

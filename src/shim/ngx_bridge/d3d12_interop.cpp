@@ -872,7 +872,13 @@ bool D3D12Interop::create_shared_buffer_ring(uint32_t slot_count, uint32_t width
         if (error) *error = "create_shared_buffer_ring: invalid geometry";
         return false;
     }
-    if (!preview_ring_.empty() && preview_ring_row_bytes_ == width * bytes_per_pixel) return true;
+    // Doc 47 (Invariant 1 & 3): 256-byte aligned row_bytes and full (slot_count, width, height) capacity check.
+    const uint32_t row_bytes = ((width * bytes_per_pixel) + 255u) & ~255u;
+    if (!preview_ring_.empty() && preview_ring_.size() == slot_count &&
+        preview_ring_row_bytes_ == row_bytes && preview_ring_width_ >= width &&
+        preview_ring_height_ >= height) {
+        return true;
+    }
     release_shared_buffer_ring();
     if (!bind_context(error)) return false;
     if (!g_cu_get_mapped_buf) {
@@ -880,7 +886,6 @@ bool D3D12Interop::create_shared_buffer_ring(uint32_t slot_count, uint32_t width
         return false;
     }
     ID3D12Device* device = as<ID3D12Device>(device_);
-    const uint32_t row_bytes = width * bytes_per_pixel;
     const unsigned long long total_bytes =
         static_cast<unsigned long long>(row_bytes) * static_cast<unsigned long long>(height);
 
@@ -947,12 +952,16 @@ bool D3D12Interop::create_shared_buffer_ring(uint32_t slot_count, uint32_t width
         slot_ptr = mapped;
     }
     preview_ring_row_bytes_ = row_bytes;
+    preview_ring_width_ = width;
+    preview_ring_height_ = height;
     return true;
 }
 
 void D3D12Interop::release_shared_buffer_ring() noexcept {
     if (preview_ring_.empty()) {
         preview_ring_row_bytes_ = 0;
+        preview_ring_width_ = 0;
+        preview_ring_height_ = 0;
         return;
     }
     std::string ignored;
@@ -974,6 +983,8 @@ void D3D12Interop::release_shared_buffer_ring() noexcept {
     }
     preview_ring_.clear();
     preview_ring_row_bytes_ = 0;
+    preview_ring_width_ = 0;
+    preview_ring_height_ = 0;
 }
 
 bool D3D12Interop::create_mid_texture(uint32_t width, uint32_t height, std::string* error) {

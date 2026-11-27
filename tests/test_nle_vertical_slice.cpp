@@ -147,11 +147,11 @@ RTX_TEST(nle_json_out_of_order_keys_and_duplicate_id_guard) {
         "version": 1,
         "clips": [
             {"id": 10, "assetId": 7, "name": "Reordered", "lane": 1,
-             "startFlicks": 0, "inFlicks": 0, "outFlicks": 705600000, "gain": 0.8}
+             "startFlicks": 0, "inFlicks": 0, "outFlicks": 706305600000, "gain": 0.8}
         ],
         "assets": [
             {"id": 7, "uuid": "u-7", "name": "src.mp4", "path": "media/src.mp4",
-             "durationFlicks": 1411200000, "width": 1920, "height": 1080, "offline": false}
+             "durationFlicks": 1412611200000, "width": 1920, "height": 1080, "offline": false}
         ]
     })";
     auto parsed = NleProject::fromJson(reordered);

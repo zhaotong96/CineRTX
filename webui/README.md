@@ -1,6 +1,6 @@
-# CineRTX WebUI (`v0.4.0`)
+# CineRTX WebUI (`v0.5.0`)
 
-浏览器端的专业转码控制台。与 `CineRTX.exe`（Win32 原生 GUI / CLI 双模单 exe）及 `rtx_headless_cli.exe`（纯无头控制台引擎，物理静态 IAT 仅 `kernel32.dll` + `bcrypt.dll` 2 项）并存的第三种前端形态，面向远程与无桌面算力节点场景。
+浏览器端的专业转码控制台，与统一单入口 `CineRTX.exe`（Win32 原生 GUI / 无头 CLI 一体化单 EXE，物理静态 IAT 仅 `kernel32.dll` 1 项）并存的前端形态，面向远程与无桌面算力节点场景。
 
 ## 文件边界
 
@@ -20,9 +20,8 @@
 ```bash
 # 真实引擎（自动按 state.json 的 engine.path / CINERTX_ENGINE / exe 同级目录解析）
 python webui/server.py --port 8787
-# 显式指定桌面引擎或纯无头控制台引擎与状态文档
+# 显式指定引擎与状态文档
 python webui/server.py --engine .vs/build/cmake/windows-msvc-ninja/CineRTX.exe --state webui/state.json
-python webui/server.py --engine .vs/build/cmake/windows-msvc-ninja/rtx_headless_cli.exe --state webui/state.json
 # 无 RTX 硬件的机器上端到端联调（夹具引擎，模拟 CLI 输出契约）
 python webui/server.py --engine webui/test/mock_cinertx.bat
 ```
@@ -41,7 +40,7 @@ python webui/server.py --engine webui/test/mock_cinertx.bat
 | `GET /api/events` | 订阅 | SSE；每个事件都是一个 JSON 文档：`hello` / `runtime`（进度、报告、日志，≤4Hz）/ `state-file`（外部改盘推送） | 实时遥测事件流 |
 | `GET /api/fs?path=` | 浏览 | 通用 JSON 目录列表（路径选择弹窗） | 服务端跨盘符目录树浏览 |
 | `GET /api/media` | 媒体 | HTTP 206 断点续传视频流 | 原生 HTML5 `<video>` 低延迟视频播放与时间轴拖拽 |
-| `GET /api/health` | 探活 | 引擎解析结果/版本（`0.4.0`）、作业状态 | 服务端心跳与健康探测 |
+| `GET /api/health` | 探活 | 引擎解析结果/版本（`0.5.0`）、作业状态 | 服务端心跳与健康探测 |
 
 ## 状态文档与所有权
 
@@ -81,7 +80,7 @@ CineRTX 全栈以 `include/rtx/param_schema.h` 的 `kParamSchema` 为单一真�
 | 11 | `vsrQuality` | `--vsr-quality` | int | `4` | `1..4`（默认 Level 4 Ultra） |
 | 12 | `peakNits` | `--peak-nits` | int | `1000` | `400..4000` nits（TrueHDR 峰值亮度） |
 | 13 | `fpsMode` | `--target-fps` | enum | `"60-nvofa"` | `"original"`, `"60-nvofa"`, `"120-nvofa"`, `"60-rife"`, `"120-rife"` |
-| 14 | `pipelineOrder` | `--pipeline-order` | enum | `"vsr-first"` | `"vsr-first"`（默认先超分后补帧）, `"fg-first"`（先补帧后超分） |
+| 14 | `pipelineOrder` | `--pipeline-order` | enum | `"fg-first"` | `"fg-first"`（默认先补帧后超分）, `"vsr-first"`（先超分后补帧） |
 | 15 | `rifeEngine` | `--rife-engine` | string | `""` | RIFE TensorRT `.engine` 模型路径 |
 | 16 | `copyAudio` | `--no-audio` | bool | `true` | 音轨与内挂字幕无损直通 |
 | 17 | `hdr10plus` | `--hdr10plus` | bool | `false` | SMPTE ST 2094-40 动态元数据注入 |
@@ -110,7 +109,7 @@ CineRTX 全栈以 `include/rtx/param_schema.h` 的 `kParamSchema` 为单一真�
 
 ## 常驻流通信机制 (`--session-stdio`)
 
-`server.py` 通过长效常驻子进程（`CineRTX.exe --session-stdio` 或 `rtx_headless_cli.exe --session-stdio`）实现高性能无缝调度：
+`server.py` 通过长效常驻子进程（`CineRTX.exe --session-stdio`）实现高性能无缝调度：
 - 采用多行 JSON Lines (JSONL) 标准输入/输出流通信；
 - 每次分发任务向 stdin 写入单行标准 JSON 字典；
 - 引擎内部循环监听并执行转码，零跨进程反复冷启动及显存上下文重建开销；

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -33,6 +34,8 @@
 
 #include "rtx/flicks.h"
 #include "rtx/io.h"
+#include "rtx/ngx_remaster.h"
+#include "rtx/nvidia_shim.h"
 #include "rtx/playback_session.h"
 #include "rtx/rational.h"
 #include "rtx/telemetry_bus.h"
@@ -367,7 +370,7 @@ RTX_TEST(playback_gop_seek_preroll) {
 
     FakeDemuxer odd_demuxer;
     GopSeekScheduler odd_scheduler = makeGopSeekScheduler(odd_demuxer.asSeekFn(), Rational{1, 15360});
-    RTX_REQUIRE(gopSeekTo(odd_scheduler, 45938).has_value());
+    RTX_REQUIRE(gopSeekTo(odd_scheduler, static_cast<int64_t>((kFlicksPerSecond + 15359ULL) / 15360ULL)).has_value());
     RTX_CHECK_EQ(odd_demuxer.last_seek_pts, 1LL);
 
     RTX_CHECK(!gopSeekAccepting(scheduler, 0));
@@ -560,7 +563,7 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
         RTX_CHECK(opened.value().primary_audio_index >= 0);
 
         CountingSink sink;
-        PlaybackOptions options{Rational{25, 1}, 1.0, 5u, 0ull, 0, true};
+        PlaybackOptions options{Rational{25, 1}, 1.0, 5u, 0ull, 0, true, /*null_sink=*/true, /*audio_gain=*/0.0f};
         Result<std::unique_ptr<MediaPlaybackSession>> created =
             MediaPlaybackSession::create(std::move(demuxer), opened.value(), sink.asSink(), options);
         if (!created.has_value()) {
@@ -658,7 +661,7 @@ RTX_TEST(playback_session_native_decode_h264_hevc_av1) {
                     corrupt_opened.error().toString().c_str());
         return;
     }
-    PlaybackOptions corrupt_options{Rational{24, 1}, 1.0, 5u, 0ull, 0, false};
+    PlaybackOptions corrupt_options{Rational{24, 1}, 1.0, 5u, 0ull, 0, false, /*null_sink=*/true, /*audio_gain=*/0.0f};
     CountingSink corrupt_sink;
     Result<std::unique_ptr<MediaPlaybackSession>> corrupt_session = MediaPlaybackSession::create(
         std::move(corrupt_demuxer), corrupt_opened.value(), corrupt_sink.asSink(), corrupt_options);
@@ -687,7 +690,7 @@ RTX_TEST(playback_session_fence_gated_slot_retirement) {
     RTX_REQUIRE(opened.has_value());
 
     GatedFenceSink sink;
-    PlaybackOptions options{Rational{24, 1}, 1.0, 4u, 0ull, 0, false};
+    PlaybackOptions options{Rational{24, 1}, 1.0, 4u, 0ull, 0, false, /*null_sink=*/true, /*audio_gain=*/0.0f};
     Result<std::unique_ptr<MediaPlaybackSession>> created =
         MediaPlaybackSession::create(std::move(demuxer), opened.value(), sink.asSink(), options);
     if (!created.has_value()) {
@@ -725,4 +728,69 @@ RTX_TEST(playback_session_fence_gated_slot_retirement) {
         return session->state() == PlaybackState::Ended;
     }, 20000));
     RTX_CHECK(telemetryU64(session->telemetry(), TelemetrySlot::FramesRendered) >= 4);
+}
+
+RTX_TEST(playback_session_2d_preview_ring_integrity) {
+    NvidiaShim shim;
+    std::string shim_err;
+    RtxDiagnostics diag{};
+    if (!shim.open(&shim_err) || shim.probe(&diag) != RTX_OK) {
+        std::printf("[SKIP-GPU] 2d_preview_ring_integrity: rtx_shim unavailable\n");
+        return;
+    }
+    NgxRemasterBridge loader;
+    std::string bridge_err;
+    if (!loader.open(&bridge_err) || !loader.hasPlaybackPackApi() || !loader.hasBorrowPreviewApi()) {
+        std::printf("[SKIP-GPU] 2d_preview_ring_integrity: rtx_ngx_bridge unavailable\n");
+        return;
+    }
+    // Start with small 64x64 ring to verify Doc 47 Invariant 1 dynamic reallocation on 1920x1080 pack.
+    RtxNgxBridgeConfig cfg{};
+    std::memcpy(cfg.luid, diag.device.luid, sizeof(cfg.luid));
+    cfg.luid_node_mask = diag.device.luid_node_mask;
+    cfg.input_width = 64;
+    cfg.input_height = 64;
+    cfg.output_width = 64;
+    cfg.output_height = 64;
+    cfg.reserved[0] = 1u;
+    RtxNgxBridge* bridge = nullptr;
+    if (loader.create(&cfg, &bridge) != RTX_OK || bridge == nullptr) {
+        std::printf("[SKIP-GPU] 2d_preview_ring_integrity: headless bridge create unavailable\n");
+        return;
+    }
+    constexpr uint32_t kW = 1920u;
+    constexpr uint32_t kH = 1080u;
+    std::vector<uint8_t> y_host(static_cast<size_t>(kW) * kH, 180u);
+    std::vector<uint8_t> uv_host(static_cast<size_t>(kW) * (kH / 2u), 128u);
+    uint64_t y_dev = 0, uv_dev = 0;
+    const RtxResult up = loader.uploadFrame(bridge, y_host.data(), uv_host.data(), kW, kW,
+                                            static_cast<int32_t>(kW), static_cast<int32_t>(kH),
+                                            &y_dev, &uv_dev);
+    if (up != RTX_OK) {
+        loader.releaseBridge(bridge);
+        std::printf("[SKIP-GPU] 2d_preview_ring_integrity: uploadFrame unavailable\n");
+        return;
+    }
+    const int32_t packed = loader.playbackPack(bridge, y_dev, uv_dev, kW, kW, kW, kH,
+                                               RTX_PIXEL_NV12, 0, 0, 0u);
+    RTX_CHECK_EQ(packed, static_cast<int32_t>(RTX_OK));
+    void* d3d_dev = nullptr;
+    void* d3d_res = nullptr;
+    uint32_t out_pitch = 0u;
+    RTX_CHECK_EQ(loader.borrowPreview(bridge, 0u, &d3d_dev, &d3d_res, &out_pitch),
+                 static_cast<int32_t>(RTX_OK));
+    RTX_CHECK(d3d_dev != nullptr && d3d_res != nullptr);
+    RTX_CHECK(out_pitch >= kW * 4u);
+    RTX_CHECK_EQ(out_pitch % 256u, 0u);
+    std::vector<uint8_t> readback(static_cast<size_t>(out_pitch) * kH, 0u);
+    RTX_CHECK_EQ(loader.downloadPreview(bridge, readback.data(), readback.size()), RTX_OK);
+    const auto pixelAt = [&](uint32_t x, uint32_t y) -> uint32_t {
+        uint32_t word = 0u;
+        std::memcpy(&word, readback.data() + static_cast<size_t>(y) * out_pitch + static_cast<size_t>(x) * 4u, 4u);
+        return word;
+    };
+    RTX_CHECK(pixelAt(0u, 0u) != 0u);
+    RTX_CHECK(pixelAt(kW / 2u, kH / 2u) != 0u);
+    RTX_CHECK(pixelAt(kW - 1u, kH - 1u) != 0u);
+    loader.releaseBridge(bridge);
 }

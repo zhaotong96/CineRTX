@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <numeric>
 #include <ratio>
 #include <string>
 #include <tuple>
@@ -29,9 +30,10 @@
 
 namespace rtx {
 
-// 原生标准时间周期（Phase 11.2-R）：705,600,000 Hz 整数时间线的 <chrono> 表达。
-// 1 ns = 441/625 Flicks，编译期严格有理数折算，零浮点魔法常数、零精度丢失。
-using Flicks = std::chrono::duration<int64_t, std::ratio<1, 705600000>>;
+// 原生标准时间周期（Phase 13 统一 1001 因子）：706,305,600,000 Hz 整数时间线的 <chrono> 表达。
+using Flicks = std::chrono::duration<int64_t, std::ratio<1, static_cast<intmax_t>(kFlicksPerSecond)>>;
+static_assert(Flicks::period::den == static_cast<intmax_t>(kFlicksPerSecond),
+              "CRITICAL ERROR: Flicks timebase denominator mismatch with kFlicksPerSecond!");
 
 // The native Flicks time base as a Rational for rescaleQ().  The two-argument
 // Rational constructor normalises at runtime, so this is const, not constexpr.
@@ -54,15 +56,19 @@ inline const TimecodeFormat kDefaultTimecodeFormat{Rational{24, 1}, TimecodeDrop
     const bool negative = pts < 0;
     const uint64_t magnitude = negative ? 0ULL - static_cast<uint64_t>(pts)
                                         : static_cast<uint64_t>(pts);
-// Exact integer conversion on the 705.6 MHz axis, truncated toward zero:
+// Exact integer conversion on the 706,305,600,000 Hz axis, truncated toward zero:
 //   value = pts * num * kFlicksPerSecond / den
 // split into whole+remainder so every intermediate stays inside unsigned
 // 64 bits (num <= 30000 and den <= 1001 keep flicks_per_unit < 2^63).
-    const uint64_t den = static_cast<uint64_t>(time_base.den);
-    const uint64_t num = static_cast<uint64_t>(time_base.num);
+    const uint64_t g = std::gcd(static_cast<uint64_t>(time_base.num),
+                                static_cast<uint64_t>(time_base.den));
+    const uint64_t r_num = static_cast<uint64_t>(time_base.num) / g;
+    const uint64_t r_den = static_cast<uint64_t>(time_base.den) / g;
+    const uint64_t g2 = std::gcd(static_cast<uint64_t>(kFlicksPerSecond), r_den);
+    const uint64_t flicks_per_unit = r_num * (static_cast<uint64_t>(kFlicksPerSecond) / g2);
+    const uint64_t den = r_den / g2;
     const uint64_t whole = magnitude / den;
     const uint64_t rest = magnitude % den;
-    const uint64_t flicks_per_unit = num * static_cast<uint64_t>(kFlicksPerSecond);
     const uint64_t value = whole * flicks_per_unit + (rest * flicks_per_unit) / den;
     return negative ? -static_cast<int64_t>(value) : static_cast<int64_t>(value);
 }
@@ -111,12 +117,19 @@ inline void resetFlicksAccumulator(IncrementalFlicksAccumulator& acc, int64_t ba
     }
     int64_t frames = 0;
     if (flicks > 0) {
-        const uint64_t numerator = static_cast<uint64_t>(flicks) *
-                                   static_cast<uint64_t>(rate.num);
-        const uint64_t divisor = static_cast<uint64_t>(rate.den) * kFlicksPerSecond;
-        frames = static_cast<int64_t>(numerator / divisor);
-// flicks * rate.num fits 64 bits for any programme shorter than ~8 days
-// at the highest supported rate; clamp instead of wrapping beyond that.
+        // Overflow-safe exact floor(flicks * rate.num / (rate.den * kFlicksPerSecond))
+        // for 1001-extended Flicks (706,305,600,000 Hz) without requiring __int128.
+        const uint64_t uflicks = static_cast<uint64_t>(flicks);
+        const uint64_t rnum = static_cast<uint64_t>(rate.num);
+        const uint64_t rden = static_cast<uint64_t>(rate.den);
+        const uint64_t q_sec = uflicks / kFlicksPerSecond;
+        const uint64_t r_flk = uflicks % kFlicksPerSecond;
+        const uint64_t whole_num = q_sec * rnum;
+        const uint64_t frames_from_sec = whole_num / rden;
+        const uint64_t rem_sec_num = whole_num % rden;
+        const uint64_t divisor = rden * kFlicksPerSecond;
+        const uint64_t rem_total = rem_sec_num * kFlicksPerSecond + r_flk * rnum;
+        frames = static_cast<int64_t>(frames_from_sec + (rem_total / divisor));
     }
     int64_t drop = 0;
     if (drop_mode == TimecodeDropMode::DropFrame) {

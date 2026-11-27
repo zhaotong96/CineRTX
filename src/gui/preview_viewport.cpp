@@ -9,11 +9,15 @@
 #endif
 
 #include "preview_viewport.h"
+#include "rtx/logger.h"
 #include "rtx/sys_dynload.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <format>
+#include <memory>
 #include <utility>
 
 #include "preview_tone_map_cs.h"
@@ -56,15 +60,37 @@ inline bool callComOut(Host* host, MemFn method, ComPtr<T>& target, Args&&... ar
 }
 LRESULT CALLBACK previewChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_SETCURSOR:
+            if (LOWORD(lParam) == HTERROR) {
+                return TRUE;  // Wave 0-A: block DefWindowProc MessageBeep
+            }
+            break;
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT rc{};
+            rtx::sys::getClientRect(hwnd, &rc);
+            rtx::sys::setDCBrushColor(hdc, RGB(11, 13, 11));
+            rtx::sys::fillRect(hdc, &rc, static_cast<HBRUSH>(rtx::sys::getStockObject(DC_BRUSH)));
+            return 1;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = rtx::sys::beginPaint(hwnd, &ps);
+            rtx::sys::setDCBrushColor(hdc, RGB(11, 13, 11));
+            rtx::sys::fillRect(hdc, &ps.rcPaint, static_cast<HBRUSH>(rtx::sys::getStockObject(DC_BRUSH)));
+            rtx::sys::endPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
         case WM_MOUSEMOVE:
         case WM_LBUTTONDBLCLK:
-            SendMessageW(GetParent(hwnd), WM_APP_SPLIT_DRAG, static_cast<WPARAM>(msg), lParam);
+            rtx::sys::sendMessageW(rtx::sys::getParent(hwnd), WM_APP_SPLIT_DRAG, static_cast<WPARAM>(msg), lParam);
             return 0;
         default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            break;
     }
+    return rtx::sys::defWindowProcW(hwnd, msg, wParam, lParam);
 }
 bool ensureChildClass(HINSTANCE instance) {
     WNDCLASSEXW wc{};
@@ -72,10 +98,10 @@ bool ensureChildClass(HINSTANCE instance) {
     wc.style = static_cast<UINT>(kChildClassStyle);
     wc.lpfnWndProc = previewChildProc;
     wc.hInstance = instance;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hCursor = rtx::sys::loadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
     wc.lpszClassName = kPreviewChildClass;
-    if (RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+    if (rtx::sys::registerClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return false;
     }
     return true;
@@ -140,7 +166,7 @@ Result<PreviewViewport> PreviewViewport::create(HWND parent_hwnd, int width, int
         return err(ErrorCode::InvalidArgument, "preview viewport needs a parent and a size");
     }
     HINSTANCE instance =
-        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(parent_hwnd, GWLP_HINSTANCE));
+        reinterpret_cast<HINSTANCE>(rtx::sys::getWindowLongPtrW(parent_hwnd, GWLP_HINSTANCE));
     if (instance == nullptr) {
         instance = GetModuleHandleW(nullptr);
     }
@@ -148,15 +174,17 @@ Result<PreviewViewport> PreviewViewport::create(HWND parent_hwnd, int width, int
         return err(ErrorCode::Internal, "cannot register the preview child window class");
     }
     constexpr DWORD kChildStyle = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-    HWND child = CreateWindowExW(0, kPreviewChildClass, L"", kChildStyle, 0, 0, width, height,
+    HWND child = rtx::sys::createWindowExW(0, kPreviewChildClass, L"", kChildStyle, 0, 0, width, height,
                                  parent_hwnd, nullptr, instance, nullptr);
     if (child == nullptr) {
         return err(ErrorCode::Internal, "cannot create the preview child window");
     }
     PreviewViewport viewport;
     viewport.child_hwnd_.reset(child);
-    viewport.width_ = width;
-    viewport.height_ = height;
+    viewport.target_width_ = std::max(1, width);
+    viewport.target_height_ = std::max(1, height);
+    viewport.width_ = viewport.target_width_;
+    viewport.height_ = viewport.target_height_;
 
     viewport.dcomp_module_.reset(LoadLibraryExW(L"dcomp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
     if (!viewport.dcomp_module_) {
@@ -180,6 +208,7 @@ PreviewViewport& PreviewViewport::operator=(PreviewViewport&& other) noexcept {
         dcomp_device_ = std::move(other.dcomp_device_);
         dcomp_target_ = std::move(other.dcomp_target_);
         visual_ = std::move(other.visual_);
+        clip_ = std::move(other.clip_);
         factory_ = std::move(other.factory_);
         device_ = std::move(other.device_);
         cmd_queue_ = std::move(other.cmd_queue_);
@@ -193,8 +222,11 @@ PreviewViewport& PreviewViewport::operator=(PreviewViewport&& other) noexcept {
         root_signature_ = std::move(other.root_signature_);
         pipeline_ = std::move(other.pipeline_);
         for (int i = 0; i < 2; ++i) render_targets_[i] = std::move(other.render_targets_[i]);
+        compute_target_ = std::move(other.compute_target_);
         swap_chain_ = std::move(other.swap_chain_);
         view_descriptor_size_ = std::exchange(other.view_descriptor_size_, UINT{0});
+        target_width_ = std::exchange(other.target_width_, 960);
+        target_height_ = std::exchange(other.target_height_, 540);
         width_ = std::exchange(other.width_, 960);
         height_ = std::exchange(other.height_, 540);
         split_ratio_ = std::exchange(other.split_ratio_, 0.5f);
@@ -255,6 +287,7 @@ void PreviewViewport::retireAllGpuResources() noexcept {
     for (auto& rt : render_targets_) {
         gpuRetire(retirement_, bound, std::move(rt));
     }
+    gpuRetire(retirement_, bound, std::move(compute_target_));
     gpuRetire(retirement_, bound, std::move(view_heap_));
     gpuRetire(retirement_, bound, std::move(swap_chain_));
     gpuRetire(retirement_, bound, std::move(cmd_list_));
@@ -297,23 +330,71 @@ bool PreviewViewport::createViewHeap() noexcept {
         device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     return true;
 }
+bool PreviewViewport::createComputeTarget() noexcept {
+    compute_target_.reset();
+    if (!device_ || width_ <= 0 || height_ <= 0) {
+        return false;
+    }
+    const DXGI_FORMAT back_format =
+        hdr_output_ ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+    D3D12_HEAP_PROPERTIES heap_props{};
+    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC tex{};
+    tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    tex.Width = static_cast<UINT64>(width_);
+    tex.Height = static_cast<UINT>(height_);
+    tex.DepthOrArraySize = 1;
+    tex.MipLevels = 1;
+    tex.Format = back_format;
+    tex.SampleDesc.Count = 1;
+    tex.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    tex.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ID3D12Resource* raw_tex = nullptr;
+    const HRESULT hr = device_->CreateCommittedResource(
+        &heap_props, D3D12_HEAP_FLAG_NONE, &tex,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+        __uuidof(ID3D12Resource), reinterpret_cast<void**>(&raw_tex));
+    if (FAILED(hr) || raw_tex == nullptr) {
+        rtx::logError(std::format("createComputeTarget failed: hr=0x{:08X} ({}x{})",
+                                  static_cast<unsigned long>(hr), width_, height_));
+        return false;
+    }
+    compute_target_.reset(raw_tex);
+    return true;
+}
 bool PreviewViewport::createCompositionSwapChain() noexcept {
+    if (child_hwnd_) {
+        RECT rc{};
+        if (rtx::sys::getClientRect(child_hwnd_.get(), &rc)) {
+            target_width_ = std::max(1, static_cast<int>(rc.right - rc.left));
+            target_height_ = std::max(1, static_cast<int>(rc.bottom - rc.top));
+        }
+    }
+    width_ = std::max(1, target_width_);
+    height_ = std::max(1, target_height_);
     DXGI_SWAP_CHAIN_DESC1 desc{};
     desc.Width = static_cast<UINT>(width_);
     desc.Height = static_cast<UINT>(height_);
     desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_UNORDERED_ACCESS;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = kSwapChainBuffers;
-    desc.Scaling = DXGI_SCALING_ASPECT_RATIO_STRETCH;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     desc.Flags = kSwapChainFlags;
 
     swap_chain_.reset();
     IDXGISwapChain1* raw_chain = nullptr;
-    if (FAILED(factory_->CreateSwapChainForComposition(cmd_queue_.get(), &desc, nullptr,
-                                                       &raw_chain))) {
+    HRESULT hr = factory_->CreateSwapChainForComposition(cmd_queue_.get(), &desc, nullptr,
+                                                         &raw_chain);
+    if (FAILED(hr)) {
+        desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        hr = factory_->CreateSwapChainForComposition(cmd_queue_.get(), &desc, nullptr, &raw_chain);
+    }
+    if (FAILED(hr)) {
+        rtx::logError(std::format("CreateSwapChainForComposition failed: hr=0x{:08X} ({}x{})",
+                                  static_cast<unsigned long>(hr), desc.Width, desc.Height));
         return false;
     }
     IDXGISwapChain4* raw_swap = nullptr;
@@ -336,6 +417,9 @@ bool PreviewViewport::createCompositionSwapChain() noexcept {
             hdr_output_ = true;
         }
     }
+    if (!hdr_output_) {
+        (void)swap_chain_->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    }
     if (FAILED(swap_chain_->SetMaximumFrameLatency(1))) {
         return false;
     }
@@ -347,7 +431,7 @@ bool PreviewViewport::createCompositionSwapChain() noexcept {
         }
         render_targets_[i].reset(raw_target);
     }
-    return true;
+    return createComputeTarget();
 }
 bool PreviewViewport::adoptDevice(void* borrowed_device) noexcept {
     auto* raw = static_cast<ID3D12Device*>(borrowed_device);
@@ -423,7 +507,8 @@ bool PreviewViewport::adoptDevice(void* borrowed_device) noexcept {
     dcomp_device_.reset(raw_dcomp);
     dcomp_target_.reset();
     IDCompositionTarget* raw_target = nullptr;
-    if (FAILED(dcomp_device_->CreateTargetForHwnd(child_hwnd_.get(), TRUE, &raw_target))) {
+    // Doc 47 (Defect 4): topmost=FALSE so DComp visual stays in normal HWND Z-order below menus/toasts.
+    if (FAILED(dcomp_device_->CreateTargetForHwnd(child_hwnd_.get(), FALSE, &raw_target))) {
         return false;
     }
     dcomp_target_.reset(raw_target);
@@ -436,14 +521,37 @@ bool PreviewViewport::adoptDevice(void* borrowed_device) noexcept {
     if (FAILED(visual_->SetContent(swap_chain_.get()))) {
         return false;
     }
+    clip_.reset();
+    IDCompositionRectangleClip* raw_clip = nullptr;
+    if (SUCCEEDED(dcomp_device_->CreateRectangleClip(&raw_clip)) && raw_clip != nullptr) {
+        clip_.reset(raw_clip);
+        (void)clip_->SetLeft(0.0f);
+        (void)clip_->SetTop(0.0f);
+        (void)clip_->SetRight(static_cast<float>(width_));
+        (void)clip_->SetBottom(static_cast<float>(height_));
+        (void)visual_->SetClip(clip_.get());
+    }
     if (FAILED(dcomp_target_->SetRoot(visual_.get()))) {
         return false;
     }
     return SUCCEEDED(dcomp_device_->Commit());
 }
 void PreviewViewport::setBounds(int x, int y, int w, int h) noexcept {
-    if (child_hwnd_) {
-        MoveWindow(child_hwnd_.get(), x, y, w, h, TRUE);
+    if (!child_hwnd_) {
+        return;
+    }
+    rtx::sys::setWindowPos(child_hwnd_.get(), HWND_TOP, x, y, std::max(1, w), std::max(1, h),
+                 SWP_NOACTIVATE);
+    RECT rc{};
+    if (rtx::sys::getClientRect(child_hwnd_.get(), &rc)) {
+        target_width_ = std::max(1, static_cast<int>(rc.right - rc.left));
+        target_height_ = std::max(1, static_cast<int>(rc.bottom - rc.top));
+    } else {
+        target_width_ = std::max(1, w);
+        target_height_ = std::max(1, h);
+    }
+    if (swap_chain_) {
+        resizeSwapChain(target_width_, target_height_);
     }
 }
 void PreviewViewport::resizeSwapChain(int width, int height) noexcept {
@@ -459,17 +567,25 @@ void PreviewViewport::resizeSwapChain(int width, int height) noexcept {
     for (auto& rt : render_targets_) {
         rt.reset();
     }
-    view_heap_.reset();
     (void)cmd_allocator_->Reset();
     (void)cmd_list_->Reset(cmd_allocator_.get(), nullptr);
     (void)cmd_list_->Close();
 
-    if (SUCCEEDED(swap_chain_->ResizeBuffers(kSwapChainBuffers, static_cast<UINT>(width),
-                                             static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN,
-                                             kSwapChainFlags))) {
-        width_ = width;
-        height_ = height;
+    if (FAILED(swap_chain_->ResizeBuffers(kSwapChainBuffers, static_cast<UINT>(width),
+                                          static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN,
+                                          kSwapChainFlags))) {
+        for (UINT i = 0; i < kSwapChainBuffers; ++i) {
+            ID3D12Resource* raw_target = nullptr;
+            if (SUCCEEDED(swap_chain_->GetBuffer(i, __uuidof(ID3D12Resource),
+                                                 reinterpret_cast<void**>(&raw_target)))) {
+                render_targets_[i].reset(raw_target);
+            }
+        }
+        return;
     }
+    width_ = width;
+    height_ = height;
+    view_heap_.reset();
     for (UINT i = 0; i < kSwapChainBuffers; ++i) {
         ID3D12Resource* raw_target = nullptr;
         if (FAILED(swap_chain_->GetBuffer(i, __uuidof(ID3D12Resource),
@@ -478,15 +594,42 @@ void PreviewViewport::resizeSwapChain(int width, int height) noexcept {
         }
         render_targets_[i].reset(raw_target);
     }
+    (void)createComputeTarget();
     (void)createViewHeap();
+    if (clip_) {
+        (void)clip_->SetRight(static_cast<float>(width_));
+        (void)clip_->SetBottom(static_cast<float>(height_));
+    }
+    if (dcomp_device_) {
+        (void)dcomp_device_->Commit();
+    }
 }
 void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_resource,
                                     std::uint32_t pitch, std::uint32_t src_width,
                                     std::uint32_t src_height, bool input_is_pq, float max_nits,
                                     const PreviewSlotTicket& ticket) noexcept {
+    const std::uint32_t color_flags = input_is_pq
+        ? (kPreviewLeftPq | kPreviewLeftBt2020 | kPreviewRightPq | kPreviewRightBt2020)
+        : 0u;
+    const float nits = (max_nits > 0.0f) ? max_nits : kSdrReferenceNits;
+    presentShared(borrowed_d3d12_device, shared_resource, pitch, src_width, src_height,
+                  color_flags, nits, nits, ticket);
+}
+
+void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_resource,
+                                    std::uint32_t pitch, std::uint32_t src_width,
+                                    std::uint32_t src_height, std::uint32_t color_flags,
+                                    float left_max_nits, float right_max_nits,
+                                    const PreviewSlotTicket& ticket) noexcept {
     last_present_skipped_ = true;
-    if (borrowed_d3d12_device == nullptr || shared_resource == nullptr || pitch == 0 ||
-        src_width == 0 || src_height == 0) {
+    const auto release_ticket = [](const PreviewSlotTicket* t) noexcept {
+        if (t != nullptr && t->first != nullptr && t->second < t->first->size()) {
+            (*t->first)[t->second].store(0, std::memory_order_release);
+        }
+    };
+    std::unique_ptr<const PreviewSlotTicket, decltype(release_ticket)> ticket_guard(&ticket, release_ticket);
+    if (borrowed_d3d12_device == nullptr || shared_resource == nullptr ||
+        src_width == 0 || src_height == 0 || pitch < src_width * 4u || (pitch % 4u) != 0u) {
         return;
     }
     if (device_lost_) {
@@ -497,7 +640,10 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
             return;
         }
     }
-    if (!swap_chain_ || !pipeline_ || !view_heap_ || !cmd_list_) {
+    if (swap_chain_ && (target_width_ != width_ || target_height_ != height_)) {
+        resizeSwapChain(target_width_, target_height_);
+    }
+    if (!swap_chain_ || !pipeline_ || !view_heap_ || !cmd_list_ || !compute_target_) {
         return;
     }
     if (device_->GetDeviceRemovedReason() != S_OK) {
@@ -507,7 +653,7 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
     if (!waitForGpuIdle(0).has_value()) {
         return;
     }
-    if (WaitForSingleObject(swap_chain_->GetFrameLatencyWaitableObject(), 0) != WAIT_OBJECT_0) {
+    if (WaitForSingleObject(swap_chain_->GetFrameLatencyWaitableObject(), 16) != WAIT_OBJECT_0) {
         return;
     }
     const UINT back_buffer_idx = swap_chain_->GetCurrentBackBufferIndex();
@@ -536,7 +682,7 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     uav.Texture2D.MipSlice = 0;
     uav.Texture2D.PlaneSlice = 0;
-    device_->CreateUnorderedAccessView(back_buffer, nullptr, &uav, uav_handle);
+    device_->CreateUnorderedAccessView(compute_target_.get(), nullptr, &uav, uav_handle);
 
     if (FAILED(cmd_allocator_->Reset()) || FAILED(cmd_list_->Reset(cmd_allocator_.get(), nullptr))) {
         return;
@@ -548,6 +694,8 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
     cmd_list_->SetComputeRootDescriptorTable(0, view_heap_->GetGPUDescriptorHandleForHeapStart());
 
     const bool split_on = split_ratio_ > 0.0f && split_ratio_ < 1.0f;
+    const float l_nits = (left_max_nits > 0.0f) ? left_max_nits : kSdrReferenceNits;
+    const float r_nits = (right_max_nits > 0.0f) ? right_max_nits : kSdrReferenceNits;
     const ViewportConstants constants{
         src_width,
         src_height,
@@ -556,19 +704,24 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
         pitch / 4u,
         hdr_output_ ? 1u : 0u,
         std::bit_cast<std::uint32_t>(split_ratio_),
-        std::bit_cast<std::uint32_t>(max_nits > 0.0f ? max_nits : kSdrReferenceNits),
+        std::bit_cast<std::uint32_t>(l_nits),
         split_on ? 1u : 0u,
-        input_is_pq ? 1u : 0u,
-        0u,
+        color_flags,
+        std::bit_cast<std::uint32_t>(r_nits),
         0u,
     };
     cmd_list_->SetComputeRoot32BitConstants(1, kRootConstantDwords, constants.data(), 0);
 
-    resourceBarrier(cmd_list_.get(), back_buffer, D3D12_RESOURCE_STATE_PRESENT,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmd_list_->Dispatch((static_cast<UINT>(width_) + kComputeGroup - 1) / kComputeGroup,
                         (static_cast<UINT>(height_) + kComputeGroup - 1) / kComputeGroup, 1);
-    resourceBarrier(cmd_list_.get(), back_buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    resourceBarrier(cmd_list_.get(), compute_target_.get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+    resourceBarrier(cmd_list_.get(), back_buffer, D3D12_RESOURCE_STATE_PRESENT,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd_list_->CopyResource(back_buffer, compute_target_.get());
+    resourceBarrier(cmd_list_.get(), compute_target_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    resourceBarrier(cmd_list_.get(), back_buffer, D3D12_RESOURCE_STATE_COPY_DEST,
                     D3D12_RESOURCE_STATE_PRESENT);
 
     if (FAILED(cmd_list_->Close())) {
@@ -585,6 +738,7 @@ void PreviewViewport::presentShared(void* borrowed_d3d12_device, void* shared_re
         gpuReleaseAll(retirement_);
         return;
     }
+    (void)ticket_guard.release();
     auto* res = static_cast<IUnknown*>(shared_resource);
     res->AddRef();
     auto flags = ticket.first;

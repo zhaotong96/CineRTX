@@ -307,16 +307,11 @@ Result<double> memberDouble(const std::vector<std::pair<std::string, std::string
     const std::pair<std::string, std::string_view>* m = findMember(ms, key);
     if (m == nullptr) return default_val;
     if (m->second == "null") return default_val;
-    double val = 0.0;
-    const auto [ptr, ec] = std::from_chars(m->second.data(), m->second.data() + m->second.size(), val);
-    if (ec != std::errc{} || ptr != m->second.data() + m->second.size()) {
-        // Fallback for systems where double from_chars is absent
-        char* end = nullptr;
-        std::string buf(m->second);
-        val = std::strtod(buf.c_str(), &end);
-        if (end == buf.c_str() || end != buf.c_str() + buf.size()) {
-            return err(ErrorCode::InvalidArgument, std::format("malformed float in JSON key \"{}\"", key));
-        }
+    char* end = nullptr;
+    std::string buf(m->second);
+    const double val = std::strtod(buf.c_str(), &end);
+    if (end == buf.c_str() || end != buf.c_str() + buf.size()) {
+        return err(ErrorCode::InvalidArgument, std::format("malformed float in JSON key \"{}\"", key));
     }
     return val;
 }

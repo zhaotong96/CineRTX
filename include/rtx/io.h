@@ -150,6 +150,9 @@ private:
     Rational out_audio_time_base_{1, 48000};
     // (source_stream_index, output_av_stream, monotonic_timestamp_guard)
     std::vector<std::tuple<int, AVStream*, StreamTimestampGuard>> passthrough_streams_;
+    // Phase 13 (Wave B-A / 79_): (source_stream_index, output_av_stream, opaque_state, monotonic_timestamp_guard)
+    std::vector<std::tuple<int, AVStream*, std::shared_ptr<void>, StreamTimestampGuard>> audio_transcoders_;
+    std::vector<std::tuple<int, AVStream*, std::shared_ptr<void>, StreamTimestampGuard>> subtitle_transcoders_;
     StreamTimestampGuard video_guard_ = makeTimestampGuard();
     std::vector<std::string> warnings_;
     std::vector<uint8_t>* memory_target_ = nullptr;
@@ -172,5 +175,9 @@ constexpr bool ffmpegAvailable() noexcept { return true; }
 std::unique_ptr<FfmpegDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes);
 std::unique_ptr<FfmpegMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
                                              std::string container_format = "matroska");
+
+
+// Phase 13 (Wave 3-B): UTF-8 safe FFmpeg concat demuxer manifest builder.
+[[nodiscard]] std::string buildSafeConcatList(const std::vector<std::filesystem::path>& inputs);
 
 }  // namespace rtx

@@ -374,7 +374,7 @@ rtx::gui::ComPtr<ID3D12Resource> makeSharedPreviewBuffer(HeadlessGpu& gpu, UINT 
     }
     return shared;
 }
-double toneMappedByte(float code) {
+double toneMappedByte(float code, float src_peak_nits = 1000.0f) {
     const float m1 = 2610.0f / 16384.0f;
     const float m2 = 2523.0f / 4096.0f * 128.0f;
     const float c1 = 3424.0f / 4096.0f;
@@ -382,17 +382,27 @@ double toneMappedByte(float code) {
     const float c3 = 2392.0f / 4096.0f * 32.0f;
     const float pw = std::pow(code, 1.0f / m2);
     const float nits = std::pow((std::max)(pw - c1, 0.0f) / (c2 - c3 * pw), 1.0f / m1) * 10000.0f;
-    const float x = nits / 100.0f;
-    const float aces = (std::min)((std::max)(x * (2.51f * x + 0.03f) /
-                                                 (x * (2.43f * x + 0.59f) + 0.14f),
-                                             0.0f),
-                                  1.0f);
-    const float srgb = aces <= 0.0031308f ? aces * 12.92f
-                                          : 1.055f * std::pow(aces, 1.0f / 2.4f) - 0.055f;
+    const float max_lum = (std::max)(src_peak_nits, 100.0f);
+    float sdr_nits = (std::min)(nits, 100.0f);
+    if (nits > 10.0f && max_lum > 100.0f) {
+        const float e = (std::min)(nits / max_lum, 1.0f);
+        const float ks = 10.0f / max_lum;
+        float e_mapped = e;
+        if (e > ks) {
+            const float t = (e - ks) / (std::max)(1.0f - ks, 1e-5f);
+            const float t2 = t * t;
+            const float t3 = t2 * t;
+            e_mapped = (2.0f * t3 - 3.0f * t2 + 1.0f) * ks +
+                       (t3 - 2.0f * t2 + t) * (1.0f - ks) +
+                       (-2.0f * t3 + 3.0f * t2) * (100.0f / max_lum);
+        }
+        const float scale = (e_mapped * max_lum) / (std::max)(nits, 1e-5f);
+        sdr_nits = (std::min)(nits * scale, 100.0f);
+    }
+    const float lin = (std::min)((std::max)(sdr_nits / 100.0f, 0.0f), 1.0f);
+    const float srgb = lin <= 0.0031308f ? lin * 12.92f
+                                         : 1.055f * std::pow(lin, 1.0f / 2.4f) - 0.055f;
     return static_cast<double>((std::min)((std::max)(srgb, 0.0f), 1.0f)) * 255.0;
-// PQ -> ACES Filmic -> sRGB 的标量参考，与 preview_tone_map_cs.hlsl 逐式对应。
-// 中性灰经 BT.2020->709 矩阵后仍为中性（行和 1.0001 / 1.0000 / 0.9999），
-// 偏差远小于 1/255，故参考只算亮度通路。
 }
 }  // namespace
 
@@ -773,11 +783,16 @@ RTX_TEST(preview_tone_map_compute_matches_reference_pixels) {
                           0u,        0u,         0u,        0u,         0u,
                           0u,        0u};
         const float split = 0.5f;
-        const float max_nits = 100.0f;
+        const float left_max_nits = 100.0f;
+        const float right_max_nits = 1000.0f;
+        const UINT color_flags = (input_is_pq != 0u)
+            ? (rtx::gui::kPreviewRightPq | rtx::gui::kPreviewRightBt2020)
+            : 0u;
         std::memcpy(&words[6], &split, sizeof(float));
-        std::memcpy(&words[7], &max_nits, sizeof(float));
+        std::memcpy(&words[7], &left_max_nits, sizeof(float));
         words[8] = split_on;
-        words[9] = input_is_pq;
+        words[9] = color_flags;
+        std::memcpy(&words[10], &right_max_nits, sizeof(float));
         gpu.list->SetComputeRoot32BitConstants(1, 12, words, 0);
 
         D3D12_RESOURCE_BARRIER to_uav{};

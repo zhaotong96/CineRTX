@@ -330,6 +330,19 @@ $L__BB0_9:
 	min.ftz.f32 	%f94, %f88, %f65;
 
 $L__BB0_10:
+	mov.f32 	%f95, 0f00000000;
+	testp.finite.f32 	%p27, %f89;
+	selp.f32 	%f89, %f89, %f95, %p27;
+	testp.finite.f32 	%p27, %f90;
+	selp.f32 	%f90, %f90, %f95, %p27;
+	testp.finite.f32 	%p27, %f91;
+	selp.f32 	%f91, %f91, %f95, %p27;
+	testp.finite.f32 	%p27, %f92;
+	selp.f32 	%f92, %f92, %f95, %p27;
+	testp.finite.f32 	%p27, %f93;
+	selp.f32 	%f93, %f93, %f95, %p27;
+	testp.finite.f32 	%p27, %f94;
+	selp.f32 	%f94, %f94, %f95, %p27;
 	cvta.to.global.u64 	%rd16, %rd3;
 	mad.lo.s32 	%r57, %r5, %r13, %r3;
 	mul.wide.s32 	%rd17, %r57, 4;
@@ -478,6 +491,8 @@ $L__BB0_11:
 	fma.rn.f32 	%f76, %f71, %f75, %f76;
 	max.ftz.f32 	%f76, %f76, %f5;
 	min.ftz.f32 	%f1, %f76, %f7;
+	testp.finite.f32 	%p21, %f1;
+	selp.f32 	%f1, %f1, %f5, %p21;
 	// Channel 1 (G) -> %f2
 	add.s64 	%rd20, %rd20, %rd19;
 	add.s64 	%rd21, %rd21, %rd19;
@@ -493,6 +508,8 @@ $L__BB0_11:
 	fma.rn.f32 	%f76, %f71, %f75, %f76;
 	max.ftz.f32 	%f76, %f76, %f5;
 	min.ftz.f32 	%f2, %f76, %f7;
+	testp.finite.f32 	%p21, %f2;
+	selp.f32 	%f2, %f2, %f5, %p21;
 	// Channel 2 (B) -> %f3
 	add.s64 	%rd20, %rd20, %rd19;
 	add.s64 	%rd21, %rd21, %rd19;
@@ -508,6 +525,8 @@ $L__BB0_11:
 	fma.rn.f32 	%f76, %f71, %f75, %f76;
 	max.ftz.f32 	%f76, %f76, %f5;
 	min.ftz.f32 	%f3, %f76, %f7;
+	testp.finite.f32 	%p21, %f3;
+	selp.f32 	%f3, %f3, %f5, %p21;
 	bra.uni 	$L__POST_DONE;
 $L__POST_FULL:
 	mad.lo.s32 	%r16, %r2, %r5, %r1;
@@ -516,18 +535,24 @@ $L__POST_FULL:
 	ld.global.nc.f32 	%f4, [%rd8];
 	max.ftz.f32 	%f6, %f4, %f5;
 	min.ftz.f32 	%f1, %f6, %f7;
+	testp.finite.f32 	%p21, %f1;
+	selp.f32 	%f1, %f1, %f5, %p21;
 	add.s32 	%r17, %r15, %r16;
 	mul.wide.s32 	%rd9, %r15, 4;
 	add.s64 	%rd10, %rd8, %rd9;
 	ld.global.nc.f32 	%f8, [%rd10];
 	max.ftz.f32 	%f9, %f8, %f5;
 	min.ftz.f32 	%f2, %f9, %f7;
+	testp.finite.f32 	%p21, %f2;
+	selp.f32 	%f2, %f2, %f5, %p21;
 	add.s32 	%r18, %r17, %r15;
 	mul.wide.s32 	%rd11, %r18, 4;
 	add.s64 	%rd12, %rd6, %rd11;
 	ld.global.nc.f32 	%f10, [%rd12];
 	max.ftz.f32 	%f11, %f10, %f5;
 	min.ftz.f32 	%f3, %f11, %f7;
+	testp.finite.f32 	%p21, %f3;
+	selp.f32 	%f3, %f3, %f5, %p21;
 $L__POST_DONE:
 	shr.u32 	%r19, %r2, 31;
 	add.s32 	%r20, %r2, %r19;
@@ -542,11 +567,15 @@ $L__POST_DONE:
 	setp.eq.s32 	%p4, %r7, 0;
 	@%p4 bra 	$L__BB1_4;
 
-	mul.ftz.f32 	%f12, %f2, 0f3F1645A2;
-	fma.rn.ftz.f32 	%f13, %f1, 0f3E991687, %f12;
-	fma.rn.ftz.f32 	%f14, %f3, 0f3DE978D5, %f13;
-	max.ftz.f32 	%f16, %f14, %f5;
 	mov.f32 	%f17, 0f437F0000;
+	mul.ftz.f32 	%f77, %f1, %f17;
+	mul.ftz.f32 	%f78, %f2, %f17;
+	mul.ftz.f32 	%f79, %f3, %f17;
+	mul.ftz.f32 	%f12, %f78, 0f3F1645A2;
+	fma.rn.ftz.f32 	%f13, %f77, 0f3E991687, %f12;
+	fma.rn.ftz.f32 	%f14, %f79, 0f3DE978D5, %f13;
+	add.ftz.f32 	%f14, %f14, 0f3F000000;
+	max.ftz.f32 	%f16, %f14, %f5;
 	min.ftz.f32 	%f18, %f16, %f17;
 	cvt.rzi.ftz.u32.f32 	%r25, %f18;
 	st.global.u8 	[%rd1], %r25;
@@ -559,15 +588,15 @@ $L__POST_DONE:
 	xor.pred  	%p9, %p7, %p8;
 	@%p9 bra 	$L__BB1_6;
 
-	fma.rn.ftz.f32 	%f19, %f1, 0fBE2CC921, 0f43000000;
-	fma.rn.ftz.f32 	%f20, %f2, 0fBEA99B6F, %f19;
-	fma.rn.ftz.f32 	%f21, %f3, 0f3F000000, %f20;
+	fma.rn.ftz.f32 	%f19, %f77, 0fBE2CC921, 0f43008000;
+	fma.rn.ftz.f32 	%f20, %f78, 0fBEA99B6F, %f19;
+	fma.rn.ftz.f32 	%f21, %f79, 0f3F000000, %f20;
 	mov.f32 	%f22, 0f00000000;
 	max.ftz.f32 	%f23, %f21, %f22;
 	min.ftz.f32 	%f25, %f23, %f17;
-	fma.rn.ftz.f32 	%f26, %f1, 0f3F000000, 0f43000000;
-	fma.rn.ftz.f32 	%f27, %f2, 0fBED65E46, %f26;
-	fma.rn.ftz.f32 	%f28, %f3, 0fBDA686E8, %f27;
+	fma.rn.ftz.f32 	%f26, %f77, 0f3F000000, 0f43008000;
+	fma.rn.ftz.f32 	%f27, %f78, 0fBED65E46, %f26;
+	fma.rn.ftz.f32 	%f28, %f79, 0fBDA686E8, %f27;
 	max.ftz.f32 	%f29, %f28, %f22;
 	min.ftz.f32 	%f30, %f29, %f17;
 	cvt.rzi.ftz.u32.f32 	%r28, %f25;

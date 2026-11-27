@@ -10,6 +10,8 @@
 #ifndef RTX_NGX_BRIDGE_RIFE_PACK_RUNTIME_H
 #define RTX_NGX_BRIDGE_RIFE_PACK_RUNTIME_H
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <tuple>
 
@@ -53,6 +55,34 @@ RtxResult launchEvalBlockSad8x8(uint64_t prev_y, uint64_t curr_y, uint32_t pitch
                                 uint32_t width, uint32_t height,
                                 uint64_t d_block_sad_64, void* stream);
 const char* rifePackLastError();
+
+/* MIT-native 8x8 block-SAD shot-boundary detector shared by RIFE and NVOFA. */
+inline bool evalBlockSadSceneCut(const std::array<uint32_t, 64>& block_sad,
+                                 uint32_t width, uint32_t height, float& ema_motion) noexcept {
+    if (width == 0 || height == 0) return false;
+    uint64_t total_sad = 0;
+    for (uint32_t s : block_sad) total_sad += s;
+    const double total_denom = static_cast<double>(width) * static_cast<double>(height) * 255.0;
+    const float mu_k = static_cast<float>(static_cast<double>(total_sad) / total_denom);
+    const double block_denom = (std::max)(1.0, static_cast<double>(width) / 8.0) *
+                               (std::max)(1.0, static_cast<double>(height) / 8.0) * 255.0;
+    int outliers = 0;
+    for (uint32_t s : block_sad) {
+        if (static_cast<float>(static_cast<double>(s) / block_denom) > 0.16f) ++outliers;
+    }
+    const float p_outlier = static_cast<float>(outliers) / 64.0f;
+    const float baseline = (std::max)(ema_motion, 0.025f);
+    const bool hard_cut = (mu_k > 0.22f) ||
+                          (mu_k > 0.085f && mu_k > 3.2f * baseline && p_outlier >= 0.30f) ||
+                          (p_outlier >= 0.375f && mu_k > 2.4f * ema_motion);
+    if (hard_cut) {
+        ema_motion = 0.03f;
+    } else {
+        constexpr float kAlpha = 2.0f / 9.0f;
+        ema_motion = (1.0f - kAlpha) * ema_motion + kAlpha * mu_k;
+    }
+    return hard_cut;
+}
 
 }  // namespace rtx_ngx
 

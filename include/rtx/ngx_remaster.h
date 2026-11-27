@@ -71,6 +71,7 @@ public:
     void publishPreviewSlot(std::uint32_t slot) noexcept;
     [[nodiscard]] PreviewSlotFlags previewSlotFlagsArray() noexcept;
     [[nodiscard]] std::uint32_t latestPublishedSlot() const noexcept;
+    [[nodiscard]] std::uint64_t previewGeneration() const noexcept;
     [[nodiscard]] bool borrowPreviewSlot(std::uint32_t slot, void** out_d3d12_device,
                                          void** out_d3d12_resource,
                                          std::uint32_t* out_pitch) noexcept;
@@ -79,12 +80,14 @@ public:
     static bool borrowActivePreview(std::uint32_t slot, void** out_d3d12_device,
                                     void** out_d3d12_resource, std::uint32_t* out_pitch);
     [[nodiscard]] static std::uint32_t latestPreviewSlot();
+    [[nodiscard]] static std::uint64_t latestPreviewGeneration() noexcept;
     [[nodiscard]] static PreviewSlotFlags previewSlotFlags();
     RtxResult uploadFrame(RtxNgxBridge* bridge, const void* y_plane, const void* uv_plane,
                           uint32_t y_pitch, uint32_t uv_pitch, int32_t width, int32_t height,
                           uint64_t* y_device, uint64_t* uv_device) const;
     RtxResult interpolateNv12(RtxNgxBridge* bridge, uint64_t prev_nv12, uint64_t curr_nv12,
                              uint32_t pitch, float alpha, uint64_t out_nv12) const;
+    int32_t consumeNvofSceneCut(RtxNgxBridge* bridge) const;
     uint64_t getInterpBuffer(RtxNgxBridge* bridge, uint32_t width, uint32_t height) const;
     int32_t initRife(RtxNgxBridge* bridge, const char* engine_path, uint32_t width, uint32_t height) const;
     int32_t initRifeEx(RtxNgxBridge* bridge, const char* engine_path,
@@ -106,6 +109,7 @@ private:
 
     PreviewSlotFlags preview_slot_flags_ = std::make_shared<std::array<std::atomic<std::uint32_t>, kPreviewSlotCount>>();
     std::atomic<std::uint32_t> preview_latest_slot_{0};
+    std::atomic<std::uint64_t> preview_generation_{0};
     RtxNgxBridge* preview_bridge_ = nullptr;
 
     void* handle_ = nullptr;
@@ -133,6 +137,7 @@ private:
                                             uint32_t, int32_t, int32_t, uint64_t*,
                                             uint64_t*) = nullptr;
     int32_t(RTX_SHIM_CALL* interpolate_nv12_)(RtxNgxBridge*, uint64_t, uint64_t, uint32_t, float, uint64_t) = nullptr;
+    int32_t(RTX_SHIM_CALL* consume_nvof_scene_cut_)(RtxNgxBridge*) = nullptr;
     uint64_t(RTX_SHIM_CALL* get_interp_buffer_)(RtxNgxBridge*, uint32_t, uint32_t) = nullptr;
     int32_t(RTX_SHIM_CALL* init_rife_)(RtxNgxBridge*, const char*, uint32_t, uint32_t) = nullptr;
     int32_t(RTX_SHIM_CALL* init_rife_ex_)(RtxNgxBridge*, const char*, const RtxRifeInitConfig*, uint64_t*) = nullptr;

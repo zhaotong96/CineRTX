@@ -43,6 +43,9 @@ jobs:
       - name: Audit repository privacy and host path hygiene
         run: cmake -P cmake/AuditPrivacy.cmake
 
+      - name: Audit baseline symbol contracts
+        run: cmake -P cmake/ContractGuard.cmake
+
   linux-gcc:
     name: Linux GCC (${{ matrix.build_type }})
     needs: compliance
@@ -91,23 +94,10 @@ jobs:
           ./.vs/build/cmake/linux-release/CineRTX --version
           ./.vs/build/cmake/linux-release/CineRTX --help
           ./.vs/build/cmake/linux-release/CineRTX --schema-json > .vs/build/schema.json
-          python3 - <<'PY'
-          import json
-          schema = json.load(open(".vs/build/schema.json", encoding="utf-8"))
-          assert schema.get("defaults", {}).get("codec") == "av1", "Missing default codec=av1"
-          assert isinstance(schema.get("params"), list) and len(schema["params"]) == 20, "Expected 20 SSOT params"
-          assert any(p.get("key") == "codec" for p in schema["params"]), "Missing codec key in params array"
-          assert "i18n" in schema and "en" in schema["i18n"] and "zh" in schema["i18n"], "Missing i18n dictionary"
-          print("schema JSON verification passed, param count:", len(schema["params"]))
-          PY
+          jq -e '.defaults.codec == "av1" and (.params | length == 20) and any(.params[]; .key == "codec") and (.i18n.en != null) and (.i18n.zh != null)' .vs/build/schema.json > /dev/null
           # In headless CI containers without NVIDIA GPUs, probe may exit 0, 4 or 5
           ./.vs/build/cmake/linux-release/CineRTX --probe --json > .vs/build/probe.json || true
-          python3 - <<'PY'
-          import json
-          probe = json.load(open(".vs/build/probe.json", encoding="utf-8"))
-          assert probe.get("abi_version") in (2, 4), f"Unexpected probe abi_version: {probe.get('abi_version')}"
-          print("probe JSON verification passed, result_name:", probe.get("result_name", "UNKNOWN"))
-          PY
+          jq -e '.abi_version == 2 or .abi_version == 4' .vs/build/probe.json > /dev/null
 
   windows-msvc:
     name: Windows MSVC
@@ -129,10 +119,8 @@ jobs:
       - name: Test
         run: ctest --preset windows-msvc-ninja --output-on-failure --repeat until-fail:10
 
-      - name: Audit PE static import tables (GUI + Headless)
-        run: |
-          cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/CineRTX.exe -DMODE=GUI -P cmake/AuditImports.cmake
-          cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/rtx_headless_cli.exe -DMODE=HEADLESS -P cmake/AuditImports.cmake
+      - name: Audit PE static import table (Single-EXE 1/1 kernel32.dll)
+        run: cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/CineRTX.exe -P cmake/AuditImports.cmake
 
       - name: Probe and CLI smoke test
         shell: pwsh
@@ -146,10 +134,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$exe`" --probe --json > .vs\build\probe.json"
           if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 4 -and $LASTEXITCODE -ne 5) { exit $LASTEXITCODE }
-          python -c "import json; s=json.load(open('.vs/build/schema.json', encoding='utf-8')); assert s.get('defaults',{}).get('codec')=='av1' and len(s.get('params',[]))==20 and any(p.get('key')=='codec' for p in s['params']) and 'i18n' in s; print('schema JSON ok, params:', len(s['params']))"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -c "import json; p=json.load(open('.vs/build/probe.json', encoding='utf-8')); assert p.get('abi_version') in (2, 4); print('probe JSON ok:', p.get('result_name', 'UNKNOWN'))"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $s = Get-Content .vs/build/schema.json -Raw | ConvertFrom-Json
+          if ($s.defaults.codec -ne 'av1' -or $s.params.Count -ne 20 -or -not ($s.params | Where-Object { $_.key -eq 'codec' }) -or -not $s.i18n) { throw 'schema JSON validation failed' }
+          $p = Get-Content .vs/build/probe.json -Raw | ConvertFrom-Json
+          if ($p.abi_version -notin @(2, 4)) { throw "Unexpected abi_version: $($p.abi_version)" }
+          Write-Host "Smoke test ok, params=$($s.params.Count) abi=$($p.abi_version)"
+
+      - name: Upload portable binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msvc
+          if-no-files-found: error
+          path: |
+            .vs/build/cmake/windows-msvc-ninja/CineRTX.exe
+            .vs/build/cmake/windows-msvc-ninja/rtx_ngx_bridge.dll
 
   windows-zig:
     name: Windows Zig 0.13
@@ -183,10 +181,8 @@ jobs:
       - name: Test
         run: ctest --preset zig-windows --output-on-failure --repeat until-fail:10
 
-      - name: Audit PE static import tables (GUI + Headless)
-        run: |
-          cmake -DTARGET_BIN=.vs/build/cmake/zig-windows/CineRTX.exe -DMODE=GUI -P cmake/AuditImports.cmake
-          cmake -DTARGET_BIN=.vs/build/cmake/zig-windows/rtx_headless_cli.exe -DMODE=HEADLESS -P cmake/AuditImports.cmake
+      - name: Audit PE static import table (Single-EXE 1/1 kernel32.dll)
+        run: cmake -DTARGET_BIN=.vs/build/cmake/zig-windows/CineRTX.exe -P cmake/AuditImports.cmake
 
       - name: Probe and CLI smoke test
         shell: pwsh
@@ -200,10 +196,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$exe`" --probe --json > .vs\build\probe.json"
           if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 4 -and $LASTEXITCODE -ne 5) { exit $LASTEXITCODE }
-          python -c "import json; s=json.load(open('.vs/build/schema.json', encoding='utf-8')); assert s.get('defaults',{}).get('codec')=='av1' and len(s.get('params',[]))==20 and any(p.get('key')=='codec' for p in s['params']) and 'i18n' in s; print('schema JSON ok, params:', len(s['params']))"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -c "import json; p=json.load(open('.vs/build/probe.json', encoding='utf-8')); assert p.get('abi_version') in (2, 4); print('probe JSON ok:', p.get('result_name', 'UNKNOWN'))"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $s = Get-Content .vs/build/schema.json -Raw | ConvertFrom-Json
+          if ($s.defaults.codec -ne 'av1' -or $s.params.Count -ne 20 -or -not ($s.params | Where-Object { $_.key -eq 'codec' }) -or -not $s.i18n) { throw 'schema JSON validation failed' }
+          $p = Get-Content .vs/build/probe.json -Raw | ConvertFrom-Json
+          if ($p.abi_version -notin @(2, 4)) { throw "Unexpected abi_version: $($p.abi_version)" }
+          Write-Host "Smoke test ok, params=$($s.params.Count) abi=$($p.abi_version)"
 
       - name: Upload portable binaries
         uses: actions/upload-artifact@v4
@@ -212,7 +209,7 @@ jobs:
           if-no-files-found: error
           path: |
             .vs/build/cmake/zig-windows/CineRTX.exe
-            .vs/build/cmake/zig-windows/rtx_headless_cli.exe
+            .vs/build/cmake/zig-windows/rtx_ngx_bridge.dll
 
   package:
     name: Package release archive
@@ -229,14 +226,14 @@ jobs:
       - name: Download portable binaries
         uses: actions/download-artifact@v4
         with:
-          name: zig-windows
-          path: .vs/build/cmake/zig-windows
+          name: windows-msvc
+          path: .vs/build/cmake/windows-msvc-ninja
 
       - name: Build audited archive
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          cmake -DBUILD_DIR=.vs/build/cmake/zig-windows -DOUTPUT_DIR=out -DVERSION=$version -P cmake/PackageRelease.cmake
+          cmake -DBUILD_DIR=.vs/build/cmake/windows-msvc-ninja -DOUTPUT_DIR=out -DVERSION=$version -P cmake/PackageRelease.cmake
 
       - name: Upload release archive
         uses: actions/upload-artifact@v4

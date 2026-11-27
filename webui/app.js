@@ -2294,3 +2294,58 @@ async function boot() {
 }
 
 boot();
+
+// Phase 13 (Wave 0-A Step 3.2): SDR JPEG/MJPEG proxy preview polling controller
+class PreviewController {
+  constructor() {
+    this.previewImg = document.getElementById('sdr-proxy-preview');
+    this.pollTimer = null;
+    this.inFlight = false;
+    this.lastObjectUrl = null;
+  }
+  startSdrProxyStream(fps = 15) {
+    if (!this.previewImg) return;
+    this.stopSdrProxyStream();
+    const intervalMs = Math.max(33, Math.floor(1000 / Math.max(1, fps)));
+    this.pollTimer = setInterval(async () => {
+      if (this.inFlight || document.hidden) return;
+      this.inFlight = true;
+      try {
+        const res = await fetch(`/api/v1/stream/latest_frame.jpg?t=${Date.now()}`, { cache: 'no-store' });
+        if (res.ok) {
+          const blob = await res.blob();
+          if (blob.size > 0) {
+            const url = URL.createObjectURL(blob);
+            if (this.lastObjectUrl) URL.revokeObjectURL(this.lastObjectUrl);
+            this.lastObjectUrl = url;
+            this.previewImg.src = url;
+            this.previewImg.style.display = 'block';
+          }
+        }
+      } catch (_) {
+        // Silent drop when backend is idle
+      } finally {
+        this.inFlight = false;
+      }
+    }, intervalMs);
+  }
+  stopSdrProxyStream() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.lastObjectUrl) {
+      URL.revokeObjectURL(this.lastObjectUrl);
+      this.lastObjectUrl = null;
+    }
+  }
+}
+if (typeof window !== 'undefined') {
+  window.rtxPreviewCtrl = new PreviewController();
+  window.addEventListener('DOMContentLoaded', () => {
+    window.rtxPreviewCtrl.startSdrProxyStream(15);
+  });
+  window.addEventListener('beforeunload', () => {
+    window.rtxPreviewCtrl.stopSdrProxyStream();
+  });
+}

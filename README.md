@@ -2,21 +2,21 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-> Next-generation pure-GPU video remastering & NLE engine for NVIDIA RTX (`v0.4.0`). Zero-copy hardware pipeline integrating NVDEC, RTX Video Super Resolution (VSR), TrueHDR inverse tone mapping, dual-path true frame interpolation (NVOFA optical flow + TensorRT RIFE), and NVENC AV1/HEVC 10-bit hardware encoding — delivered through three isomorphic workstations (Win32 native / WebUI / headless CLI) driven by one SSOT parameter contract.
+> Next-generation pure-GPU video remastering & NLE engine for NVIDIA RTX (`v0.5.0`). Zero-copy hardware pipeline integrating NVDEC, RTX Video Super Resolution (VSR), TrueHDR inverse tone mapping, dual-path true frame interpolation (NVOFA optical flow + TensorRT RIFE), and NVENC AV1/HEVC 10-bit hardware encoding — delivered through three isomorphic workstations (Win32 native / WebUI / headless CLI) driven by one SSOT parameter contract.
 
 ---
 
-## Highlights (`v0.4.0` Phase 12 Architecture)
+## Highlights (`v0.5.0` Phase 13 Architecture)
 
-- **Modern C++26 Zero-Redundancy Core**: Enforced by hard CMake audit gates — **<= 35 justified named types** (34/35 verified, `0` violations), **Core Engine Pure SLOC <= 23,000** (~12.2K verified), 100% RAII resource management, `std::format` / `std::jthread` / `std::stop_token`, zero two-step `initialize/shutdown/destroy` lifecycles.
-- **Dual-Mode Minimal Static System DLL Footprint**:
-  - **Headless CLI Engine (`rtx_headless_cli.exe`)**: Exactly **2 physical system DLLs** (`kernel32.dll`, `bcrypt.dll`) + 1 MSVC STL synchronization API Set (`api-ms-win-core-synch-l1-2-0.dll`) — zero GUI/Shell/COM/D3D12 static imports for Windows Server Core and headless compute nodes.
-  - **Desktop Workstation (`CineRTX.exe`)**: Strictly **<= 4 physical system DLLs** (`kernel32.dll`, `user32.dll`, `gdi32.dll`, `bcrypt.dll`) + 1 STL API Set, with optional OS APIs loaded on demand via `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`.
+- **Modern C++26 Zero-Redundancy Core**: Enforced by hard CMake audit gates — **<= 35 justified named types** (33/35 verified, `0` violations), **Core Engine Pure SLOC <= 23,000** (~13.8K verified), 100% RAII resource management, `std::format` / `std::jthread` / `std::stop_token`, zero two-step `initialize/shutdown/destroy` lifecycles.
+- **Single-EXE Minimal Static System DLL Footprint**:
+  - **Unified Executable (`CineRTX.exe`)**: Strictly **1 physical system DLL** (`kernel32.dll`) + 1 MSVC STL synchronization API Set (`api-ms-win-core-synch-l1-2-0.dll`) — zero static `user32.dll`, `gdi32.dll`, `d3d12.dll`, `dxgi.dll`, `bcrypt.dll`, or `advapi32.dll` imports.
+  - All GUI/D3D12/Audio/NVOF/NGX APIs are loaded on demand via `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`; `--headless` CLI invocations load zero GUI DLLs.
 - **Pure-GPU Zero-Copy Pipeline**: Video frames reside 100% in GPU device memory from decoding (`NVDEC`), through D3D12/CUDA zero-copy interop for RTX Video SDK (`VSR` + `TrueHDR`), fused CUDA P010 packing, to hardware encoding (`NVENC`), with zero preview readback (`D2H == 0 B`) via DirectComposition.
 - **Dual-Path True Frame Interpolation**: Route A uses driver-native NVOFA hardware optical flow with PTX motion compensation; Route B uses TensorRT 10.13.3.9 + RIFE v4.25 deep-learning inference. Both live inside the isolated `rtx_ngx_bridge.dll` plugin and share one `D3D12Interop` CUDA context, with hard scene-cut duplicate bypass.
 - **Default AV1 10-bit Hardware Encoding**: Modern AV1 10-bit HDR10 encoding by default on NVIDIA Ada Lovelace / Blackwell (>= sm_89), with automatic graceful fallback to HEVC Main10 on earlier RTX architectures.
 - **Three-End SSOT Architecture**: One `kParamSchema` contract of 20 professional parameters (`include/rtx/param_schema.h`) and one bilingual dictionary (`include/rtx/i18n.h`) drive the Win32 native UI, WebUI, and CLI — zero parameter drift between frontends.
-- **Win32 "3+1" Four-State Pro Workstation**: NVIDIA Signature Green (`#76B900`) native UI with `[1] Encoder` transcode matrix, `[2] Player` review playback, `[3] NLE` four-track timeline on the **705,600,000 Hz Flicks** lossless timebase, and the `+1` fourth form (double-click video association for borderless fullscreen dynamic-VSR quick playback).
+- **Win32 "3+1" Four-State Pro Workstation**: NVIDIA Signature Green (`#76B900`) native UI with `[1] Encoder` transcode matrix, `[2] Player` review playback, `[3] NLE` four-track timeline on the **706,305,600,000 Hz Flicks** NTSC-exact lossless timebase, and the `+1` fourth form (double-click video association for borderless fullscreen dynamic-VSR quick playback).
 - **In-Place Dynamic Localization (`Ctrl+L`)**: Instant table-driven hot reload between English and Chinese across all frontends without restarting.
 - **Self-Contained Single Executable & DebugView Logging**: Surgery-trimmed static FFmpeg (`libavformat`/`libavcodec` bitstream filters) linked statically; live diagnostics stream via `OutputDebugStringW` (`[CineRTX]`) with zero disk log files.
 
@@ -39,18 +39,18 @@ Run `CineRTX.exe` without arguments to launch the native four-state workstation:
 ```powershell
 python webui/server.py --port 8787
 ```
-The zero-dependency JSON bridge talks to `CineRTX.exe` or `rtx_headless_cli.exe` via `--schema-json` and `--session-stdio` — identical parameters, identical states.
+The zero-dependency JSON bridge talks to `CineRTX.exe` via `--schema-json` and `--session-stdio` — identical parameters, identical states.
 
-### 3. Command Line Interface (Desktop CLI & Pure Headless CLI)
-Use `rtx_headless_cli.exe` on headless/server environments (zero GUI subsystem) or `CineRTX.exe` with arguments on desktop:
+### 3. Command Line Interface (Unified Single-EXE CLI)
+Use `CineRTX.exe` with `--headless` or transcode arguments (loads zero GUI DLLs in headless mode):
 
 ```powershell
-# 1. Print version (0.4.0) and export 20-parameter SSOT schema JSON
-./rtx_headless_cli.exe --version
-./rtx_headless_cli.exe --schema-json
+# 1. Print version (0.5.0) and export 20-parameter SSOT schema JSON
+./CineRTX.exe --version
+./CineRTX.exe --headless --schema-json
 
 # 2. Hardware probe and environment diagnostics
-./rtx_headless_cli.exe --probe
+./CineRTX.exe --headless --probe
 
 # 3. Default out-of-the-box 4K 60fps HDR10 remaster
 # (AV1 10-bit + NVOFA optical flow + VSR 4 + TrueHDR 1000 nits)
@@ -63,7 +63,7 @@ Use `rtx_headless_cli.exe` on headless/server environments (zero GUI subsystem) 
 ./CineRTX.exe --input in.mp4 --output out_rife.mp4 --rife-engine models/rife_v4.25.engine
 
 # 6. View full CLI options
-./rtx_headless_cli.exe --help
+./CineRTX.exe --help
 ```
 
 ### 4. DebugView Live Diagnostics
@@ -85,19 +85,19 @@ Launch Sysinternals DebugView, enable "Capture Win32 + Global Win32", and filter
 # 1. Configure (MSVC preset; on machines without VS use the zig-windows preset)
 cmake --preset windows-msvc-ninja
 
-# 2. Compile targets (CineRTX.exe, rtx_headless_cli.exe, rtx_ngx_bridge.dll, rtx_tests.exe)
+# 2. Compile targets (CineRTX.exe, rtx_ngx_bridge.dll, rtx_tests.exe)
 cmake --build --preset windows-msvc-ninja
 
-# 3. Run full unit test suite (147 tests)
+# 3. Run full unit test suite (165 tests)
 ./.vs/build/cmake/windows-msvc-ninja/rtx_tests.exe
 
-# 4. Run Phase 12 five native CMake hard audit gates
+# 4. Run Phase 13 native CMake hard audit gates (or simply run .\build.bat)
 cmake -P cmake/AuditTypes.cmake
 cmake -P cmake/AuditSloc.cmake
 cmake -P cmake/AuditSpdx.cmake
 cmake -P cmake/AuditPrivacy.cmake
-cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/CineRTX.exe -DMODE=GUI -P cmake/AuditImports.cmake
-cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/rtx_headless_cli.exe -DMODE=HEADLESS -P cmake/AuditImports.cmake
+cmake -P cmake/ContractGuard.cmake
+cmake -DTARGET_BIN=.vs/build/cmake/windows-msvc-ninja/CineRTX.exe -P cmake/AuditImports.cmake
 ```
 
 Binaries land under `.vs/build/cmake/<preset>/` (see `CMakePresets.json`).
@@ -110,7 +110,7 @@ To create a clean, standalone release package (~34 MB):
 ```powershell
 cmake -DBUILD_DIR=.vs/build/cmake/windows-msvc-ninja -P cmake/PackageRelease.cmake
 ```
-Generates `.vs/build/dist/CineRTX-v0.4.0-windows-x64.zip` accompanied by SHA-256 manifests and instructions.
+Generates `.vs/build/dist/CineRTX-v0.5.0-windows-x64.zip` accompanied by SHA-256 manifests and instructions.
 
 ---
 

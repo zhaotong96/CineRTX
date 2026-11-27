@@ -261,6 +261,11 @@ RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_build_rife_engine(
 RTX_SHIM_API void RTX_SHIM_CALL rtx_ngx_bridge_destroy_rife(
     RtxNgxBridge* bridge
 );
+/* Returns 1 if the last NVOFA interpolate_nv12 call detected a hard scene cut
+ * (atomically resets the latched flag to 0 on read). */
+RTX_SHIM_API int32_t RTX_SHIM_CALL rtx_ngx_bridge_consume_nvof_scene_cut(
+    RtxNgxBridge* bridge
+);
 /* ------------------------------------------------------------------------- */
 /* ABI v5 append-only extensions (Phase 11.2, C-02/C-03).                     */
 /*                                                                           */

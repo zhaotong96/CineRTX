@@ -12,8 +12,60 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <tuple>
 
 namespace rtx_ngx {
+
+// Wave 2-A (DEC-011): 4 discrete single-profile engine buckets (strictly 1 OptimizationProfile per .engine).
+enum class RifeAspectBucket : uint8_t {
+    Ultra  = 0,  // R > 2.05  (21:9 cinema)
+    Wide   = 1,  // 1.20 < R <= 2.05 (16:9 landscape)
+    Square = 2,  // 0.80 <= R <= 1.20 (1:1 / 4:3)
+    Tall   = 3,  // R < 0.80  (9:16 portrait)
+};
+
+[[nodiscard]] constexpr RifeAspectBucket classifyRifeBucket(uint32_t width, uint32_t height) noexcept {
+    if (width == 0u || height == 0u) return RifeAspectBucket::Wide;
+    const uint64_t ratio_x100 = (static_cast<uint64_t>(width) * 100ULL) / static_cast<uint64_t>(height);
+    if (ratio_x100 > 205ULL) return RifeAspectBucket::Ultra;
+    if (ratio_x100 > 120ULL) return RifeAspectBucket::Wide;
+    if (ratio_x100 >= 80ULL) return RifeAspectBucket::Square;
+    return RifeAspectBucket::Tall;
+}
+
+[[nodiscard]] constexpr const char* rifeBucketEngineFilename(RifeAspectBucket bucket) noexcept {
+    switch (bucket) {
+        case RifeAspectBucket::Ultra:  return "rife_v4.25_ultra.engine";
+        case RifeAspectBucket::Wide:   return "rife_v4.25_wide.engine";
+        case RifeAspectBucket::Square: return "rife_v4.25_square.engine";
+        case RifeAspectBucket::Tall:   return "rife_v4.25_tall.engine";
+    }
+    return "rife_v4.25_wide.engine";
+}
+
+// Tuple: (opt_w, opt_h, max_w, max_h) — strictly 1 OptimizationProfile per bucket ([DEC-011])
+using RifeBucketProfileDims = std::tuple<int, int, int, int>;
+[[nodiscard]] constexpr RifeBucketProfileDims rifeBucketProfileDims(RifeAspectBucket bucket) noexcept {
+    switch (bucket) {
+        case RifeAspectBucket::Ultra:  return {2560, 1088, 5120, 1600};
+        case RifeAspectBucket::Wide:   return {1920, 1088, 3840, 2176};
+        case RifeAspectBucket::Square: return {1472, 1472, 2560, 2560};
+        case RifeAspectBucket::Tall:   return {1088, 1920, 2176, 3840};
+    }
+    return {1920, 1088, 3840, 2176};
+}
+
+// Tuple: (src_w, src_h, pad_w, pad_h, pad_left, pad_top, bucket)
+using RifeGeometryDesc = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, RifeAspectBucket>;
+
+[[nodiscard]] constexpr RifeGeometryDesc calculateRifeGeometry(uint32_t width, uint32_t height, uint32_t align = 128u) noexcept {
+    const uint32_t a = (align >= 32u && (align & (align - 1u)) == 0u) ? align : 128u;
+    const uint32_t pad_w = ((width + a - 1u) / a) * a;
+    const uint32_t pad_h = ((height + a - 1u) / a) * a;
+    const uint32_t pad_left = (pad_w - width) / 2u;
+    const uint32_t pad_top  = (pad_h - height) / 2u;
+    return std::make_tuple(width, height, pad_w, pad_h, pad_left, pad_top, classifyRifeBucket(width, height));
+}
 
 // @rtx-type-justification
 // Category: NonTrivial-StateMachine
@@ -90,7 +142,12 @@ private:
     uint64_t last_prev_nv12_ = 0;
     uint64_t last_curr_nv12_ = 0;
     uint32_t last_pitch_ = 0;
+    float last_alpha_ = -1.0f;
     int32_t last_scene_cut_ = 0;
+    int32_t last_full_range_ = -1;
+    uint32_t cache_generation_ = 0;
+    uint32_t last_cache_generation_ = 0;
+    void* rife_stream_ = nullptr;
     bool cache_valid_ = false;
     bool alpha_probe_passed_ = false;
     float ema_motion_ = 0.03f;

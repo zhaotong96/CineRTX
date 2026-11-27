@@ -29,6 +29,8 @@ NvCuResult (*g_init)(unsigned int) = nullptr;
 NvCuResult (*g_device_get)(int*, int) = nullptr;
 NvCuResult (*g_ctx_get_current)(NvCuContext*) = nullptr;
 NvCuResult (*g_ctx_set_current)(NvCuContext) = nullptr;
+NvCuResult (*g_ctx_push_current)(NvCuContext) = nullptr;
+NvCuResult (*g_ctx_pop_current)(NvCuContext*) = nullptr;
 NvCuResult (*g_primary_ctx_retain)(NvCuContext*, int) = nullptr;
 NvCuResult (*g_module_load_data)(NvCuModule*, const void*) = nullptr;
 NvCuResult (*g_module_get_function)(NvCuFunction*, NvCuModule, const char*) = nullptr;
@@ -45,6 +47,8 @@ NvCuResult (*g_memcpy_htod)(NvCuDevicePtr, const void*, size_t) = nullptr;
 NvCuResult (*g_memcpy_dtoh)(void*, NvCuDevicePtr, size_t) = nullptr;
 NvCuResult (*g_memcpy_dtod_async)(NvCuDevicePtr, NvCuDevicePtr, size_t, NvCuStream) = nullptr;
 NvCuResult (*g_memset_d32_async)(NvCuDevicePtr, unsigned int, size_t, NvCuStream) = nullptr;
+NvCuResult (*g_stream_create)(NvCuStream*, unsigned int) = nullptr;
+NvCuResult (*g_stream_destroy)(NvCuStream) = nullptr;
 NvCuResult (*g_stream_sync)(NvCuStream) = nullptr;
 NvCuResult (*g_memcpy_2d_async)(const void*, NvCuStream) = nullptr;
 
@@ -77,6 +81,8 @@ void ensureLoaded() noexcept {
         load(g_device_get, "cuDeviceGet");
         load(g_ctx_get_current, "cuCtxGetCurrent");
         load(g_ctx_set_current, "cuCtxSetCurrent");
+        load(g_ctx_push_current, "cuCtxPushCurrent_v2", "cuCtxPushCurrent");
+        load(g_ctx_pop_current, "cuCtxPopCurrent_v2", "cuCtxPopCurrent");
         load(g_primary_ctx_retain, "cuDevicePrimaryCtxRetain");
         load(g_module_load_data, "cuModuleLoadData");
         load(g_module_get_function, "cuModuleGetFunction");
@@ -92,6 +98,8 @@ void ensureLoaded() noexcept {
         load(g_memcpy_dtoh, "cuMemcpyDtoH_v2", "cuMemcpyDtoH");
         load(g_memcpy_dtod_async, "cuMemcpyDtoDAsync_v2", "cuMemcpyDtoDAsync");
         load(g_memset_d32_async, "cuMemsetD32Async");
+        load(g_stream_create, "cuStreamCreate");
+        load(g_stream_destroy, "cuStreamDestroy_v2", "cuStreamDestroy");
         load(g_stream_sync, "cuStreamSynchronize");
         load(g_memcpy_2d_async, "cuMemcpy2DAsync_v2", "cuMemcpy2DAsync");
 
@@ -110,6 +118,8 @@ NvCuResult init(unsigned int flags) noexcept { ensureLoaded(); return g_init ? g
 NvCuResult deviceGet(int* device, int ordinal) noexcept { ensureLoaded(); return g_device_get ? g_device_get(device, ordinal) : kCudaNotReady; }
 NvCuResult ctxGetCurrent(NvCuContext* ctx) noexcept { ensureLoaded(); return g_ctx_get_current ? g_ctx_get_current(ctx) : kCudaNotReady; }
 NvCuResult ctxSetCurrent(NvCuContext ctx) noexcept { ensureLoaded(); return g_ctx_set_current ? g_ctx_set_current(ctx) : kCudaNotReady; }
+NvCuResult ctxPushCurrent(NvCuContext ctx) noexcept { ensureLoaded(); return g_ctx_push_current ? g_ctx_push_current(ctx) : kCudaNotReady; }
+NvCuResult ctxPopCurrent(NvCuContext* ctx) noexcept { ensureLoaded(); return g_ctx_pop_current ? g_ctx_pop_current(ctx) : kCudaNotReady; }
 NvCuResult primaryCtxRetain(NvCuContext* ctx, int device) noexcept { ensureLoaded(); return g_primary_ctx_retain ? g_primary_ctx_retain(ctx, device) : kCudaNotReady; }
 NvCuResult moduleLoadData(NvCuModule* mod, const void* image) noexcept { ensureLoaded(); return g_module_load_data ? g_module_load_data(mod, image) : kCudaNotReady; }
 NvCuResult moduleGetFunction(NvCuFunction* fn, NvCuModule mod, const char* name) noexcept { ensureLoaded(); return g_module_get_function ? g_module_get_function(fn, mod, name) : kCudaNotReady; }
@@ -141,6 +151,8 @@ NvCuResult memcpyHtoD(NvCuDevicePtr dst, const void* src, size_t bytes) noexcept
 NvCuResult memcpyDtoH(void* dst, NvCuDevicePtr src, size_t bytes) noexcept { ensureLoaded(); return g_memcpy_dtoh ? g_memcpy_dtoh(dst, src, bytes) : kCudaNotReady; }
 NvCuResult memcpyDtoDAsync(NvCuDevicePtr dst, NvCuDevicePtr src, size_t bytes, NvCuStream stream) noexcept { ensureLoaded(); return g_memcpy_dtod_async ? g_memcpy_dtod_async(dst, src, bytes, stream) : kCudaNotReady; }
 NvCuResult memsetD32Async(NvCuDevicePtr dst, unsigned int value, size_t count, NvCuStream stream) noexcept { ensureLoaded(); return g_memset_d32_async ? g_memset_d32_async(dst, value, count, stream) : kCudaNotReady; }
+NvCuResult streamCreate(NvCuStream* stream, unsigned int flags) noexcept { ensureLoaded(); return g_stream_create ? g_stream_create(stream, flags) : kCudaNotReady; }
+NvCuResult streamDestroy(NvCuStream stream) noexcept { ensureLoaded(); return g_stream_destroy ? g_stream_destroy(stream) : kCudaNotReady; }
 NvCuResult streamSync(NvCuStream stream) noexcept { ensureLoaded(); return g_stream_sync ? g_stream_sync(stream) : kCudaNotReady; }
 NvCuResult memcpy2DAsync(const void* copy_desc, NvCuStream stream) noexcept { ensureLoaded(); return g_memcpy_2d_async ? g_memcpy_2d_async(copy_desc, stream) : kCudaNotReady; }
 

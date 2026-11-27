@@ -105,14 +105,11 @@ RTX_TEST(param_schema_ssot_contract) {
 
     profile.codec = "av1_cpu";
     auto r_cpu_av1 = validateAndNormalizeProfile(profile, true);
-    RTX_REQUIRE(!r_cpu_av1.has_value());
-// CPU codecs return structured ErrorCode::Unsupported
-    RTX_CHECK(r_cpu_av1.error().code == ErrorCode::Unsupported);
-
+    RTX_REQUIRE(r_cpu_av1.has_value());
+// Phase 13 Wave 3: CPU CRF codecs (av1_cpu / hevc_cpu) are first-class supported.
     profile.codec = "hevc_cpu";
     auto r_cpu_hevc = validateAndNormalizeProfile(profile, true);
-    RTX_REQUIRE(!r_cpu_hevc.has_value());
-    RTX_CHECK(r_cpu_hevc.error().code == ErrorCode::Unsupported);
+    RTX_REQUIRE(r_cpu_hevc.has_value());
 
     profile.codec = "h264";
     RTX_CHECK(!validateAndNormalizeProfile(profile, true).has_value());

@@ -35,4 +35,16 @@ constexpr void resetShotSegmenter(ShotGroupSegmenter& state) noexcept {
     uint64_t frame_index,
     const FrameDiffMetrics& metrics) noexcept;
 
+// Phase 13 (Wave B-A / 79_ Step 2.3): Stateless public scene-cut & fade-to-black temporal boundary bus.
+enum class TemporalBoundaryType : uint8_t {
+    None = 0,
+    HardCut = 1,
+    FadeToBlack = 2,
+    HighMotion = 3,
+};
+
+[[nodiscard]] TemporalBoundaryType analyze_temporal_boundary(
+    const uint8_t* prev_y, const uint8_t* curr_y,
+    int width, int height, int pitch) noexcept;
+
 }  // namespace rtx

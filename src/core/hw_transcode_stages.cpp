@@ -5,12 +5,101 @@
 #include "rtx/audio_mixer_avx2.h"
 #include "rtx/vram_scheduler.h"
 #include "rtx/logger.h"
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <utility>
+#include <vector>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace rtx {
+
+namespace {
+
+void writeWebuiPreviewBmpIfDue(NgxRemasterBridge& loader, RtxNgxBridge* bridge, uint32_t pitch) {
+#if defined(_WIN32)
+    if (bridge == nullptr || pitch < 960u * 4u) return;
+    static std::atomic<int64_t> last_dump_ms{0};
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t prev_ms = last_dump_ms.load(std::memory_order_relaxed);
+    if (now_ms - prev_ms < 66 || !last_dump_ms.compare_exchange_strong(prev_ms, now_ms)) {
+        return;
+    }
+
+    constexpr uint32_t kW = 960u;
+    constexpr uint32_t kH = 540u;
+    constexpr uint32_t kRowBytes = kW * 3u;
+    constexpr uint32_t kPixelBytes = kRowBytes * kH;
+    constexpr uint32_t kTotalBytes = 54u + kPixelBytes;
+
+    std::vector<uint8_t> raw(static_cast<size_t>(pitch) * kH);
+    if (loader.downloadPreview(bridge, raw.data(), raw.size()) != RTX_OK) {
+        return;
+    }
+
+    std::vector<uint8_t> bmp(kTotalBytes, 0);
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    std::memcpy(&bmp[2], &kTotalBytes, 4);
+    const uint32_t offset = 54u;
+    std::memcpy(&bmp[10], &offset, 4);
+    const uint32_t dib_size = 40u;
+    std::memcpy(&bmp[14], &dib_size, 4);
+    const int32_t w_i32 = static_cast<int32_t>(kW);
+    const int32_t h_i32 = static_cast<int32_t>(kH);
+    std::memcpy(&bmp[18], &w_i32, 4);
+    std::memcpy(&bmp[22], &h_i32, 4);
+    const uint16_t planes = 1u;
+    const uint16_t bpp = 24u;
+    std::memcpy(&bmp[26], &planes, 2);
+    std::memcpy(&bmp[28], &bpp, 2);
+    std::memcpy(&bmp[34], &kPixelBytes, 4);
+
+    for (uint32_t y = 0; y < kH; ++y) {
+        const uint32_t* src = reinterpret_cast<const uint32_t*>(
+            raw.data() + static_cast<size_t>(kH - 1u - y) * pitch);
+        uint8_t* dst = bmp.data() + 54u + static_cast<size_t>(y) * kRowBytes;
+        for (uint32_t x = 0; x < kW; ++x) {
+            const uint32_t px = src[x];
+            dst[x * 3u + 0u] = static_cast<uint8_t>(((px >> 20) & 0x3FFu) >> 2);  // B
+            dst[x * 3u + 1u] = static_cast<uint8_t>(((px >> 10) & 0x3FFu) >> 2);  // G
+            dst[x * 3u + 2u] = static_cast<uint8_t>((px & 0x3FFu) >> 2);          // R
+        }
+    }
+
+    wchar_t tmp_dir[MAX_PATH]{};
+    const DWORD dir_len = GetTempPathW(MAX_PATH, tmp_dir);
+    if (dir_len == 0 || dir_len >= MAX_PATH) return;
+    const std::filesystem::path dir_path(tmp_dir);
+    const std::filesystem::path tmp_path = dir_path / L"cinertx_latest_preview.bmp.tmp";
+    const std::filesystem::path dst_path = dir_path / L"cinertx_latest_preview.bmp";
+    {
+        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!out) return;
+        out.write(reinterpret_cast<const char*>(bmp.data()), static_cast<std::streamsize>(bmp.size()));
+        if (!out) return;
+    }
+    (void)MoveFileExW(tmp_path.c_str(), dst_path.c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+    (void)loader; (void)bridge; (void)pitch;
+#endif
+}
+
+}  // namespace
 
 RemasterPipeline::RemasterPipeline(const HwTranscodeOptions& options)
     : options_(options) {
@@ -89,16 +178,21 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
         // Phase 11.4-F (PKG-G4): Dual-topology adaptive routing.
         // Spatial upscale (e.g. 1080p -> 4K) forces true fg-first (native 1080p RIFE scale=1.0 + VSR 2x).
         // Same-resolution 4K -> 4K enables physical scale=0.5f RIFE (1080p half-res flow + bilinear 4K).
-        const bool is_spatial_upscale =
-            (session_->info().width < session_->targetWidth() ||
-             session_->info().height < session_->targetHeight());
-        const bool use_fg_first = is_spatial_upscale || !options_.vsr_before_fg;
-        const uint32_t rife_w = static_cast<uint32_t>(
-            use_fg_first ? session_->info().width : session_->targetWidth());
-        const uint32_t rife_h = static_cast<uint32_t>(
-            use_fg_first ? session_->info().height : session_->targetHeight());
+        // Phase 13 (Wave 2-A Task 3 + Wave 4-B Task 1): Honor user pipeline order (vsr_before_fg)
+        // without silent fg-first override, and apply adaptive infer_scale for 4K/ultrawide workloads.
+        // Doc 57 (Task 1): synthesizeAndRemasterWindow always feeds decoded native NV12 surfaces
+        // into RIFE before VSR remaster; lock RIFE init geometry strictly to native info.width x info.height.
+        const bool use_fg_first = true;
+        const uint32_t rife_w = static_cast<uint32_t>(session_->info().width);
+        const uint32_t rife_h = static_cast<uint32_t>(session_->info().height);
+        if (rife_w == 0u || rife_h == 0u || (rife_w & 1u) != 0u || (rife_h & 1u) != 0u) {
+            return err(ErrorCode::InvalidArgument,
+                       std::format("RIFE NV12 geometry guard failed: invalid surface dimensions ({}x{})",
+                                   rife_w, rife_h));
+        }
         const float rife_scale =
-            (!use_fg_first && (rife_w >= 2560u || rife_h >= 2160u)) ? 0.5f : 1.0f;
+            (static_cast<uint64_t>(rife_w) * static_cast<uint64_t>(rife_h) >= 2560ULL * 1440ULL ||
+             rife_w >= 2560u || rife_h >= 2160u) ? 0.5f : 1.0f;
         const std::string engine_path_str = options_.rife_engine_path.string();
         RtxRifeInitConfig rife_cfg{};
         rife_cfg.struct_size = sizeof(RtxRifeInitConfig);
@@ -111,9 +205,11 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
         const int32_t r_res = session_->bridgeLoader().initRifeEx(
             session_->bridge(), engine_path_str.c_str(), &rife_cfg, &trt_peak_bytes);
         if (r_res != RTX_OK) {
-            return err(mapShimResult(static_cast<RtxResult>(r_res)),
-                       describe("rtx_ngx_bridge_init_rife_ex", static_cast<RtxResult>(r_res),
-                                session_->bridgeLoader().lastError(session_->bridge())));
+            const std::string diag = describe("rtx_ngx_bridge_init_rife_ex", static_cast<RtxResult>(r_res),
+                                              session_->bridgeLoader().lastError(session_->bridge()));
+            logError(std::format("[RIFE Error] Failed to initialize TensorRT engine ({}, {}x{}, target={}fps): {} — aborting without NVOFA fallback",
+                                 engine_path_str, rife_w, rife_h, options_.target_fps.num, diag));
+            return err(mapShimResult(static_cast<RtxResult>(r_res)), diag);
         }
         rife_destroy_guard_ = decltype(rife_destroy_guard_)(
             session_->bridge(), [this](void* bridge) {
@@ -125,6 +221,8 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
         fruc_out_buffer_ = session_->bridgeLoader().getInterpBuffer(session_->bridge(), rife_w, rife_h);
         vramSetTrtPeakAllocationBytes(vram_scheduler_, trt_peak_bytes);
         vramSetCodecRefPoolBytes(vram_scheduler_, static_cast<uint64_t>(rife_w) * rife_h * 3ull * 8ull);
+        logInfo(std::format("[Pipeline] Active Route: {} | Target: {} fps | Native: {}x{} | Engine: {}",
+                            report_.fruc_backend, options_.target_fps.num, rife_w, rife_h, engine_path_str));
         logInfo(std::format("FRUC Route B active: TensorRT RIFE ({}, {}x{}, scale={:.1f}, topology={}, A=128, reflect101, trt_peak={} MiB, vram_budget={} MiB)",
                             engine_path_str, rife_w, rife_h, rife_scale,
                             use_fg_first ? "fg-first" : "4k-scale05",
@@ -140,8 +238,8 @@ Result<void> RemasterPipeline::initRemasterAndFgStage() {
     }
     const Rational& out_fps = session_->frameRate();
     delta_out_flicks_ = (out_fps.num > 0 && out_fps.den > 0)
-        ? (705600000LL * out_fps.den / out_fps.num)
-        : 11760000LL;
+        ? (static_cast<int64_t>((kFlicksPerSecond * static_cast<uint64_t>(out_fps.den)) / static_cast<uint64_t>(out_fps.num)))
+        : static_cast<int64_t>(kFlicksPerSecond / 60ULL);
 
     const int target_w = session_->targetWidth();
     const int target_h = session_->targetHeight();
@@ -380,6 +478,7 @@ Result<void> RemasterPipeline::remasterAndEnqueueFrame(
 
     if (preview_this_frame) {
         session_->bridgeLoader().publishPreviewSlot(preview_slot_);
+        writeWebuiPreviewBmpIfDue(session_->bridgeLoader(), session_->bridge(), session_->previewPitch());
     }
     std::vector<uint8_t> hdr10plus;
     if (options_.hdr10plus) {
@@ -415,6 +514,13 @@ Result<void> RemasterPipeline::synthesizeAndRemasterWindow(
     const int input_full_range = (fcr == ColorRange::Full) ? 1 : 0;
 
     if (rife_destroy_guard_) {
+        if (prev_f.width <= 0 || prev_f.height <= 0 ||
+            prev_f.width != session_->info().width || prev_f.height != session_->info().height ||
+            pitch < static_cast<uint32_t>(prev_f.width) ||
+            prev_f.planes[0] == 0 || curr_f.planes[0] == 0 || fruc_out_buffer_ == 0) {
+            ++report_.fruc_failures;
+            return err(ErrorCode::InvalidArgument, "RIFE geometry/pitch mismatch before interpolation");
+        }
         int32_t scene_cut = 0;
         const int32_t status = session_->bridgeLoader().interpolateRife(
             session_->bridge(), prev_f.planes[0], curr_f.planes[0], pitch,
@@ -443,9 +549,17 @@ Result<void> RemasterPipeline::synthesizeAndRemasterWindow(
         const RtxFrameDesc& fb = (alpha < 0.5f) ? prev_f : curr_f;
         return remasterAndEnqueueFrame(fb, out_pts_90k, /*release_slot=*/false);
     }
+    // Phase 13 (Wave 2-B): Real pixel SAD + black-fade scene-cut bypass runs inside
+    // rtx_ngx_bridge_interpolate_nv12 on the actual GPU NV12 Y-plane.
     const RtxResult status = session_->bridgeLoader().interpolateNv12(
         session_->bridge(), prev_f.planes[0], curr_f.planes[0], pitch, alpha, fruc_out_buffer_);
     if (status == RTX_OK) {
+        if (session_->bridgeLoader().consumeNvofSceneCut(session_->bridge()) != 0) {
+            ++report_.fruc_scene_cuts;
+            last_was_cut_ = true;
+            const RtxFrameDesc& fb = (alpha < 0.5f) ? prev_f : curr_f;
+            return remasterAndEnqueueFrame(fb, out_pts_90k, /*release_slot=*/false, /*force_reset_temporal=*/true);
+        }
         ++report_.frames_interpolated;
         RtxFrameDesc interp_frame = prev_f;
         interp_frame.planes[0] = fruc_out_buffer_;
@@ -468,7 +582,7 @@ Result<void> RemasterPipeline::handleDecodedFrame(const RtxFrameDesc& frame) {
                                 vramLastPressureRatio(vram_scheduler_) * 100.0));
         }
     }
-    constexpr int64_t kFlicksPerTick90k = 7840;
+    constexpr int64_t kFlicksPerTick90k = static_cast<int64_t>(kFlicksPerSecond / 90000ULL);
     if (!options_.fruc_enabled || fruc_out_buffer_ == 0) {
         return remasterAndEnqueueFrame(frame, -1, /*release_slot=*/true);
     }
@@ -505,7 +619,7 @@ Result<void> RemasterPipeline::handleDecodedFrame(const RtxFrameDesc& frame) {
     return {};
 }
 Result<void> RemasterPipeline::drainEndOfStream() {
-    constexpr int64_t kFlicksPerTick90k = 7840;
+    constexpr int64_t kFlicksPerTick90k = static_cast<int64_t>(kFlicksPerSecond / 90000ULL);
     if (options_.fruc_enabled && fruc_out_buffer_ != 0 && has_prev_frame_) {
         if (next_out_pts_flicks_ <= prev_pts_flicks_) {
             const int64_t out_pts_90k = (next_out_pts_flicks_ + (kFlicksPerTick90k / 2)) / kFlicksPerTick90k;

@@ -10,10 +10,16 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <ratio>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <stop_token>
+#include <thread>
+#include <vector>
 #include <optional>
 #include <span>
 #include <tuple>
@@ -163,16 +169,61 @@ public:
 
 private:
     WasapiAudioOutput() = default;
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    Result<void> openDevice();
+    void launch();
+    void callbackLoop(std::stop_token st) noexcept;
+    void pumpDevice() noexcept;
+    void publishClock() noexcept;
+    void copyFromRing(float* dst, uint64_t read, uint32_t frames) const noexcept;
+    void copyToRing(const float* src, uint64_t write, uint32_t frames) noexcept;
+    Result<void> reopen();
+    void releaseComHandles() noexcept;
+
+    std::atomic<uint64_t> write_cursor_{0};
+    uint8_t pad_write_cursor_[64 - sizeof(std::atomic<uint64_t>)]{};
+    std::atomic<uint64_t> read_cursor_{0};
+    uint8_t pad_read_cursor_[64 - sizeof(std::atomic<uint64_t>)]{};
+    std::atomic<int64_t> anchor_{0};
+    uint8_t pad_anchor_[64 - sizeof(std::atomic<int64_t>)]{};
+    std::atomic<int64_t> published_flicks_{0};
+    uint8_t pad_published_flicks_[64 - sizeof(std::atomic<int64_t>)]{};
+    std::atomic<int64_t> published_qpc_{0};
+    uint8_t pad_published_qpc_[64 - sizeof(std::atomic<int64_t>)]{};
+    std::atomic<uint64_t> written_frames_{0};
+    uint8_t pad_written_frames_[64 - sizeof(std::atomic<uint64_t>)]{};
+    std::atomic<uint64_t> reconnects_{0};
+    uint8_t pad_reconnects_[64 - sizeof(std::atomic<uint64_t>)]{};
+
+    uint32_t sample_rate_ = 0;
+    uint32_t channels_ = 0;
+    uint32_t buffer_frames_ = 0;
+    uint32_t ring_frames_ = 0;
+    uint64_t clock_freq_ = 0;
+    int64_t qpc_freq_ = 1;
+
+    std::vector<float> ring_;
+    std::atomic<bool> started_{false};
+    std::atomic<bool> invalidated_{false};
+
+    // Opaque Win32/COM handles owned and released in wasapi_audio_output.cpp (zero Windows header bleed)
+    void* enumerator_ = nullptr;
+    void* device_ = nullptr;
+    void* client_ = nullptr;
+    void* render_ = nullptr;
+    void* clock_ = nullptr;
+    void* buffer_event_ = nullptr;
+    void* stop_event_ = nullptr;
+    std::mutex control_;
+    std::jthread worker_;
 };
 
 enum class PlaybackState : uint8_t { Idle = 0, Playing = 1, Paused = 2, Seeking = 3, Ended = 4 };
 
 // Phase 12 (Wave 12.2-C): tuple alias (frame_rate, speed, decode_ahead, vram_budget_bytes, device_index, enable_audio).
-using PlaybackOptions = std::tuple<Rational, double, uint32_t, uint64_t, int, bool>;
+// Tuple: (fps, speed, prefetch_depth, vram_budget, device_idx, enable_audio, null_sink, audio_gain)
+using PlaybackOptions = std::tuple<Rational, double, uint32_t, uint64_t, int, bool, bool, float>;
 [[nodiscard]] inline PlaybackOptions defaultPlaybackOptions() noexcept {
-    return {Rational{24, 1}, 1.0, 5u, 0ull, 0, true};
+    return {Rational{24, 1}, 1.0, 5u, 0ull, 0, true, false, 1.0f};
 }
 
 // @rtx-type-justification
@@ -206,5 +257,42 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+
+// Wave C-2 (80_ Task C-2): Compile-time rational 23.976 -> 60.000 fps phase & WASAPI meltdown guard (+0 named types).
+using Fps23976Duration = std::chrono::duration<int64_t, std::ratio<1001, 24000>>;
+using Fps60000Duration = std::chrono::duration<int64_t, std::ratio<1, 60>>;
+
+enum class PlaybackSyncState : uint8_t {
+    Normal = 0,
+    AudioDrift = 1,
+    MeltdownBypass = 2,
+};
+
+// Tuple: (base_frame_index, pts_seconds, rife_timestep, is_synthetic, clock_state)
+using FractionalPresentationInfo = std::tuple<int64_t, double, float, bool, PlaybackSyncState>;
+
+[[nodiscard]] inline FractionalPresentationInfo computeFractionalFramePhase(
+    int64_t target_display_ticks_60hz,
+    int64_t video_pts_us,
+    int64_t audio_clock_us,
+    int64_t current_frame_idx = 0) noexcept {
+    const int64_t delta_us = audio_clock_us - video_pts_us;
+    const int64_t abs_delta = delta_us < 0 ? -delta_us : delta_us;
+    PlaybackSyncState clk_state = PlaybackSyncState::Normal;
+    if (abs_delta > 8000) {
+        clk_state = PlaybackSyncState::AudioDrift;
+        if (abs_delta > 32000) {
+            // Severe A/V drift (>32ms): AI meltdown bypass, skip RIFE interpolation and hard-copy source frame.
+            return {current_frame_idx, static_cast<double>(video_pts_us) * 1.0e-6,
+                    0.0f, false, PlaybackSyncState::MeltdownBypass};
+        }
+    }
+    const double source_frame_exact =
+        static_cast<double>(target_display_ticks_60hz) * (24000.0 / 1001.0) / 60.0;
+    const int64_t base_frame = static_cast<int64_t>(std::floor(source_frame_exact));
+    const float alpha = static_cast<float>(source_frame_exact - static_cast<double>(base_frame));
+    return {base_frame, source_frame_exact * (1001.0 / 24000.0), alpha, alpha > 0.001f, clk_state};
+}
 
 }  // namespace rtx

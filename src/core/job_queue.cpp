@@ -1,12 +1,39 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Plugin-Exception
 #include "rtx/job_queue.h"
+#include "rtx/io.h"
+#include "rtx/render_graph.h"
 #include "rtx/string_utils.h"
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <ranges>
 #include <format>
 
 namespace rtx {
+
+bool areConcatInputsHomogeneous(std::span<const std::filesystem::path> inputs) {
+    if (inputs.size() <= 1u) return true;
+    std::vector<MediaInfo> probed;
+    probed.reserve(inputs.size());
+    for (const auto& p : inputs) {
+        auto demuxer = makeFfmpegDemuxer();
+        if (!demuxer) return false;
+        auto info = demuxer->open(p);
+        if (!info.has_value()) return false;
+        probed.push_back(std::move(*info));
+    }
+    const MediaInfo& ref = probed.front();
+    return std::ranges::all_of(std::span<const MediaInfo>(probed).subspan(1), [&ref](const MediaInfo& m) {
+        return m.codec == ref.codec &&
+               m.width == ref.width &&
+               m.height == ref.height &&
+               m.bit_depth == ref.bit_depth &&
+               static_cast<int64_t>(m.frame_rate.num) * ref.frame_rate.den ==
+                   static_cast<int64_t>(ref.frame_rate.num) * m.frame_rate.den &&
+               m.audio_streams == ref.audio_streams;
+    });
+}
 
 std::string formatEncoderJobSummary(const EncoderJob& job) {
     const auto& [id, nm, inputs, eo, od, profile, st, fi, fp, tp, fps, el, em, fr] = job;
@@ -236,20 +263,98 @@ void EncoderJobQueue::workerLoop() {
         bool job_ok = true;
         std::string err_msg;
         std::vector<HwTranscodeReport> reports;
-        const size_t file_count = std::max<size_t>(1, c_inputs.size());
+        std::vector<std::filesystem::path> exec_inputs = c_inputs;
+        std::filesystem::path concat_manifest_path;
+        bool use_heterogeneous_render_graph = false;
+        if (jobOutputMode(active_id) == JobOutputMode::MergeConcat && exec_inputs.size() > 1u) {
+            if (areConcatInputsHomogeneous(exec_inputs)) {
+                concat_manifest_path = std::filesystem::temp_directory_path() /
+                    ("cinertx_concat_" + std::to_string(active_id) + ".ffconcat");
+                std::ofstream mf(concat_manifest_path, std::ios::binary | std::ios::trunc);
+                if (mf) {
+                    mf << buildSafeConcatList(exec_inputs);
+                    mf.close();
+                    exec_inputs = {concat_manifest_path};
+                }
+            } else {
+                use_heterogeneous_render_graph = true;
+            }
+        }
+        if (use_heterogeneous_render_graph) {
+            std::vector<RenderGraphSegment> v_segs;
+            std::vector<AudioGraphSegment> a_segs;
+            v_segs.reserve(exec_inputs.size());
+            a_segs.reserve(exec_inputs.size());
+            int64_t cursor_flicks = 0;
+            bool probe_ok = true;
+            for (size_t idx = 0; idx < exec_inputs.size(); ++idx) {
+                auto demuxer = makeFfmpegDemuxer();
+                auto info = demuxer ? demuxer->open(exec_inputs[idx])
+                                    : Result<MediaInfo>(err(ErrorCode::State, "demuxer unavailable"));
+                if (!info.has_value()) {
+                    probe_ok = false;
+                    err_msg = info.error().toString();
+                    break;
+                }
+                const int64_t dur_ms = std::max<int64_t>(1, info->duration_ms);
+                const int64_t dur_flicks = dur_ms * 706305600LL;
+                const std::string utf8_path = rtx::str::pathToUtf8(exec_inputs[idx]);
+                v_segs.emplace_back(utf8_path, 0LL, dur_flicks, cursor_flicks, cursor_flicks + dur_flicks, idx > 0, idx > 0);
+                if (info->audio_streams > 0) {
+                    a_segs.emplace_back(utf8_path, 0LL, dur_flicks, cursor_flicks, cursor_flicks + dur_flicks, 1.0f);
+                }
+                cursor_flicks += dur_flicks;
+            }
+            if (!probe_ok) {
+                job_ok = false;
+            } else {
+                TranscodeProfile prof = c_profile;
+                prof.input = rtx::str::pathToUtf8(exec_inputs.front());
+                if (!c_exp_out.empty()) {
+                    prof.output = rtx::str::pathToUtf8(c_exp_out);
+                    prof.auto_output = false;
+                } else if (prof.output.empty() || prof.auto_output) {
+                    prof.output.clear();
+                    prof.auto_output = true;
+                }
+                (void)validateAndNormalizeProfile(prof, false);
+                HwTranscodeOptions opts = profileToHwOptions(prof);
+                if (!c_out_dir.empty() && prof.auto_output) {
+                    opts.output_path = c_out_dir / opts.output_path.filename();
+                }
+                opts.cancel = &skip_current_requested_;
+                opts.split_ratio = &active_split_ratio_;
+                if (isPreviewEnabled()) {
+                    if (!opts.preview) {
+                        opts.preview = [](const void*, std::uint32_t) {};
+                    }
+                } else {
+                    opts.preview = nullptr;
+                }
+                auto res = runNvidiaRemasterRenderGraph(opts, v_segs, a_segs);
+                if (!res.has_value()) {
+                    job_ok = false;
+                    err_msg = res.error().toString();
+                } else {
+                    reports.push_back(std::move(*res));
+                }
+            }
+            exec_inputs.clear();
+        }
+        const size_t file_count = std::max<size_t>(1, exec_inputs.size());
 
-        for (size_t i = 0; i < c_inputs.size(); ++i) {
+        for (size_t i = 0; i < exec_inputs.size(); ++i) {
             if (stop_all_requested_.load() || skip_current_requested_.load()) {
                 job_ok = false;
                 err_msg = "Cancelled";
                 break;
             }
             TranscodeProfile prof = c_profile;
-            prof.input = rtx::str::pathToUtf8(c_inputs[i]);
-            if (c_inputs.size() == 1 && !c_exp_out.empty()) {
+            prof.input = rtx::str::pathToUtf8(exec_inputs[i]);
+            if (exec_inputs.size() == 1 && !c_exp_out.empty()) {
                 prof.output = rtx::str::pathToUtf8(c_exp_out);
                 prof.auto_output = false;
-            } else if (c_inputs.size() == 1 && !prof.output.empty() && !prof.auto_output) {
+            } else if (exec_inputs.size() == 1 && !prof.output.empty() && !prof.auto_output) {
             } else {
                 prof.output.clear();
                 prof.auto_output = true;
@@ -261,6 +366,13 @@ void EncoderJobQueue::workerLoop() {
             }
             opts.cancel = &skip_current_requested_;
             opts.split_ratio = &active_split_ratio_;
+            if (isPreviewEnabled()) {
+                if (!opts.preview) {
+                    opts.preview = [](const void*, std::uint32_t) {};
+                }
+            } else {
+                opts.preview = nullptr;
+            }
 
             auto last_prog_emit = std::chrono::steady_clock::now() - std::chrono::seconds(1);
             opts.progress = [this, active_id, i, file_count, &last_prog_emit](const HwTranscodeProgress& p) {
@@ -322,6 +434,10 @@ void EncoderJobQueue::workerLoop() {
             }
             emit(JobQueueEventKind::JobProgress, prog_snap);
         }
+        if (!concat_manifest_path.empty()) {
+            std::error_code rm_ec;
+            std::filesystem::remove(concat_manifest_path, rm_ec);
+        }
         EncoderJob fin_snap{};
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -351,6 +467,95 @@ void EncoderJobQueue::workerLoop() {
         emit(JobQueueEventKind::JobFinished, fin_snap);
         if (!worker_active_.load()) break;
     }
+}
+
+
+Result<void> EncoderJobQueue::setJobOutputMode(uint64_t job_id, JobOutputMode mode) {
+    EncoderJob snap{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(jobs_.begin(), jobs_.end(),
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
+        if (it == jobs_.end()) return err(ErrorCode::NotFound, "job not found");
+        if (encoderJobStatus(*it) != JobStatus::Pending) {
+            return err(ErrorCode::State, "only Pending jobs can change output mode");
+        }
+        job_modes_[job_id] = mode;
+        snap = *it;
+    }
+    emit(JobQueueEventKind::JobUpdated, snap);
+    return {};
+}
+
+JobOutputMode EncoderJobQueue::jobOutputMode(uint64_t job_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = job_modes_.find(job_id);
+    return (it != job_modes_.end()) ? it->second : JobOutputMode::BatchSeparate;
+}
+
+Result<void> EncoderJobQueue::addJobInputs(uint64_t job_id, std::vector<std::filesystem::path> extra_inputs) {
+    if (extra_inputs.empty()) return {};
+    EncoderJob snap{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(jobs_.begin(), jobs_.end(),
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
+        if (it == jobs_.end()) return err(ErrorCode::NotFound, "job not found");
+        if (encoderJobStatus(*it) != JobStatus::Pending) {
+            return err(ErrorCode::State, "only Pending jobs can add inputs");
+        }
+        auto& inputs = std::get<2>(*it);
+        for (auto& p : extra_inputs) {
+            if (!p.empty()) inputs.push_back(std::move(p));
+        }
+        snap = *it;
+    }
+    emit(JobQueueEventKind::JobUpdated, snap);
+    return {};
+}
+
+Result<void> EncoderJobQueue::removeJobInput(uint64_t job_id, size_t index) {
+    EncoderJob snap{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(jobs_.begin(), jobs_.end(),
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
+        if (it == jobs_.end()) return err(ErrorCode::NotFound, "job not found");
+        if (encoderJobStatus(*it) != JobStatus::Pending) {
+            return err(ErrorCode::State, "only Pending jobs can remove inputs");
+        }
+        auto& inputs = std::get<2>(*it);
+        if (index >= inputs.size()) return err(ErrorCode::InvalidArgument, "input index out of range");
+        inputs.erase(inputs.begin() + static_cast<std::ptrdiff_t>(index));
+        snap = *it;
+    }
+    emit(JobQueueEventKind::JobUpdated, snap);
+    return {};
+}
+
+Result<void> EncoderJobQueue::moveJobInput(uint64_t job_id, size_t from_index, size_t to_index) {
+    EncoderJob snap{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(jobs_.begin(), jobs_.end(),
+            [job_id](const EncoderJob& j) { return encoderJobId(j) == job_id; });
+        if (it == jobs_.end()) return err(ErrorCode::NotFound, "job not found");
+        if (encoderJobStatus(*it) != JobStatus::Pending) {
+            return err(ErrorCode::State, "only Pending jobs can reorder inputs");
+        }
+        auto& inputs = std::get<2>(*it);
+        if (from_index >= inputs.size() || to_index >= inputs.size()) {
+            return err(ErrorCode::InvalidArgument, "input index out of range");
+        }
+        if (from_index != to_index) {
+            auto moved = std::move(inputs[from_index]);
+            inputs.erase(inputs.begin() + static_cast<std::ptrdiff_t>(from_index));
+            inputs.insert(inputs.begin() + static_cast<std::ptrdiff_t>(to_index), std::move(moved));
+        }
+        snap = *it;
+    }
+    emit(JobQueueEventKind::JobUpdated, snap);
+    return {};
 }
 
 }  // namespace rtx

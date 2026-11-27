@@ -4,6 +4,7 @@
 // Flicks timeline contract (W7-2).
 
 #include "test_framework.h"
+#include "rtx/time_model.h"
 
 #include <cmath>
 #include <cstdint>
@@ -19,7 +20,7 @@ RTX_TEST(flicks_exact_division) {
 // 1 flick = 1 / 705,600,000 s.  Every frame period and every audio sample
 // period below must divide it with a zero remainder, which is the property
 // the whole drift budget rests on.
-    RTX_CHECK_EQ(kFlicksPerSecond, static_cast<uint64_t>(705600000));
+    RTX_CHECK_EQ(kFlicksPerSecond, static_cast<uint64_t>(706305600000ULL));
 
     const Rational video_rates[] = {kFps24,  Rational{24000, 1001}, Rational{25, 1},
                                     Rational{30000, 1001}, kFps30, Rational{48000, 1001},
@@ -59,12 +60,12 @@ RTX_TEST(flicks_drift_24h) {
         last = rescaleToFlicksAccum(drift, pts, static_cast<uint32_t>(time_base.num),
                                      static_cast<uint32_t>(time_base.den));
     }
-    const uint64_t expected = (frames - 1) * 1001ull * kFlicksPerSecond / 30000ull;
+    const uint64_t expected = (frames - 1) * ((kFlicksPerSecond * 1001ull) / 30000ull);
     const int64_t difference = last - static_cast<int64_t>(expected);
     RTX_CHECK(difference >= -1 && difference <= 1);
 // Exact expectation in 128-bit terms: (frames-1) * 1001 / 30000 seconds.
 
-    const double drift_ns = static_cast<double>(difference) * (1.0e9 / 705600000.0);
+    const double drift_ns = static_cast<double>(difference) * (1.0e9 / static_cast<double>(kFlicksPerSecond));
     RTX_CHECK(drift_ns <= 1.42);
 }
 // 1 flick = 1.417 ns; a one-flick residual is the analytic floor.
@@ -106,13 +107,13 @@ RTX_TEST(flicks_monotonic_guard) {
     RTX_CHECK_EQ(flicksMonotonicRepairs(guard), static_cast<uint64_t>(0));
 }
 RTX_TEST(flicks_fruc_sliding_window_math) {
-    constexpr int64_t kFlicks = 705600000LL;
+    constexpr int64_t kFlicks = static_cast<int64_t>(kFlicksPerSecond);
 
     {
-        const int64_t delta_in = kFlicks / 24;   // 29,400,000
-        const int64_t delta_out = kFlicks / 48;  // 14,700,000
-        RTX_CHECK_EQ(delta_in, 29400000LL);
-        RTX_CHECK_EQ(delta_out, 14700000LL);
+        const int64_t delta_in = kFlicks / 24;   // 29,429,400,000
+        const int64_t delta_out = kFlicks / 48;  // 14,714,700,000
+        RTX_CHECK_EQ(delta_in, 29429400000LL);
+        RTX_CHECK_EQ(delta_out, 14714700000LL);
 
 // 1. 24 fps -> 48 fps (2x)
         int64_t next_out = 0;
@@ -140,10 +141,10 @@ RTX_TEST(flicks_fruc_sliding_window_math) {
         RTX_CHECK_EQ(interp_count, 24);
     }
     {
-        const int64_t delta_in = kFlicks / 24;   // 29,400,000
-        const int64_t delta_out = kFlicks / 60;  // 11,760,000
-        RTX_CHECK_EQ(delta_in, 29400000LL);
-        RTX_CHECK_EQ(delta_out, 11760000LL);
+        const int64_t delta_in = kFlicks / 24;   // 29,429,400,000
+        const int64_t delta_out = kFlicks / 60;  // 11,771,760,000
+        RTX_CHECK_EQ(delta_in, 29429400000LL);
+        RTX_CHECK_EQ(delta_out, 11771760000LL);
 
         int64_t next_out = 0;
 // 2. 24 fps -> 60 fps (2.5x)
@@ -293,3 +294,16 @@ RTX_TEST(rational_exact_comparison_and_equivalence) {
     RTX_CHECK(zero1 > neg1);
 }
 // 4. Zero and identity
+
+RTX_TEST(ntsc_1001_24h_zero_drift) {
+    // Phase 13 Wave 1 (Gate W1-4): 24h continuous NTSC 23.976 accumulation has zero drift.
+    constexpr int64_t kFrames24h = 2071526LL;
+    int64_t timeline = 0;
+    for (int64_t f = 0; f < kFrames24h; ++f) {
+        timeline += rtx::kFlicksNtsc23976;
+    }
+    RTX_CHECK_EQ(timeline, kFrames24h * rtx::kFlicksNtsc23976);
+    RTX_CHECK(rtx::isZeroRemainderFlicks(timeline, 24000, 1001));
+    RTX_CHECK(rtx::isZeroRemainderFlicks(rtx::kFlicksNtsc2997, 30000, 1001));
+    RTX_CHECK(rtx::isZeroRemainderFlicks(rtx::kFlicksNtsc5994, 60000, 1001));
+}

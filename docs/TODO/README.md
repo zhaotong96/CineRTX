@@ -58,6 +58,8 @@ CineRTX 坚决奉行“如无必要，勿增实体”的极简主义设计哲学
 5. **长稳 soak 常态化**：将 2 小时连续满载（当前记录为环境受阻的 174 分钟累计满载）纳入常规硬件资格认证流程。
 6. **Linux 无头云原生形态**：纯 CUDA 无头引擎与容器化部署曾在早期路线中立项并部分验证，恢复前须重新过专家终审。
 7. **CPU 广播级编码轨道与 CRF 恒定质量码控演进**：依托底层的 `cpu_video_encoder.h/.cpp` 既有架构，评估在纯 GPU 硬件管线之外恢复接入 SVT-AV1 / x265 CPU 软编与 CRF 码控，以满足专业母版压制诉求。
+8. **全仓回退路径 / 兜底路径 / 备份路径必要性审计**（2026-11-27 用户登记 TODO）：逐文件清查全仓源码、CMake 与工具脚本中的各类回退（fallback）、兜底与备份路径，依据第 1 节“奥卡姆剃刀与单一确定性路径”铁律逐项论证其不可替代性，拔除一切冗余旁路与潜在安全/维护盲区。
+9. **融合高可读 `SPEC.md`**（2026-11-27 用户登记 TODO）：将分散在架构文档与各 Phase 规范中的核心契约、状态机与门禁红线融合收敛为单一高可读 `SPEC.md` 权威规格书。
 
 ---
 
@@ -72,3 +74,17 @@ flowchart LR
     style B fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:#ffffff
     style C fill:#3b82f6,stroke:#1d4ed8,stroke-width:2px,color:#ffffff
 ```
+
+---
+
+## Phase 13 Wave 0-A 宪法终局裁决归档映射（Doc 03）
+
+| 序号 | 遗留议题 | 裁决去向 | 状态 |
+| :---: | :--- | :--- | :---: |
+| #1 | NTSC 1001 时基因子扩展 | 收编至 Wave 3-A / Wave 3-B 精确有理数底座 | 已纳入 Phase 13 |
+| #2 | FFmpeg 8.x API 演进适配 | 归档至 Phase 14 路线池（维持 6.x/7.x 稳定 ABI） | Phase 14 |
+| #3 | Nsight Systems 线程级证据 | 归档至 Phase 14 Release 独立 Profiling 附件 | Phase 14 |
+| #4 | HDR10 物理徽标与 Color Matrix | 归档至 Phase 14 路线池 | Phase 14 |
+| #5 | 2 小时 Soak 长稳压测 | 归档至 Phase 14 验收门禁 | Phase 14 |
+| #6 | Linux 无头 Headless 形态 | 归档至 Phase 14 路线池 | Phase 14 |
+| #7 | CPU 软件编码 + CRF 兜底模式 | 收编至 Wave 1-B 交付（`libsvtav1` / `libx265` CRF） | 已纳入 Phase 13 |

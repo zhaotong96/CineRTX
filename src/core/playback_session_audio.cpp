@@ -191,10 +191,15 @@ void MediaPlaybackSession::Impl::audioLoop(std::stop_token stop) {
             wsola_state, decoded, stretched, static_cast<float>(applied), channels);
         feed.resize(produced);
         if (produced > 0) {
-            const std::array<AudioVoice, 1> voices{{
-                {std::span<const float>(stretched.data(), produced), 1.0f},
-            }};
-            mixAvx2(voices, feed);
+            const float audio_gain = std::get<7>(options);
+            if (audio_gain <= 0.0f) {
+                std::fill(feed.begin(), feed.end(), 0.0f);
+            } else {
+                const std::array<AudioVoice, 1> voices{{
+                    {std::span<const float>(stretched.data(), produced), audio_gain},
+                }};
+                mixAvx2(voices, feed);
+            }
         }
         size_t offset = 0;
         while (offset < feed.size()) {

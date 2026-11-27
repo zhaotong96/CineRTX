@@ -31,6 +31,7 @@
 #include <tuple>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -129,7 +130,7 @@ inline constexpr rtx::Flicks kDefaultTimelineSpan =
     const int64_t clamped = std::clamp(playhead_flicks, int64_t{0},
                                        duration_flicks > 0 ? duration_flicks : playhead_flicks);
     const std::string tc = rtx::formatSmpteTimecode(clamped, rtx::kDefaultTimecodeFormat);
-    return std::format(L"SMPTE {} | {} Flicks (705,600,000 Hz)", utf8ToWide(tc), static_cast<long long>(clamped));
+    return std::format(L"SMPTE {} | {} Flicks (706,305,600,000 Hz)", utf8ToWide(tc), static_cast<long long>(clamped));
 }
 
 // Phase 12 (Wave 12.2-B2): tuple alias (width, height, duration_flicks, ok).
@@ -369,6 +370,8 @@ struct WorkstationApp {
     rtx::NleProject project{};
     rtx::EditStacks history{};
     rtx::EncoderJobQueue jobQueue{};
+    uint64_t selectedJobId = 0;
+    std::unordered_set<uint64_t> activeSyncIds;
     std::jthread exportThread;
 
     std::optional<rtx::VideoFrameSink> playbackSink;          // 先声明，逆序最后析构
@@ -390,11 +393,11 @@ struct WorkstationApp {
 // Phase 12 (HYG-P12-05): Zero mutable global app singleton; WorkstationApp is owned by wWinMain
 // and bound to top-level / child window GWLP_USERDATA in WM_NCCREATE (cleared in WM_NCDESTROY).
 [[nodiscard]] inline WorkstationApp* appFromHwnd(HWND hwnd) noexcept {
-    return hwnd ? reinterpret_cast<WorkstationApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA)) : nullptr;
+    return hwnd ? reinterpret_cast<WorkstationApp*>(rtx::sys::getWindowLongPtrW(hwnd, GWLP_USERDATA)) : nullptr;
 }
 [[nodiscard]] inline WorkstationApp* appFromControl(HWND hwnd) noexcept {
     if (auto* direct = appFromHwnd(hwnd)) return direct;
-    HWND root = hwnd ? GetAncestor(hwnd, GA_ROOT) : nullptr;
+    HWND root = hwnd ? rtx::sys::getAncestor(hwnd, GA_ROOT) : nullptr;
     return root ? appFromHwnd(root) : nullptr;
 }
 [[nodiscard]] inline WorkstationApp* getWindowApp(HWND hwnd) noexcept {
@@ -413,6 +416,78 @@ void seekPlaybackFromSlider(HWND hwnd);
 void presentSlotToViewport(HWND hwnd, rtx::BorrowCallback& borrow, std::uint32_t& last_slot,
                            std::uint32_t src_width, std::uint32_t src_height, bool input_is_pq,
                            float max_nits);
+// Doc 48: Pure stateless helpers for dynamic transcode preview geometry and dual-side HDR10/HLG color flags (+0 named types).
+[[nodiscard]] inline std::pair<std::uint32_t, std::uint32_t> derivePreviewDimensions(
+    std::uint64_t resource_bytes, std::uint32_t pitch,
+    std::uint32_t hint_width = 0u, std::uint32_t hint_height = 0u) noexcept {
+    if (pitch < 4u || (pitch % 4u) != 0u || resource_bytes < static_cast<std::uint64_t>(pitch)) {
+        return {0u, 0u};
+    }
+    const std::uint32_t max_w = pitch / 4u;
+    const std::uint32_t buf_h = static_cast<std::uint32_t>(resource_bytes / static_cast<std::uint64_t>(pitch));
+    if (buf_h == 0u || max_w == 0u) {
+        return {0u, 0u};
+    }
+    if (hint_width > 0u && hint_width <= max_w && hint_height == buf_h) {
+        return {hint_width, buf_h};
+    }
+    return {max_w, buf_h};
+}
+
+[[nodiscard]] inline std::tuple<std::uint32_t, float, float> computeTranscodePreviewColorParams(
+    const rtx::MediaInfo& src_info, const rtx::TranscodeProfile& prof,
+    float dst_max_nits = 0.0f) noexcept {
+    const auto [src_primaries, src_transfer, src_matrix, src_range] = src_info.color;
+    (void)src_matrix; (void)src_range;
+    std::uint32_t color_flags = 0u;
+    float left_max_nits = 100.0f;
+    float right_max_nits = 100.0f;
+
+    if (src_transfer == rtx::TransferFunction::SMPTE2084) {
+        color_flags |= (kPreviewLeftPq | kPreviewLeftBt2020);
+        left_max_nits = (src_info.hdr.cll.first > 0)
+            ? static_cast<float>(src_info.hdr.cll.first)
+            : 1000.0f;
+    } else if (src_transfer == rtx::TransferFunction::HLG) {
+        color_flags |= (kPreviewLeftHlg | kPreviewLeftBt2020);
+        left_max_nits = 1000.0f;
+    } else if (src_primaries == rtx::ColorPrimaries::BT2020) {
+        color_flags |= kPreviewLeftBt2020;
+    }
+
+    if (prof.peak_nits > 0) {
+        color_flags |= (kPreviewRightPq | kPreviewRightBt2020);
+        const float peak = (dst_max_nits > 0.0f)
+            ? dst_max_nits
+            : static_cast<float>(prof.peak_nits);
+        right_max_nits = std::max(peak, 203.0f);
+    } else if (src_transfer == rtx::TransferFunction::SMPTE2084) {
+        color_flags |= (kPreviewRightPq | kPreviewRightBt2020);
+        right_max_nits = std::max(left_max_nits, 203.0f);
+    } else if (src_transfer == rtx::TransferFunction::HLG) {
+        color_flags |= (kPreviewRightHlg | kPreviewRightBt2020);
+        right_max_nits = 1000.0f;
+    }
+    return {color_flags, left_max_nits, right_max_nits};
+}
+
+// Doc 58 (Task 2.1): Single source of truth for IDC_CMB_FPS index (0..4) <-> fps_mode (+0 named types).
+[[nodiscard]] inline std::string_view fpsModeStringFromIndex(int index) noexcept {
+    constexpr std::string_view kFpsModeStrings[5] = {
+        "original", "60-nvofa", "120-nvofa", "60-rife", "120-rife"
+    };
+    return kFpsModeStrings[std::clamp(index, 0, 4)];
+}
+
+[[nodiscard]] inline int fpsModeIndexFromString(std::string_view fps_mode) noexcept {
+    if (fps_mode == "original") return 0;
+    if (fps_mode == "60-nvofa") return 1;
+    if (fps_mode == "120-nvofa") return 2;
+    if (fps_mode == "60-rife") return 3;
+    if (fps_mode == "120-rife") return 4;
+    return 1;
+}
+
 void presentPlaybackFrame(HWND hwnd);
 void presentTranscodePreview(HWND hwnd);
 
@@ -432,6 +507,61 @@ void paintOwnerDrawButton(const DRAWITEMSTRUCT& dis, const wchar_t* caption, But
                           HFONT font, bool hovered);
 
 void paintTimelineCanvas(HWND hwnd, const RECT& client, const rtx::NleProject& project, HFONT font);
+
+
+#if defined(_WIN32)
+// Wave 4-A: Pure GDI word-wrap flags & stateless height measurement (zero static DLL / zero new types).
+inline constexpr UINT kWrapDrawFlags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX;
+
+[[nodiscard]] inline int measureWrappedTextHeight(HDC hdc, HFONT font,
+                                                  std::wstring_view text,
+                                                  int max_width) noexcept {
+    if (!hdc || text.empty() || max_width <= 0) return 0;
+    HGDIOBJ prev = font ? rtx::sys::selectObject(hdc, font) : nullptr;
+    RECT rc{0, 0, max_width, 0};
+    rtx::sys::drawTextW(hdc, text.data(), static_cast<int>(text.size()), &rc, kWrapDrawFlags | DT_CALCRECT);
+    if (prev) rtx::sys::selectObject(hdc, prev);
+    return rc.bottom - rc.top;
+}
+#endif
+
+
+// Wave D-1 & D-2 (80_ Task D-1/D-2): Zero-UiWidgetNode stateless hit-test and
+// contract-based horizontal DAG color-space validation (+0 named struct/class types).
+[[nodiscard]] constexpr bool hitTestRect(float x, float y, float w, float h,
+                                         float mouse_x, float mouse_y) noexcept {
+    return mouse_x >= x && mouse_x <= x + w && mouse_y >= y && mouse_y <= y + h;
+}
+
+enum class DagColorContract : uint8_t {
+    SdrBt709_8Bit = 0,
+    SdrBt709_10Bit = 1,
+    HdrBt2020Pq_10Bit = 2,
+    HdrBt2020Hlg_10Bit = 3,
+};
+
+// Tuple: (node_id, node_name, input_contract, output_contract)
+using DagNodeContract = std::tuple<uint32_t, const char*, DagColorContract, DagColorContract>;
+// Tuple: (is_valid, auto_tonemap_available, conflicting_node_name)
+using DagEdgeValidation = std::tuple<bool, bool, const char*>;
+
+[[nodiscard]] constexpr DagEdgeValidation validateDagEdge(const DagNodeContract& src,
+                                                          const DagNodeContract& dst) noexcept {
+    const DagColorContract src_out = std::get<3>(src);
+    const DagColorContract dst_in  = std::get<2>(dst);
+    const char* dst_name = std::get<1>(dst) ? std::get<1>(dst) : "";
+    if (src_out == dst_in) {
+        return {true, false, ""};
+    }
+    if ((src_out == DagColorContract::HdrBt2020Pq_10Bit ||
+         src_out == DagColorContract::HdrBt2020Hlg_10Bit) &&
+        (dst_in == DagColorContract::SdrBt709_8Bit ||
+         dst_in == DagColorContract::SdrBt709_10Bit)) {
+        // Auto ToneMap (BT.2020 -> BT.709) node can be inserted without implicit color overwrite.
+        return {false, true, dst_name};
+    }
+    return {false, false, dst_name};
+}
 
 }  // namespace rtx::gui
 

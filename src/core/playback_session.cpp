@@ -93,7 +93,8 @@ Result<std::unique_ptr<MediaPlaybackSession>> MediaPlaybackSession::create(
     config.clock_rate = 90000;
     config.max_surfaces = 32;
     config.pool_slots = 16;
-    auto& [opt_fps, opt_speed, opt_ahead, opt_vram, opt_dev, opt_audio] = options;
+    auto& [opt_fps, opt_speed, opt_ahead, opt_vram, opt_dev, opt_audio, opt_null_sink, opt_gain] = options;
+    (void)opt_null_sink; (void)opt_gain;
     (void)opt_vram;
     config.device_index = opt_dev;
 

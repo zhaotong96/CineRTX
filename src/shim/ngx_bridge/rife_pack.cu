@@ -35,12 +35,19 @@ namespace {
 /* Phase 11.4 (C-06): reflect101 symmetric mirror indexing (BORDER_REFLECT_101).
  * Out-of-bounds padded pixels reflect cleanly across the border without black edges. */
 __device__ __forceinline__ int reflect101i(int idx, int limit) {
-    if (idx < limit) return idx;
-    const int mirrored = 2 * (limit - 1) - idx;
-    return (mirrored < 0) ? 0 : mirrored;
+    if (limit <= 1) return 0;
+    while (idx < 0 || idx >= limit) {
+        if (idx < 0) {
+            idx = -idx;
+        } else if (idx >= limit) {
+            idx = 2 * limit - 2 - idx;
+        }
+    }
+    return idx;
 }
 
 __device__ __forceinline__ float clamp01(float v) {
+    if (isnan(v) || isinf(v)) return 0.0f;
     return fminf(fmaxf(v, 0.0f), 1.0f);
 }
 
@@ -232,15 +239,18 @@ extern "C" __global__ void rife_nchw_3ch_fp32_to_nv12(
         (static_cast<int>(height) + py / 2) * static_cast<int>(pitch) + px;
 
     if (full_range != 0) {
-        /* BT.601 full range over 0..255. */
+        /* BT.601 full range over 0..255 (r,g,b in [0,1] -> scale by 255.0f). */
+        const float r255 = r * 255.0f;
+        const float g255 = g * 255.0f;
+        const float b255 = b * 255.0f;
         const float y_val = fminf(fmaxf(
-            0.299f * r + 0.587f * g + 0.114f * b, 0.0f), 255.0f);
+            0.299f * r255 + 0.587f * g255 + 0.114f * b255 + 0.5f, 0.0f), 255.0f);
         dst_nv12[py * static_cast<int>(pitch) + px] = static_cast<uint8_t>(y_val);
         if ((px & 1) != 0 || (py & 1) != 0) return;
         const float u_val = fminf(fmaxf(
-            128.0f - 0.168736f * r - 0.331264f * g + 0.5f * b, 0.0f), 255.0f);
+            128.5f - 0.168736f * r255 - 0.331264f * g255 + 0.5f * b255, 0.0f), 255.0f);
         const float v_val = fminf(fmaxf(
-            128.0f + 0.5f * r - 0.418688f * g - 0.081312f * b, 0.0f), 255.0f);
+            128.5f + 0.5f * r255 - 0.418688f * g255 - 0.081312f * b255, 0.0f), 255.0f);
         dst_nv12[uv_offset] = static_cast<uint8_t>(u_val);
         dst_nv12[uv_offset + 1] = static_cast<uint8_t>(v_val);
         return;

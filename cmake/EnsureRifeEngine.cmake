@@ -82,6 +82,9 @@ macro(ensure_orientation_engine _name _opt_w _opt_h)
     endif()
 endmacro()
 
-ensure_orientation_engine("rife_v4.25_landscape.engine" 1920 1152)
-ensure_orientation_engine("rife_v4.25_portrait.engine" 1152 1920)
+# Phase 13 (Wave 2-A, [DEC-011]): 4 discrete single-profile aspect-ratio buckets
+ensure_orientation_engine("rife_v4.25_ultra.engine"  2560 1088)
+ensure_orientation_engine("rife_v4.25_wide.engine"   1920 1088)
+ensure_orientation_engine("rife_v4.25_square.engine" 1472 1472)
+ensure_orientation_engine("rife_v4.25_tall.engine"   1088 1920)
 

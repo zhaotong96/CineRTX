@@ -55,11 +55,10 @@ void deinterleaveP010RowChroma(const uint16_t* src_uv, uint16_t* dst_u, uint16_t
 }
 
 const char* codecEncoderName(VideoCodec codec) noexcept {
+    // Phase 13 (Wave 0-B / 76_ & 78_ Ruling): Pure LGPL + BSD-3-Clause-Clear SVT-AV1 only (zero GPL x265/x264).
     switch (codec) {
-        case VideoCodec::AV1:  return "libsvtav1";
-        case VideoCodec::HEVC: return "libx265";
-        case VideoCodec::H264: return "libx264";
-        default:               return nullptr;
+        case VideoCodec::AV1: return "libsvtav1";
+        default:              return nullptr;
     }
 }
 
@@ -151,15 +150,19 @@ Result<CpuVideoEncoder> CpuVideoEncoder::create(
         const auto [cp, ct, cm, cr] = hdr.color; (void)cp; (void)ct; (void)cm;
         c->color_range = (cr == ColorRange::Full) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
     }
-    av_opt_set_int(c->priv_data, "crf", std::clamp(crf, 0, 51), 0);
     if (codec_id == VideoCodec::AV1) {
+        av_opt_set_int(c->priv_data, "rc", 0, 0);
+        av_opt_set_int(c->priv_data, "crf", std::clamp(crf, 0, 63), 0);
         av_opt_set_int(c->priv_data, "preset", std::clamp(preset, 1, 12), 0);
     } else if (codec_id == VideoCodec::HEVC) {
+        av_opt_set_int(c->priv_data, "crf", std::clamp(crf, 0, 51), 0);
         static constexpr const char* kX265Presets[] = {
             "ultrafast", "superfast", "veryfast", "faster", "fast",
             "medium", "slow", "slower", "veryslow", "placebo"
         };
         av_opt_set(c->priv_data, "preset", kX265Presets[std::clamp(preset, 0, 9)], 0);
+    } else {
+        av_opt_set_int(c->priv_data, "crf", std::clamp(crf, 0, 51), 0);
     }
     if (const int rc = avcodec_open2(c, codec, nullptr); rc < 0) {
         return err(ErrorCode::Internal, "avcodec_open2 failed for CPU CRF encoder", std::to_string(rc));

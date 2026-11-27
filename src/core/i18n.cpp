@@ -7,6 +7,13 @@
 
 #include "rtx/i18n.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <format>
 #include <array>
@@ -142,8 +149,8 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"120 FPS (RIFE Deep Learning - TensorRT)",                     // OptFps120Rife
         L"CQ (Constant Quality + Spatial AQ - Default)",                // OptRcCq
         L"CRF (Pure CPU Software Master)",                              // OptRcCrf
-        L"AV1 10-bit CPU (libsvtav1)",                                  // OptCodecAv1Cpu
-        L"HEVC 10-bit CPU (libx265)",                                   // OptCodecHevcCpu
+        L"AV1 10-bit CPU (SVT-AV1)",                                    // OptCodecAv1Cpu
+        L"HEVC 10-bit CPU (Reserved)",                                  // OptCodecHevcCpu
         L"Pipeline Topology",                                           // ParamPipelineOrder
         L"VSR -> FG (Upscale First - Default)",                         // OptPipeVsrFirst
         L"FG -> VSR (Interpolate First)",                               // OptPipeFgFirst
@@ -274,8 +281,8 @@ constexpr const wchar_t* kTableW[static_cast<size_t>(Language::Count)][kStrIdCou
         L"120 FPS (RIFE 深度学习 - TensorRT)",                           // OptFps120Rife
         L"CQ (恒定感知画质 + Spatial AQ - 默认)",                        // OptRcCq
         L"CRF (纯 CPU 10-bit 母版软编)",                                 // OptRcCrf
-        L"AV1 10-bit CPU (libsvtav1 软编)",                              // OptCodecAv1Cpu
-        L"HEVC 10-bit CPU (libx265 软编)",                               // OptCodecHevcCpu
+        L"AV1 10-bit CPU (SVT-AV1 软编)",                               // OptCodecAv1Cpu
+        L"HEVC 10-bit CPU (已预留)",                                    // OptCodecHevcCpu
         L"管线拓扑顺序",                                                 // ParamPipelineOrder
         L"VSR -> FG (先超分后补帧 - 默认)",                              // OptPipeVsrFirst
         L"FG -> VSR (先补帧后超分)",                                     // OptPipeFgFirst
@@ -424,7 +431,16 @@ static_assert(sizeof(kTableW[1]) / sizeof(kTableW[1][0]) == kStrIdCount,
 static_assert(sizeof(kStrIdNames) / sizeof(kStrIdNames[0]) == kStrIdCount,
               "i18n identifier table size mismatch");
 
-std::atomic<Language> g_language{Language::Zh};
+Language detectSystemLanguage() noexcept {
+#if defined(_WIN32)
+    const LANGID lang_id = GetUserDefaultUILanguage();
+    return (PRIMARYLANGID(lang_id) == LANG_CHINESE) ? Language::Zh : Language::En;
+#else
+    return Language::Zh;
+#endif
+}
+
+std::atomic<Language> g_language{detectSystemLanguage()};
 
 void appendCodePoint(std::string& out, uint32_t code_point) {
     if (code_point <= 0x7F) {
@@ -494,6 +510,7 @@ std::string escapeJsonUtf8(std::string_view input) {
 Language currentLanguage() noexcept {
     return g_language.load(std::memory_order_relaxed);
 }
+
 void setLanguage(Language language) noexcept {
     if (language == Language::En || language == Language::Zh) {
         g_language.store(language, std::memory_order_relaxed);
@@ -596,4 +613,39 @@ std::string exportI18nJson() {
     out += "  }";
     return out;
 }
+
+std::string_view formatI18nTemplate(
+    std::string_view tmpl,
+    std::span<const std::pair<std::string_view, std::string_view>> args,
+    char* out_buf,
+    size_t out_cap) noexcept {
+    if (!out_buf || out_cap == 0u) return {};
+    size_t w = 0u;
+    const size_t max_w = out_cap - 1u;
+    for (size_t i = 0u; i < tmpl.size() && w < max_w;) {
+        if (tmpl[i] == '{') {
+            const size_t close = tmpl.find('}', i + 1u);
+            if (close != std::string_view::npos) {
+                const std::string_view key = tmpl.substr(i + 1u, close - (i + 1u));
+                bool matched = false;
+                for (const auto& [k, v] : args) {
+                    if (k == key) {
+                        const size_t n = (v.size() < (max_w - w)) ? v.size() : (max_w - w);
+                        for (size_t j = 0u; j < n; ++j) out_buf[w++] = v[j];
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched) {
+                    i = close + 1u;
+                    continue;
+                }
+            }
+        }
+        out_buf[w++] = tmpl[i++];
+    }
+    out_buf[w] = '\0';
+    return std::string_view(out_buf, w);
+}
+
 }  // namespace rtx

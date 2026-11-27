@@ -18,6 +18,7 @@
 #include <fstream>
 #include <limits>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <vector>
 

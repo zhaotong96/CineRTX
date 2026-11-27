@@ -15,7 +15,7 @@
 //   * an in-memory buffer through rtx::io::MemoryAvioContext (hermetic tests).
 //
 // Every packet is also projected onto the Flicks integer timeline
-// (705,600,000 Hz) with a remainder-carrying 128-bit rescale and a strict
+// (706,305,600,000 Hz, 1001-extended) with a remainder-carrying 128-bit rescale and a strict
 // monotonicity repair, so a VFR or B-frame-reordered source can never make the
 // muxer's interleaver step backwards (W7-2).
 
@@ -38,6 +38,7 @@ extern "C" {
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
+#include <libavutil/audio_fifo.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
 #include <libavutil/mastering_display_metadata.h>
@@ -54,6 +55,219 @@ extern "C" {
 
 namespace rtx {
 namespace {
+
+// Phase 13 (Wave 1-A): Deterministic MP4 audio/subtitle compatibility matrix (wired into Demuxer/Muxer).
+[[nodiscard]] bool isMp4DirectCopyAudioCodec(AVCodecID id) noexcept {
+    return id == AV_CODEC_ID_AAC || id == AV_CODEC_ID_MP3 || id == AV_CODEC_ID_OPUS ||
+           id == AV_CODEC_ID_ALAC || id == AV_CODEC_ID_AC3 || id == AV_CODEC_ID_EAC3;
+}
+
+[[nodiscard]] bool isMp4TextSubtitleCodec(AVCodecID id) noexcept {
+    return id == AV_CODEC_ID_MOV_TEXT || id == AV_CODEC_ID_SUBRIP || id == AV_CODEC_ID_ASS ||
+           id == AV_CODEC_ID_SSA || id == AV_CODEC_ID_WEBVTT;
+}
+
+// Phase 13 (Wave B-A / 79_): Zero-new-type tuple states for MP4 non-direct-copy audio (SwrContext+AVAudioFifo->AAC-LC)
+// and text subtitle (SRT/ASS/SSA/WEBVTT -> mov_text) transcoding.
+// AudioTranscodeState: (dec_ctx, enc_ctx, swr_ctx, audio_fifo, next_pts_samples)
+using AudioTranscodeState = std::tuple<AVCodecContext*, AVCodecContext*, SwrContext*, AVAudioFifo*, int64_t>;
+// SubtitleTranscodeState: (dec_ctx, enc_ctx)
+using SubtitleTranscodeState = std::tuple<AVCodecContext*, AVCodecContext*>;
+
+[[nodiscard]] std::shared_ptr<void> createAudioAacTranscoder(const AVCodecParameters* src_par,
+                                                             AVStream* out_stream,
+                                                             std::string& diag) {
+    const AVCodec* dec = avcodec_find_decoder(src_par->codec_id);
+    if (dec == nullptr) {
+        diag = "decoder unavailable in static FFmpeg build";
+        return nullptr;
+    }
+    const AVCodec* enc = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    if (enc == nullptr) {
+        diag = "AAC encoder unavailable in static FFmpeg build";
+        return nullptr;
+    }
+    AVCodecContext* dec_ctx = avcodec_alloc_context3(dec);
+    AVCodecContext* enc_ctx = avcodec_alloc_context3(enc);
+    SwrContext* swr = nullptr;
+    AVAudioFifo* fifo = nullptr;
+    auto cleanup = [&]() noexcept {
+        if (fifo != nullptr) av_audio_fifo_free(fifo);
+        if (swr != nullptr) swr_free(&swr);
+        if (enc_ctx != nullptr) avcodec_free_context(&enc_ctx);
+        if (dec_ctx != nullptr) avcodec_free_context(&dec_ctx);
+    };
+    if (dec_ctx == nullptr || enc_ctx == nullptr) {
+        cleanup();
+        diag = "cannot allocate codec contexts";
+        return nullptr;
+    }
+    if (avcodec_parameters_to_context(dec_ctx, src_par) < 0 ||
+        avcodec_open2(dec_ctx, dec, nullptr) < 0) {
+        cleanup();
+        diag = "cannot open audio decoder";
+        return nullptr;
+    }
+    enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
+    enc_ctx->sample_rate = (dec_ctx->sample_rate > 0) ? dec_ctx->sample_rate : 48000;
+    enc_ctx->bit_rate = 192000;
+    const int ch = (dec_ctx->ch_layout.nb_channels > 0 && dec_ctx->ch_layout.nb_channels <= 2)
+                       ? dec_ctx->ch_layout.nb_channels
+                       : 2;
+    av_channel_layout_default(&enc_ctx->ch_layout, ch);
+    enc_ctx->time_base = AVRational{1, enc_ctx->sample_rate};
+    enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (avcodec_open2(enc_ctx, enc, nullptr) < 0) {
+        cleanup();
+        diag = "cannot open AAC-LC encoder";
+        return nullptr;
+    }
+    if (swr_alloc_set_opts2(&swr, &enc_ctx->ch_layout, enc_ctx->sample_fmt, enc_ctx->sample_rate,
+                            &dec_ctx->ch_layout, dec_ctx->sample_fmt,
+                            dec_ctx->sample_rate > 0 ? dec_ctx->sample_rate : 48000,
+                            0, nullptr) < 0 ||
+        swr == nullptr || swr_init(swr) < 0) {
+        cleanup();
+        diag = "cannot initialize SwrContext";
+        return nullptr;
+    }
+    const int frame_sz = (enc_ctx->frame_size > 0) ? enc_ctx->frame_size : 1024;
+    fifo = av_audio_fifo_alloc(enc_ctx->sample_fmt, enc_ctx->ch_layout.nb_channels, frame_sz * 4);
+    if (fifo == nullptr) {
+        cleanup();
+        diag = "cannot allocate AVAudioFifo";
+        return nullptr;
+    }
+    if (avcodec_parameters_from_context(out_stream->codecpar, enc_ctx) < 0) {
+        cleanup();
+        diag = "cannot copy AAC encoder parameters";
+        return nullptr;
+    }
+    out_stream->codecpar->codec_tag = 0;
+    out_stream->time_base = enc_ctx->time_base;
+    auto* state = new AudioTranscodeState{dec_ctx, enc_ctx, swr, fifo, 0LL};
+    return std::shared_ptr<void>(state, [](void* raw) noexcept {
+        auto* st = static_cast<AudioTranscodeState*>(raw);
+        if (st == nullptr) return;
+        auto& [d, e, s, f, pts] = *st;
+        (void)pts;
+        if (f != nullptr) av_audio_fifo_free(f);
+        if (s != nullptr) swr_free(&s);
+        if (e != nullptr) avcodec_free_context(&e);
+        if (d != nullptr) avcodec_free_context(&d);
+        delete st;
+    });
+}
+
+[[nodiscard]] std::shared_ptr<void> createSubtitleMovTextTranscoder(const AVCodecParameters* src_par,
+                                                                    AVStream* out_stream,
+                                                                    std::string& diag) {
+    const AVCodec* dec = avcodec_find_decoder(src_par->codec_id);
+    const AVCodec* enc = avcodec_find_encoder(AV_CODEC_ID_MOV_TEXT);
+    if (dec == nullptr || enc == nullptr) {
+        diag = "subtitle decoder or mov_text encoder unavailable";
+        return nullptr;
+    }
+    AVCodecContext* dec_ctx = avcodec_alloc_context3(dec);
+    AVCodecContext* enc_ctx = avcodec_alloc_context3(enc);
+    auto cleanup = [&]() noexcept {
+        if (enc_ctx != nullptr) avcodec_free_context(&enc_ctx);
+        if (dec_ctx != nullptr) avcodec_free_context(&dec_ctx);
+    };
+    if (dec_ctx == nullptr || enc_ctx == nullptr) {
+        cleanup();
+        diag = "cannot allocate subtitle codec contexts";
+        return nullptr;
+    }
+    if (avcodec_parameters_to_context(dec_ctx, src_par) < 0 ||
+        avcodec_open2(dec_ctx, dec, nullptr) < 0) {
+        cleanup();
+        diag = "cannot open subtitle decoder";
+        return nullptr;
+    }
+    enc_ctx->time_base = AVRational{1, 1000};
+    enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (avcodec_open2(enc_ctx, enc, nullptr) < 0) {
+        cleanup();
+        diag = "cannot open mov_text encoder";
+        return nullptr;
+    }
+    if (avcodec_parameters_from_context(out_stream->codecpar, enc_ctx) < 0) {
+        cleanup();
+        diag = "cannot copy mov_text parameters";
+        return nullptr;
+    }
+    out_stream->codecpar->codec_tag = 0;
+    out_stream->time_base = enc_ctx->time_base;
+    auto* state = new SubtitleTranscodeState{dec_ctx, enc_ctx};
+    return std::shared_ptr<void>(state, [](void* raw) noexcept {
+        auto* st = static_cast<SubtitleTranscodeState*>(raw);
+        if (st == nullptr) return;
+        auto& [d, e] = *st;
+        if (e != nullptr) avcodec_free_context(&e);
+        if (d != nullptr) avcodec_free_context(&d);
+        delete st;
+    });
+}
+
+int drainEncodedAudioPackets(AVFormatContext* format, AVStream* out_stream,
+                             AVCodecContext* enc_ctx, AVPacket* pkt,
+                             StreamTimestampGuard& guard) {
+    for (;;) {
+        av_packet_unref(pkt);
+        const int rc = avcodec_receive_packet(enc_ctx, pkt);
+        if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF) return 0;
+        if (rc < 0) return rc;
+        pkt->stream_index = out_stream->index;
+        av_packet_rescale_ts(pkt, enc_ctx->time_base, out_stream->time_base);
+        sanitizeTimestamp(guard, pkt->pts, pkt->dts, 1);
+        const int wr = av_interleaved_write_frame(format, pkt);
+        av_packet_unref(pkt);
+        if (wr < 0) return wr;
+    }
+}
+
+int encodeAudioFifoFrames(AVFormatContext* format, AVStream* out_stream,
+                          AudioTranscodeState& state, AVPacket* pkt,
+                          StreamTimestampGuard& guard, bool flush_all) {
+    auto& [dec_ctx, enc_ctx, swr, fifo, next_pts] = state;
+    (void)dec_ctx;
+    (void)swr;
+    const int frame_sz = (enc_ctx->frame_size > 0) ? enc_ctx->frame_size : 1024;
+    while (av_audio_fifo_size(fifo) >= frame_sz || (flush_all && av_audio_fifo_size(fifo) > 0)) {
+        const int n = std::min(av_audio_fifo_size(fifo), frame_sz);
+        AVFrame* out_f = av_frame_alloc();
+        if (out_f == nullptr) return AVERROR(ENOMEM);
+        out_f->nb_samples = n;
+        out_f->format = enc_ctx->sample_fmt;
+        out_f->sample_rate = enc_ctx->sample_rate;
+        av_channel_layout_copy(&out_f->ch_layout, &enc_ctx->ch_layout);
+        if (av_frame_get_buffer(out_f, 0) < 0) {
+            av_frame_free(&out_f);
+            return AVERROR(ENOMEM);
+        }
+        const int got = av_audio_fifo_read(fifo, reinterpret_cast<void**>(out_f->data), n);
+        if (got < 0) {
+            av_frame_free(&out_f);
+            return got;
+        }
+        out_f->nb_samples = got;
+        out_f->pts = next_pts;
+        next_pts += got;
+        const int send_rc = avcodec_send_frame(enc_ctx, out_f);
+        av_frame_free(&out_f);
+        if (send_rc < 0) return send_rc;
+        const int drain_rc = drainEncodedAudioPackets(format, out_stream, enc_ctx, pkt, guard);
+        if (drain_rc < 0) return drain_rc;
+    }
+    if (flush_all) {
+        const int flush_rc = avcodec_send_frame(enc_ctx, nullptr);
+        if (flush_rc < 0 && flush_rc != AVERROR_EOF) return flush_rc;
+        return drainEncodedAudioPackets(format, out_stream, enc_ctx, pkt, guard);
+    }
+    return 0;
+}
+
 
 std::string avErrorString(int error) {
     char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -486,9 +700,7 @@ Result<MediaInfo> FfmpegDemuxer::finishOpen(const std::filesystem::path& path) {
         } else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
             ++info.subtitle_streams;
             const int codec_id = static_cast<int>(st->codecpar->codec_id);
-            if (codec_id == AV_CODEC_ID_SUBRIP || codec_id == AV_CODEC_ID_ASS ||
-                codec_id == AV_CODEC_ID_SSA || codec_id == AV_CODEC_ID_WEBVTT ||
-                codec_id == AV_CODEC_ID_MOV_TEXT) {
+            if (isMp4TextSubtitleCodec(st->codecpar->codec_id)) {
                 std::shared_ptr<void> sub_opaque;
                 if (AVCodecParameters* cloned_par = avcodec_parameters_alloc(); cloned_par != nullptr) {
                     avcodec_parameters_copy(cloned_par, st->codecpar);
@@ -809,14 +1021,59 @@ Result<void> FfmpegMuxer::open(const std::filesystem::path& path, const MediaInf
         (void)ps_cid;
         if (ps_op == nullptr || ps_idx < 0) continue;
         AVCodecParameters* src_par = static_cast<AVCodecParameters*>(ps_op.get());
+        if (ps_ct == 1 && mp4_output && !isMp4DirectCopyAudioCodec(src_par->codec_id)) {
+            AVStream* out_stream = avformat_new_stream(format_, nullptr);
+            if (out_stream == nullptr) {
+                close();
+                return err(ErrorCode::Io, "cannot create AAC transcode output stream");
+            }
+            std::string tc_diag;
+            auto tc_state = createAudioAacTranscoder(src_par, out_stream, tc_diag);
+            if (tc_state != nullptr) {
+                warnings_.push_back("audio stream " + std::to_string(ps_idx) + " (" +
+                                    ps_cn + ") transcoded to AAC-LC for MP4 compatibility");
+                audio_transcoders_.push_back(
+                    std::make_tuple(ps_idx, out_stream, std::move(tc_state), makeTimestampGuard()));
+                if (ps_idx == info.primary_audio_index) {
+                    audio_stream_ = out_stream;
+                    in_audio_time_base_ = ps_tb;
+                    out_audio_time_base_ = Rational{out_stream->time_base.num, out_stream->time_base.den};
+                    audio_stream_index_ = out_stream->index;
+                    src_audio_stream_index_ = ps_idx;
+                }
+                continue;
+            }
+            warnings_.push_back("audio stream " + std::to_string(ps_idx) + " (" +
+                                ps_cn + ") transcode to AAC-LC unavailable (" + tc_diag + "); skipped");
+            continue;
+        }
         if (ps_ct == 2) {
             const int codec_id = static_cast<int>(src_par->codec_id);
-            const bool supported =
+            const bool direct_supported =
                 (matroska_output &&
                  (codec_id == AV_CODEC_ID_SUBRIP || codec_id == AV_CODEC_ID_ASS ||
                   codec_id == AV_CODEC_ID_SSA || codec_id == AV_CODEC_ID_WEBVTT)) ||
                 (mp4_output && codec_id == AV_CODEC_ID_MOV_TEXT);
-            if (!supported) {
+            if (!direct_supported && mp4_output && isMp4TextSubtitleCodec(src_par->codec_id)) {
+                AVStream* out_stream = avformat_new_stream(format_, nullptr);
+                if (out_stream == nullptr) {
+                    close();
+                    return err(ErrorCode::Io, "cannot create mov_text output stream");
+                }
+                std::string tc_diag;
+                auto sub_state = createSubtitleMovTextTranscoder(src_par, out_stream, tc_diag);
+                if (sub_state != nullptr) {
+                    warnings_.push_back("subtitle stream " + std::to_string(ps_idx) + " (" +
+                                        ps_cn + ") converted to mov_text; styling may be stripped");
+                    subtitle_transcoders_.push_back(
+                        std::make_tuple(ps_idx, out_stream, std::move(sub_state), makeTimestampGuard()));
+                    continue;
+                }
+                warnings_.push_back("subtitle stream " + std::to_string(ps_idx) + " (" +
+                                    ps_cn + ") mov_text conversion unavailable (" + tc_diag + "); dropped");
+                continue;
+            }
+            if (!direct_supported) {
                 warnings_.push_back("subtitle stream " + std::to_string(ps_idx) + " (" +
                                     ps_cn + ") is not supported by the " + container_ +
                                     " output container; dropped");
@@ -860,7 +1117,15 @@ Result<void> FfmpegMuxer::open(const std::filesystem::path& path, const MediaInf
                        path_str + ": " + avErrorString(status));
         }
     }
-    status = avformat_write_header(format_, nullptr);
+    AVDictionary* mux_opts = nullptr;
+    if ((format_->flags & AVFMT_FLAG_CUSTOM_IO) == 0 &&
+        format_->oformat && format_->oformat->name &&
+        (std::strstr(format_->oformat->name, "mp4") != nullptr ||
+         std::strstr(format_->oformat->name, "mov") != nullptr)) {
+        av_dict_set(&mux_opts, "movflags", "+faststart", 0);
+    }
+    status = avformat_write_header(format_, &mux_opts);
+    av_dict_free(&mux_opts);
     if (status < 0) {
         close();
         return err(ErrorCode::Io, "cannot write container header",
@@ -881,6 +1146,111 @@ Result<void> FfmpegMuxer::writePacket(const Packet& packet) {
     std::lock_guard<std::mutex> lock(muxer_mutex_);
     if (!opened_ || format_ == nullptr) {
         return err(ErrorCode::State, "muxer is not open");
+    }
+    for (auto& [src_index, out_stream, opaque_st, tc_guard] : audio_transcoders_) {
+        if (packet.stream_index != src_index) continue;
+        auto* state = static_cast<AudioTranscodeState*>(opaque_st.get());
+        auto& [dec_ctx, enc_ctx, swr, fifo, next_pts] = *state;
+        (void)next_pts;
+        av_packet_unref(packet_);
+        if (av_new_packet(packet_, static_cast<int>(packet.data.size())) < 0) {
+            return err(ErrorCode::OutOfMemory, "cannot allocate audio decode packet");
+        }
+        if (!packet.data.empty()) {
+            std::memcpy(packet_->data, packet.data.data(), packet.data.size());
+        }
+        packet_->pts = packet.pts;
+        packet_->dts = packet.dts;
+        const int send_rc = avcodec_send_packet(dec_ctx, packet_);
+        av_packet_unref(packet_);
+        if (send_rc < 0) {
+            return err(ErrorCode::Io, "audio decode send_packet failed", avErrorString(send_rc));
+        }
+        AVFrame* dec_frame = av_frame_alloc();
+        if (dec_frame == nullptr) return err(ErrorCode::OutOfMemory, "cannot allocate audio frame");
+        while (avcodec_receive_frame(dec_ctx, dec_frame) == 0) {
+            const int out_samples = static_cast<int>(av_rescale_rnd(
+                swr_get_delay(swr, dec_ctx->sample_rate > 0 ? dec_ctx->sample_rate : 48000) +
+                    dec_frame->nb_samples,
+                enc_ctx->sample_rate,
+                dec_ctx->sample_rate > 0 ? dec_ctx->sample_rate : 48000,
+                AV_ROUND_UP));
+            uint8_t** conv_data = nullptr;
+            if (av_samples_alloc_array_and_samples(&conv_data, nullptr,
+                                                   enc_ctx->ch_layout.nb_channels,
+                                                   std::max(1, out_samples),
+                                                   enc_ctx->sample_fmt, 0) < 0) {
+                av_frame_free(&dec_frame);
+                return err(ErrorCode::OutOfMemory, "cannot allocate resampled audio buffer");
+            }
+            const int converted = swr_convert(swr, conv_data, std::max(1, out_samples),
+                                              const_cast<const uint8_t**>(dec_frame->extended_data),
+                                              dec_frame->nb_samples);
+            if (converted > 0) {
+                const int need = av_audio_fifo_size(fifo) + converted;
+                if (av_audio_fifo_realloc(fifo, need) >= 0) {
+                    (void)av_audio_fifo_write(fifo, reinterpret_cast<void**>(conv_data), converted);
+                }
+            }
+            av_freep(&conv_data[0]);
+            av_freep(&conv_data);
+            av_frame_unref(dec_frame);
+            const int enc_rc = encodeAudioFifoFrames(format_, out_stream, *state, packet_, tc_guard, false);
+            if (enc_rc < 0) {
+                av_frame_free(&dec_frame);
+                return err(ErrorCode::Io, "AAC-LC encode failed", avErrorString(enc_rc));
+            }
+        }
+        av_frame_free(&dec_frame);
+        return {};
+    }
+    for (auto& [src_index, out_stream, opaque_st, sub_guard] : subtitle_transcoders_) {
+        if (packet.stream_index != src_index) continue;
+        auto* state = static_cast<SubtitleTranscodeState*>(opaque_st.get());
+        auto& [dec_ctx, enc_ctx] = *state;
+        AVPacket* in_pkt = av_packet_alloc();
+        if (in_pkt == nullptr) return err(ErrorCode::OutOfMemory, "cannot allocate subtitle packet");
+        if (av_new_packet(in_pkt, static_cast<int>(packet.data.size())) < 0) {
+            av_packet_free(&in_pkt);
+            return err(ErrorCode::OutOfMemory, "cannot fill subtitle packet");
+        }
+        if (!packet.data.empty()) std::memcpy(in_pkt->data, packet.data.data(), packet.data.size());
+        in_pkt->pts = packet.pts;
+        in_pkt->dts = packet.dts;
+        in_pkt->duration = packet.duration;
+        AVSubtitle sub{};
+        int got_sub = 0;
+        const int dec_rc = avcodec_decode_subtitle2(dec_ctx, &sub, &got_sub, in_pkt);
+        av_packet_free(&in_pkt);
+        if (dec_rc < 0 || !got_sub) {
+            if (got_sub) avsubtitle_free(&sub);
+            return {};
+        }
+        std::unique_ptr<AVSubtitle, decltype([](AVSubtitle* s) noexcept { avsubtitle_free(s); })>
+            sub_owner(&sub);
+        std::vector<uint8_t> out_buf(65536u, 0);
+        const int enc_len = avcodec_encode_subtitle(enc_ctx, out_buf.data(),
+                                                    static_cast<int>(out_buf.size()), &sub);
+        if (enc_len <= 0) return {};
+        av_packet_unref(packet_);
+        if (av_new_packet(packet_, enc_len) < 0) {
+            return err(ErrorCode::OutOfMemory, "cannot allocate mov_text packet");
+        }
+        std::memcpy(packet_->data, out_buf.data(), static_cast<size_t>(enc_len));
+        packet_->stream_index = out_stream->index;
+        const AVRational src_tb{
+            packet.time_base.num > 0 ? static_cast<int>(packet.time_base.num) : 1,
+            packet.time_base.den > 0 ? static_cast<int>(packet.time_base.den) : 1000};
+        packet_->pts = av_rescale_q(packet.pts, src_tb, out_stream->time_base);
+        packet_->dts = av_rescale_q(packet.dts, src_tb, out_stream->time_base);
+        packet_->duration = av_rescale_q(packet.duration, src_tb, out_stream->time_base);
+        sanitizeTimestamp(sub_guard, packet_->pts, packet_->dts, 1);
+        const int wr = av_interleaved_write_frame(format_, packet_);
+        av_packet_unref(packet_);
+        if (wr < 0) {
+            return err(ErrorCode::Io, "cannot write mov_text subtitle packet", avErrorString(wr));
+        }
+        return {};
     }
     for (auto& [src_index, out_stream, pt_guard] : passthrough_streams_) {
         if (packet.stream_index != src_index) {
@@ -969,6 +1339,11 @@ Result<void> FfmpegMuxer::writePacket(const Packet& packet) {
 Result<void> FfmpegMuxer::finalize() {
     Result<void> result;
     if (format_ != nullptr && opened_) {
+        for (auto& [src_index, out_stream, opaque_st, tc_guard] : audio_transcoders_) {
+            (void)src_index;
+            auto* state = static_cast<AudioTranscodeState*>(opaque_st.get());
+            (void)encodeAudioFifoFrames(format_, out_stream, *state, packet_, tc_guard, true);
+        }
         const int status = av_write_trailer(format_);
         if (status < 0) {
             result = err(ErrorCode::Io, "cannot finalise container",
@@ -1053,6 +1428,8 @@ void FfmpegMuxer::close() noexcept {
     audio_stream_ = nullptr;
     audio_stream_index_ = -1;
     src_audio_stream_index_ = -1;
+    audio_transcoders_.clear();
+    subtitle_transcoders_.clear();
     passthrough_streams_.clear();
     resetTimestampGuard(video_guard_);
     warnings_.clear();
@@ -1070,6 +1447,23 @@ std::unique_ptr<FfmpegDemuxer> makeMemoryDemuxer(std::vector<uint8_t> bytes) {
 std::unique_ptr<FfmpegMuxer> makeMemoryMuxer(std::vector<uint8_t>* output,
                                              std::string container_format) {
     return std::make_unique<FfmpegMuxer>(output, std::move(container_format));
+}
+
+
+std::string buildSafeConcatList(const std::vector<std::filesystem::path>& inputs) {
+    std::string out = "ffconcat version 1.0\n";
+    for (const auto& p : inputs) {
+        const auto u8 = p.u8string();
+        std::string s(reinterpret_cast<const char*>(u8.data()), u8.size());
+        std::string escaped;
+        escaped.reserve(s.size() + 8u);
+        for (char c : s) {
+            if (c == '\'') escaped += "'\\''";
+            else escaped.push_back(c);
+        }
+        out += "file '" + escaped + "'\n";
+    }
+    return out;
 }
 
 }  // namespace rtx

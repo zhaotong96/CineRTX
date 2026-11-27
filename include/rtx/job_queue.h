@@ -9,10 +9,12 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "rtx/hw_transcode.h"
@@ -20,6 +22,11 @@
 #include "rtx/status.h"
 
 namespace rtx {
+
+enum class JobOutputMode : uint8_t {
+    BatchSeparate = 0,  // Independent .mp4 per input
+    MergeConcat   = 1,  // Seamless single-.mp4 concat/merge
+};
 
 enum class JobStatus : uint8_t {
     Pending   = 0,  // Queued; profile and file list are freely editable
@@ -61,6 +68,7 @@ using EncoderJob = std::tuple<
 }
 [[nodiscard]] std::string formatEncoderJobSummary(const EncoderJob& job);
 [[nodiscard]] std::string encoderJobToJson(const EncoderJob& job);
+[[nodiscard]] bool areConcatInputsHomogeneous(std::span<const std::filesystem::path> inputs);
 
 enum class JobQueueEventKind : uint8_t {
     JobAdded,
@@ -108,6 +116,17 @@ public:
     void clearNonRunningJobs(bool completed_only = false);
     [[nodiscard]] Result<void> retryJob(uint64_t job_id);
 
+    // Phase 13 (Wave 3-B): Thread-safe Pending-only input mutation & output mode (0 new named types)
+    [[nodiscard]] Result<void> setJobOutputMode(uint64_t job_id, JobOutputMode mode);
+    [[nodiscard]] JobOutputMode jobOutputMode(uint64_t job_id) const;
+    [[nodiscard]] Result<void> addJobInputs(uint64_t job_id, std::vector<std::filesystem::path> extra_inputs);
+    [[nodiscard]] Result<void> removeJobInput(uint64_t job_id, size_t index);
+    [[nodiscard]] Result<void> moveJobInput(uint64_t job_id, size_t from_index, size_t to_index);
+
+    // Phase 13 (Wave 4-B): Transcode preview compute gate (bypass preview readback when disabled)
+    void setPreviewEnabled(bool enabled) noexcept { preview_enabled_.store(enabled, std::memory_order_relaxed); }
+    [[nodiscard]] bool isPreviewEnabled() const noexcept { return preview_enabled_.load(std::memory_order_relaxed); }
+
     void startWorker();
     void skipCurrentJob();
     void stopQueue(bool wait_for_idle = true);
@@ -139,6 +158,8 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<EncoderJob> jobs_;
+    std::unordered_map<uint64_t, JobOutputMode> job_modes_;
+    std::atomic<bool> preview_enabled_{true};
     uint64_t next_job_id_ = 1;
 
     std::atomic<bool> worker_active_{false};
